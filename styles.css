@@ -2340,7 +2340,7 @@ tr:last-child td {
 }
 
 .group-report-top-grid {
-  grid-template-columns: 360px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -2425,7 +2425,7 @@ tr:last-child td {
 
 @media (max-width: 1180px) {
   .group-report-top-grid {
-    grid-template-columns: 300px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
   .group-report-compact-table th,

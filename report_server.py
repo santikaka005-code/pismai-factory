@@ -1,0 +1,2573 @@
+from __future__ import annotations
+
+import json
+import math
+import mimetypes
+import os
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as ExcelImage
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    Image,
+    KeepTogether,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
+HOST = os.environ.get("HOST") or ("0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
+PORT = int(os.environ.get("PORT", "8787"))
+BASE_DIR = Path(__file__).parent
+DATA_FILE = Path(__file__).with_name("report_data.json")
+COMPANY_NAME = "Pitsamai Frozen Fruits Co., Ltd."
+SYSTEM_NAME = "SystemPro by Pitsamai Frozen Fruits"
+BRAND_GREEN = "#0F7A3D"
+THAI_FONT = "Helvetica"
+THAI_FONT_BOLD = "Helvetica-Bold"
+
+
+def register_thai_font() -> str:
+    regular_paths = [
+        BASE_DIR / "fonts" / "Sarabun-Regular.ttf",
+        BASE_DIR / "fonts" / "NotoSansThai-Regular.ttf",
+        BASE_DIR / "fonts" / "NotoSansThai.ttf",
+        Path("C:/Windows/Fonts/Sarabun-Regular.ttf"),
+        Path("C:/Windows/Fonts/THSarabunNew.ttf"),
+        Path("C:/Windows/Fonts/tahoma.ttf"),
+        Path("C:/Windows/Fonts/arial.ttf"),
+        Path("C:/Windows/Fonts/leelawui.ttf"),
+    ]
+    bold_paths = [
+        BASE_DIR / "fonts" / "Sarabun-Bold.ttf",
+        BASE_DIR / "fonts" / "NotoSansThai-Bold.ttf",
+        Path("C:/Windows/Fonts/Sarabun-Bold.ttf"),
+        Path("C:/Windows/Fonts/THSarabunNew Bold.ttf"),
+        Path("C:/Windows/Fonts/tahomabd.ttf"),
+        Path("C:/Windows/Fonts/arialbd.ttf"),
+        Path("C:/Windows/Fonts/leelauib.ttf"),
+    ]
+    registered_regular = ""
+    for font_path in regular_paths:
+        if font_path.exists():
+            try:
+                pdfmetrics.registerFont(TTFont("ThaiFont", str(font_path)))
+                registered_regular = "ThaiFont"
+                break
+            except Exception:
+                continue
+    for font_path in bold_paths:
+        if font_path.exists():
+            try:
+                pdfmetrics.registerFont(TTFont("ThaiFontBold", str(font_path)))
+                globals()["THAI_FONT_BOLD"] = "ThaiFontBold"
+                break
+            except Exception:
+                continue
+    if registered_regular:
+        return registered_regular
+    return "Helvetica"
+
+
+THAI_FONT = register_thai_font()
+
+
+def load_data() -> dict:
+    if not DATA_FILE.exists():
+        return {"employees": [], "production_records": []}
+    return json.loads(DATA_FILE.read_text(encoding="utf-8"))
+
+
+def save_data(data: dict) -> None:
+    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def find_employee(data: dict, employee_id: int) -> dict | None:
+    return next(
+        (employee for employee in data.get("employees", []) if employee.get("id") == employee_id),
+        None,
+    )
+
+
+def employee_records(data: dict, date: str, employee_id: int) -> list[dict]:
+    return [
+        record
+        for record in data.get("production_records", [])
+        if (record.get("record_date") or record.get("date")) == date
+        and record.get("employee_id") == employee_id
+    ]
+
+
+def employee_range_records(
+    data: dict,
+    start_date: str,
+    end_date: str,
+    employee_id: int,
+) -> list[dict]:
+    start, end = sorted([start_date, end_date])
+    return sorted(
+        [
+            record
+            for record in data.get("production_records", [])
+            if record.get("employee_id") == employee_id
+            and start <= (record.get("record_date") or record.get("date") or "") <= end
+        ],
+        key=lambda record: (
+            record.get("record_date") or record.get("date") or "",
+            record.get("record_time", ""),
+        ),
+    )
+
+
+def employee_daily_summaries(records: list[dict]) -> list[dict]:
+    summaries: dict[str, dict] = {}
+    for record in records:
+        record_date = record.get("record_date") or record.get("date") or ""
+        water_weight = float(record.get("water_weight", 0) or 0)
+        flower_weight = float(record.get("flower_weight", 0) or 0)
+        total_amount = float(record.get("total_amount", 0) or 0)
+        summary = summaries.setdefault(
+            record_date,
+            {
+                "date": record_date,
+                "water_weight": 0.0,
+                "flower_weight": 0.0,
+                "total_amount": 0.0,
+            },
+        )
+        summary["water_weight"] += water_weight
+        summary["flower_weight"] += flower_weight
+        summary["total_amount"] += total_amount
+
+    return [summaries[date] for date in sorted(summaries)]
+
+
+def daily_records(data: dict, date: str) -> list[dict]:
+    return [
+        record
+        for record in data.get("production_records", [])
+        if (record.get("record_date") or record.get("date")) == date
+    ]
+
+
+def range_records(
+    data: dict,
+    start_date: str,
+    end_date: str,
+    product: str = "all",
+) -> list[dict]:
+    start, end = sorted([start_date, end_date])
+    product_key = (product or "all").strip()
+    records = []
+    for record in data.get("production_records", []):
+        record_date = record.get("record_date") or record.get("date") or ""
+        if not (start <= record_date <= end):
+            continue
+        if product_key != "all" and (record.get("fruit_type") or "mangosteen") != product_key:
+            continue
+        records.append(record)
+    return records
+
+
+def pile_summary_rows(records: list[dict]) -> list[dict]:
+    summaries: dict[str, dict] = {}
+    for record in records:
+        pile = str(record.get("pile_no") or record.get("pile") or "-")
+        incoming = float(record.get("water_weight", record.get("water", 0)) or 0)
+        outgoing = float(record.get("flower_weight", record.get("flower", 0)) or 0)
+        amount = float(record.get("total_amount", record.get("grand_total", 0)) or 0)
+        summary = summaries.setdefault(
+            pile,
+            {
+                "pile": pile,
+                "incoming": 0.0,
+                "outgoing": 0.0,
+                "balance": 0.0,
+                "amount": 0.0,
+            },
+        )
+        summary["incoming"] += incoming
+        summary["outgoing"] += outgoing
+        summary["balance"] += incoming - outgoing
+        summary["amount"] += amount
+
+    def sort_key(item: dict) -> tuple[int, str]:
+        pile = str(item["pile"])
+        return (0, f"{int(pile):08d}") if pile.isdigit() else (1, pile)
+
+    return sorted(summaries.values(), key=sort_key)
+
+
+def summary_totals(rows: list[dict]) -> dict:
+    return {
+        "incoming": sum(row["incoming"] for row in rows),
+        "outgoing": sum(row["outgoing"] for row in rows),
+        "balance": sum(row["balance"] for row in rows),
+        "amount": sum(row["amount"] for row in rows),
+    }
+
+
+def format_report_date(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).strftime("%d/%m/%Y")
+    except ValueError:
+        return value or "-"
+
+
+def format_report_datetime(value: datetime) -> tuple[str, str]:
+    return value.strftime("%d/%m/%Y"), value.strftime("%H:%M:%S")
+
+
+def clean_filename_date(value: str) -> str:
+    return value or datetime.now().date().isoformat()
+
+
+def money(value: float | int | str | None) -> str:
+    try:
+        return f"{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "0.00"
+
+
+def number(value: float | int | str | None) -> str:
+    try:
+        return f"{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "0.00"
+
+
+def build_employee_story(data: dict, date: str, employee: dict) -> list:
+    styles = getSampleStyleSheet()
+    records = employee_records(data, date, int(employee["id"]))
+    total_water = sum(float(record.get("water_weight", 0)) for record in records)
+    total_flower = sum(float(record.get("flower_weight", 0)) for record in records)
+    total_amount = sum(float(record.get("total_amount", 0)) for record in records)
+    recorder = records[-1].get("created_by", "-") if records else "-"
+
+    story = [
+        Paragraph(COMPANY_NAME, styles["Title"]),
+        Paragraph("Employee Daily Production Wage Report", styles["Heading2"]),
+        Spacer(1, 5 * mm),
+        Paragraph(f"Date: {date}", styles["Normal"]),
+        Paragraph(f"Employee Code: {employee.get('emp_code', '-')}", styles["Normal"]),
+        Paragraph(f"Employee Fullname: {employee.get('fullname', '-')}", styles["Normal"]),
+        Spacer(1, 5 * mm),
+    ]
+
+    rows = [
+        [
+            "Pile",
+            "Water Weight",
+            "Flower Weight",
+            "Water Rate",
+            "Flower Rate",
+            "Water Amount",
+            "Flower Amount",
+            "Total Weight",
+            "Total Amount",
+        ]
+    ]
+
+    for record in sorted(records, key=lambda item: (item.get("pile_no", 0), item.get("record_time", ""))):
+        water_weight = float(record.get("water_weight", 0))
+        flower_weight = float(record.get("flower_weight", 0))
+        rows.append(
+            [
+                record.get("pile_no", ""),
+                number(water_weight),
+                number(flower_weight),
+                money(record.get("water_rate")),
+                money(record.get("flower_rate")),
+                money(record.get("water_amount")),
+                money(record.get("flower_amount")),
+                number(water_weight + flower_weight),
+                money(record.get("total_amount")),
+            ]
+        )
+
+    if len(rows) == 1:
+        rows.append(["-", "0.00", "0.00", "-", "-", "0.00", "0.00", "0.00", "0.00"])
+
+    rows.append(
+        [
+            "Total",
+            number(total_water),
+            number(total_flower),
+            "",
+            "",
+            "",
+            "",
+            number(total_water + total_flower),
+            money(total_amount),
+        ]
+    )
+
+    table = Table(rows, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E6F4F1")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F7FAFC")),
+            ]
+        )
+    )
+
+    story.extend(
+        [
+            table,
+            Spacer(1, 6 * mm),
+            Paragraph(f"Recorder: {recorder}", styles["Normal"]),
+            Spacer(1, 14 * mm),
+            Table(
+                [
+                    [
+                        "Inspector Signature: ______________________________",
+                        "Employee Signature: ______________________________",
+                    ]
+                ],
+                colWidths=[130 * mm, 130 * mm],
+            ),
+        ]
+    )
+    return story
+
+
+def build_pdf(data: dict, date: str, employee_ids: list[int]) -> bytes:
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=12 * mm,
+        rightMargin=12 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
+    )
+    story = []
+
+    for index, employee_id in enumerate(employee_ids):
+        employee = find_employee(data, employee_id)
+        if not employee:
+            continue
+        if index:
+            story.append(PageBreak())
+        story.extend(build_employee_story(data, date, employee))
+
+    if not story:
+        styles = getSampleStyleSheet()
+        story = [
+            Paragraph(COMPANY_NAME, styles["Title"]),
+            Paragraph("No employee report data found.", styles["Heading2"]),
+        ]
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def build_employee_range_pdf(
+    data: dict,
+    start_date: str,
+    end_date: str,
+    employee_id: int,
+) -> bytes:
+    employee = find_employee(data, employee_id)
+    records = employee_range_records(data, start_date, end_date, employee_id)
+    daily_summaries = employee_daily_summaries(records)
+    total_water = sum(summary["water_weight"] for summary in daily_summaries)
+    total_flower = sum(summary["flower_weight"] for summary in daily_summaries)
+    total_amount = sum(summary["total_amount"] for summary in daily_summaries)
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=12 * mm,
+        rightMargin=12 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
+    )
+    styles = getSampleStyleSheet()
+    for style_name in ["Title", "Heading2", "Normal"]:
+        styles[style_name].fontName = THAI_FONT
+    story = [
+        Paragraph(COMPANY_NAME, styles["Title"]),
+        Paragraph("รายงานสรุปรายบุคคล", styles["Heading2"]),
+        Spacer(1, 5 * mm),
+        Paragraph(
+            f"ชื่อ: {employee.get('emp_code', '-') if employee else '-'} - "
+            f"{employee.get('fullname', '-') if employee else '-'}",
+            styles["Normal"],
+        ),
+        Paragraph(f"ช่วงวันที่: {start_date} ถึง {end_date}", styles["Normal"]),
+        Spacer(1, 5 * mm),
+    ]
+
+    rows = [
+        [
+            "วันที่",
+            "น้ำหนักดอก",
+            "น้ำหนักน้ำ",
+            "รวมเป็นเงิน",
+        ]
+    ]
+
+    for summary in daily_summaries:
+        rows.append(
+            [
+                summary["date"],
+                number(summary["flower_weight"]),
+                number(summary["water_weight"]),
+                money(summary["total_amount"]),
+            ]
+        )
+
+    if len(rows) == 1:
+        rows.append(["-", "0.00", "0.00", "0.00"])
+
+    rows.append(
+        [
+            "รวม",
+            number(total_flower),
+            number(total_water),
+            money(total_amount),
+        ]
+    )
+
+    table = Table(rows, repeatRows=1, colWidths=[55 * mm, 55 * mm, 55 * mm, 65 * mm])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E6F4F1")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+                ("FONTNAME", (0, 0), (-1, -1), THAI_FONT),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F7FAFC")),
+            ]
+        )
+    )
+
+    story.append(table)
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def build_daily_excel(data: dict, date: str) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Daily Production"
+
+    title = f"{COMPANY_NAME} - Daily Production Wage Report"
+    sheet["A1"] = title
+    sheet["A2"] = f"Date: {date}"
+    sheet["A1"].font = Font(bold=True, size=14)
+    sheet["A2"].font = Font(bold=True)
+
+    headers = [
+        "ID",
+        "Date",
+        "Time",
+        "Employee Code",
+        "Employee Fullname",
+        "Pile",
+        "Water Weight",
+        "Flower Weight",
+        "Water Rate",
+        "Flower Rate",
+        "Water Amount",
+        "Flower Amount",
+        "Total Weight",
+        "Total Amount",
+        "Recorder",
+        "Status",
+    ]
+    sheet.append([])
+    sheet.append(headers)
+    header_row = 4
+
+    employee_by_id = {employee["id"]: employee for employee in data.get("employees", [])}
+
+    for record in sorted(daily_records(data, date), key=lambda item: (item.get("emp_code", ""), item.get("record_time", ""))):
+        employee = employee_by_id.get(record.get("employee_id"), {})
+        water_weight = float(record.get("water_weight", 0))
+        flower_weight = float(record.get("flower_weight", 0))
+        sheet.append(
+            [
+                record.get("id"),
+                record.get("record_date"),
+                record.get("record_time"),
+                record.get("emp_code"),
+                employee.get("fullname", ""),
+                record.get("pile_no"),
+                water_weight,
+                flower_weight,
+                record.get("water_rate"),
+                record.get("flower_rate"),
+                record.get("water_amount"),
+                record.get("flower_amount"),
+                water_weight + flower_weight,
+                record.get("total_amount"),
+                record.get("created_by"),
+                record.get("status"),
+            ]
+        )
+
+    for cell in sheet[header_row]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="E6F4F1")
+        cell.alignment = Alignment(horizontal="center")
+
+    for row in sheet.iter_rows(min_row=header_row + 1):
+        for cell in row:
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
+
+    for column_cells in sheet.columns:
+        max_length = max(len(str(cell.value or "")) for cell in column_cells)
+        sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(max_length + 3, 28)
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def build_employee_range_excel(
+    data: dict,
+    start_date: str,
+    end_date: str,
+    employee_id: int,
+) -> bytes:
+    employee = find_employee(data, employee_id) or {}
+    records = employee_range_records(data, start_date, end_date, employee_id)
+    daily_summaries = employee_daily_summaries(records)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "สรุปรายบุคคล"
+
+    sheet["A1"] = f"{COMPANY_NAME} - รายงานสรุปรายบุคคล"
+    sheet["A2"] = f"ชื่อ: {employee.get('emp_code', '-')} - {employee.get('fullname', '-')}"
+    sheet["A3"] = f"ช่วงวันที่: {start_date} ถึง {end_date}"
+    for cell_ref in ["A1", "A2", "A3"]:
+        sheet[cell_ref].font = Font(bold=True, size=14 if cell_ref == "A1" else 11)
+
+    headers = [
+        "วันที่",
+        "น้ำหนักดอก",
+        "น้ำหนักน้ำ",
+        "รวมเป็นเงิน",
+    ]
+    sheet.append([])
+    sheet.append(headers)
+    header_row = 5
+
+    for summary in daily_summaries:
+        sheet.append(
+            [
+                summary["date"],
+                summary["flower_weight"],
+                summary["water_weight"],
+                summary["total_amount"],
+            ]
+        )
+
+    total_row = sheet.max_row + 1
+    sheet.cell(total_row, 1, "รวม")
+    sheet.cell(total_row, 2, sum(summary["flower_weight"] for summary in daily_summaries))
+    sheet.cell(total_row, 3, sum(summary["water_weight"] for summary in daily_summaries))
+    sheet.cell(total_row, 4, sum(summary["total_amount"] for summary in daily_summaries))
+
+    for cell in sheet[header_row]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="E6F4F1")
+        cell.alignment = Alignment(horizontal="center")
+
+    for cell in sheet[total_row]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="F7FAFC")
+
+    for row in sheet.iter_rows(min_row=header_row + 1):
+        for cell in row:
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
+
+    for column_cells in sheet.columns:
+        max_length = max(len(str(cell.value or "")) for cell in column_cells)
+        sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(max_length + 3, 30)
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+class NumberedCanvas(canvas.Canvas):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_page_states = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        page_count = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.draw_page_footer(page_count)
+            super().showPage()
+        super().save()
+
+    def draw_page_footer(self, page_count: int):
+        width, _ = A4
+        page_number = self._pageNumber
+        self.setStrokeColor(colors.HexColor(BRAND_GREEN))
+        self.setLineWidth(0.6)
+        self.line(15 * mm, 24 * mm, width - 15 * mm, 24 * mm)
+        self.setFont(THAI_FONT_BOLD, 9)
+        self.setFillColor(colors.HexColor(BRAND_GREEN))
+        self.drawString(16 * mm, 16 * mm, COMPANY_NAME)
+        self.setFont(THAI_FONT, 8)
+        self.setFillColor(colors.HexColor("#111827"))
+        self.drawString(16 * mm, 11 * mm, SYSTEM_NAME)
+        self.setFont(THAI_FONT, 9)
+        self.drawRightString(width - 16 * mm, 13 * mm, f"Page {page_number} / {page_count}")
+
+
+def report_number(value: float | int | str | None, digits: int = 2) -> str:
+    try:
+        numeric = float(value or 0)
+    except (TypeError, ValueError):
+        numeric = 0.0
+    text = f"{numeric:,.{digits}f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def build_summary_by_pile_pdf(data: dict, payload: dict) -> bytes:
+    now = datetime.now()
+    start_date = payload.get("start_date", now.date().isoformat())
+    end_date = payload.get("end_date", start_date)
+    product = payload.get("product", "all")
+    product_label = payload.get("product_label") or "ทั้งหมด"
+    product_type = payload.get("product_type") or "ทั้งหมด"
+    printed_by = payload.get("printed_by") or "System Admin"
+    print_date, print_time = format_report_datetime(now)
+    rows = pile_summary_rows(range_records(data, start_date, end_date, product))
+    totals = summary_totals(rows)
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=14 * mm,
+        bottomMargin=30 * mm,
+    )
+    styles = getSampleStyleSheet()
+    for style_name in ["Title", "Heading1", "Heading2", "Normal"]:
+        styles[style_name].fontName = THAI_FONT
+    title_style = styles["Title"].clone("SummaryReportTitle")
+    title_style.fontName = THAI_FONT_BOLD
+    title_style.fontSize = 17
+    title_style.leading = 21
+    title_style.textColor = colors.HexColor(BRAND_GREEN)
+    title_style.spaceAfter = 2
+    subtitle_style = styles["Normal"].clone("SummaryReportSubtitle")
+    subtitle_style.fontSize = 10
+    subtitle_style.leading = 13
+    section_style = styles["Heading2"].clone("SummaryReportSection")
+    section_style.fontName = THAI_FONT_BOLD
+    section_style.fontSize = 13
+    section_style.textColor = colors.HexColor(BRAND_GREEN)
+    section_style.spaceAfter = 6
+
+    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    logo = Image(str(logo_path), width=22 * mm, height=22 * mm) if logo_path.exists() else Paragraph("SP", title_style)
+    title_block = [
+        Paragraph(COMPANY_NAME, subtitle_style),
+        Paragraph("รายงานสรุปน้ำหนักตามกอง", title_style),
+    ]
+    meta_rows = [
+        ["ช่วงวันที่", f"{format_report_date(start_date)} - {format_report_date(end_date)}"],
+        ["สินค้า", product_label],
+        ["ประเภทสินค้า", product_type],
+        ["ผู้พิมพ์", printed_by],
+        ["วันที่พิมพ์", print_date],
+        ["เวลา", print_time],
+    ]
+    meta_table = Table(meta_rows, colWidths=[23 * mm, 37 * mm])
+    meta_table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), THAI_FONT),
+                ("FONTNAME", (0, 0), (0, -1), THAI_FONT_BOLD),
+                ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+                ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#111827")),
+                ("ALIGN", (0, 0), (0, -1), "LEFT"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 1),
+            ]
+        )
+    )
+    header = Table([[logo, title_block, meta_table]], colWidths=[24 * mm, 96 * mm, 60 * mm])
+    header.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    green_line = Table([[""]], colWidths=[180 * mm], rowHeights=[1.1 * mm])
+    green_line.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(BRAND_GREEN))]))
+
+    table_rows = [["กอง", "น้ำหนักเข้า (ตัน)", "น้ำหนักออก (ตัน)", "น้ำหนักคงเหลือ", "รวมเงิน"]]
+    for item in rows:
+        table_rows.append(
+            [
+                f"กอง {item['pile']}",
+                report_number(item["incoming"]),
+                report_number(item["outgoing"]),
+                report_number(item["balance"]),
+                report_number(item["amount"], 0),
+            ]
+        )
+    if len(table_rows) == 1:
+        table_rows.append(["-", "0", "0", "0", "0"])
+    table_rows.append(
+        [
+            "รวมทั้งหมด",
+            report_number(totals["incoming"]),
+            report_number(totals["outgoing"]),
+            report_number(totals["balance"]),
+            report_number(totals["amount"], 0),
+        ]
+    )
+
+    summary_table = Table(
+        table_rows,
+        repeatRows=1,
+        colWidths=[36 * mm, 36 * mm, 36 * mm, 36 * mm, 36 * mm],
+        hAlign="LEFT",
+    )
+    table_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(BRAND_GREEN)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), THAI_FONT_BOLD),
+        ("FONTNAME", (0, 1), (-1, -1), THAI_FONT),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CDD6DF")),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E9F5EE")),
+        ("FONTNAME", (0, -1), (-1, -1), THAI_FONT_BOLD),
+        ("TEXTCOLOR", (0, -1), (-1, -1), colors.HexColor("#064E25")),
+    ]
+    for row_index in range(1, len(table_rows) - 1):
+        if row_index % 2 == 0:
+            table_style.append(("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor("#F7FAF8")))
+    summary_table.setStyle(TableStyle(table_style))
+
+    note_box = Table(
+        [[Paragraph("<b>หมายเหตุ</b><br/>หน่วยน้ำหนัก : ตัน", styles["Normal"])]],
+        colWidths=[180 * mm],
+    )
+    note_box.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), THAI_FONT),
+                ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#CDD6DF")),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFFFFF")),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ]
+        )
+    )
+
+    story = [
+        header,
+        Spacer(1, 6 * mm),
+        green_line,
+        Spacer(1, 10 * mm),
+        Paragraph("สรุปตามกอง (ตัน)", section_style),
+        KeepTogether([summary_table, Spacer(1, 8 * mm), note_box]),
+    ]
+    doc.build(story, canvasmaker=NumberedCanvas)
+    return buffer.getvalue()
+
+
+def build_summary_by_pile_excel(data: dict, payload: dict) -> bytes:
+    now = datetime.now()
+    start_date = payload.get("start_date", now.date().isoformat())
+    end_date = payload.get("end_date", start_date)
+    product = payload.get("product", "all")
+    product_label = payload.get("product_label") or "ทั้งหมด"
+    product_type = payload.get("product_type") or "ทั้งหมด"
+    printed_by = payload.get("printed_by") or "System Admin"
+    print_date, print_time = format_report_datetime(now)
+    rows = pile_summary_rows(range_records(data, start_date, end_date, product))
+    totals = summary_totals(rows)
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Summary By Pile"
+    sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+    sheet.page_setup.orientation = "portrait"
+    sheet.page_margins.left = 0.45
+    sheet.page_margins.right = 0.45
+    sheet.page_margins.top = 0.55
+    sheet.page_margins.bottom = 0.55
+
+    green_fill = PatternFill("solid", fgColor="0F7A3D")
+    light_green_fill = PatternFill("solid", fgColor="E9F5EE")
+    zebra_fill = PatternFill("solid", fgColor="F7FAF8")
+    thin_green = Side(style="thin", color="0F7A3D")
+    thin_gray = Side(style="thin", color="CDD6DF")
+    table_border = Border(left=thin_gray, right=thin_gray, top=thin_gray, bottom=thin_gray)
+    sarabun = "Sarabun"
+
+    sheet.merge_cells("A1:E1")
+    sheet["A1"] = COMPANY_NAME
+    sheet["A1"].font = Font(name=sarabun, bold=True, size=11, color="0F7A3D")
+    sheet.merge_cells("A2:E2")
+    sheet["A2"] = "รายงานสรุปน้ำหนักตามกอง"
+    sheet["A2"].font = Font(name=sarabun, bold=True, size=20, color="0F7A3D")
+    sheet.merge_cells("A3:E3")
+    sheet["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | สินค้า {product_label} | ประเภทสินค้า {product_type}"
+    sheet["A3"].font = Font(name=sarabun, size=10, color="111827")
+    sheet.merge_cells("A4:E4")
+    sheet["A4"] = f"ผู้พิมพ์ {printed_by} | วันที่พิมพ์ {print_date} | เวลา {print_time}"
+    sheet["A4"].font = Font(name=sarabun, size=10, color="111827")
+    for cell in sheet[5]:
+        cell.fill = green_fill
+        cell.border = Border(bottom=thin_green)
+    sheet.row_dimensions[5].height = 4
+
+    headers = ["กอง", "น้ำหนักเข้า (ตัน)", "น้ำหนักออก (ตัน)", "น้ำหนักคงเหลือ", "รวมเงิน"]
+    header_row = 7
+    for column_index, value in enumerate(headers, start=1):
+        cell = sheet.cell(header_row, column_index, value)
+        cell.fill = green_fill
+        cell.font = Font(name=sarabun, bold=True, color="FFFFFF", size=11)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = table_border
+
+    row_index = header_row + 1
+    for item in rows:
+        values = [
+            f"กอง {item['pile']}",
+            item["incoming"],
+            item["outgoing"],
+            item["balance"],
+            item["amount"],
+        ]
+        for column_index, value in enumerate(values, start=1):
+            cell = sheet.cell(row_index, column_index, value)
+            cell.font = Font(name=sarabun, size=11)
+            cell.border = table_border
+            cell.alignment = Alignment(horizontal="left" if column_index == 1 else "right", vertical="center")
+            if column_index > 1:
+                cell.number_format = "#,##0.00"
+            if row_index % 2 == 1:
+                cell.fill = zebra_fill
+        row_index += 1
+
+    if not rows:
+        for column_index, value in enumerate(["-", 0, 0, 0, 0], start=1):
+            cell = sheet.cell(row_index, column_index, value)
+            cell.font = Font(name=sarabun, size=11)
+            cell.border = table_border
+            cell.alignment = Alignment(horizontal="left" if column_index == 1 else "right")
+            if column_index > 1:
+                cell.number_format = "#,##0.00"
+        row_index += 1
+
+    total_values = ["รวมทั้งหมด", totals["incoming"], totals["outgoing"], totals["balance"], totals["amount"]]
+    for column_index, value in enumerate(total_values, start=1):
+        cell = sheet.cell(row_index, column_index, value)
+        cell.fill = light_green_fill
+        cell.font = Font(name=sarabun, bold=True, color="064E25", size=11)
+        cell.border = table_border
+        cell.alignment = Alignment(horizontal="left" if column_index == 1 else "right", vertical="center")
+        if column_index > 1:
+            cell.number_format = "#,##0.00"
+
+    note_row = row_index + 3
+    sheet.merge_cells(start_row=note_row, start_column=1, end_row=note_row + 1, end_column=5)
+    note_cell = sheet.cell(note_row, 1, "หมายเหตุ\nหน่วยน้ำหนัก : ตัน")
+    note_cell.font = Font(name=sarabun, size=11)
+    note_cell.alignment = Alignment(wrap_text=True, vertical="center")
+    note_cell.border = Border(left=thin_gray, right=thin_gray, top=thin_gray, bottom=thin_gray)
+
+    footer_row = note_row + 5
+    sheet.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=3)
+    sheet.cell(footer_row, 1, SYSTEM_NAME)
+    sheet.cell(footer_row, 1).font = Font(name=sarabun, bold=True, color="0F7A3D", size=10)
+    sheet.cell(footer_row, 5, "Page 1 / 1")
+    sheet.cell(footer_row, 5).alignment = Alignment(horizontal="right")
+
+    widths = [22, 20, 20, 20, 18]
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    sheet.freeze_panes = "A7"
+    sheet.print_area = f"A1:E{footer_row}"
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def normalized_range(payload: dict) -> tuple[str, str]:
+    today = datetime.now().date().isoformat()
+    start_date = payload.get("start_date") or today
+    end_date = payload.get("end_date") or start_date
+    return tuple(sorted([start_date, end_date]))
+
+
+def full_export_records(payload: dict) -> tuple[list[dict], list[dict]]:
+    start_date, end_date = normalized_range(payload)
+    department = payload.get("department") or "all"
+    production_records = [
+        record
+        for record in payload.get("production_records", [])
+        if start_date <= (record.get("record_date") or record.get("date") or "") <= end_date
+    ]
+    time_records = [
+        record
+        for record in payload.get("time_records", [])
+        if start_date <= (record.get("record_date") or "") <= end_date
+        and (department == "all" or record.get("department") == department)
+    ]
+    return production_records, time_records
+
+
+def build_time_full_export_excel(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    production_records, time_records = full_export_records(payload)
+    employees = payload.get("employees", [])
+    printed_by = payload.get("printed_by") or "System Admin"
+    department = payload.get("department") or "all"
+    now = datetime.now()
+    print_date, print_time = format_report_datetime(now)
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Overview"
+    green_fill = PatternFill("solid", fgColor="0F7A3D")
+    light_green_fill = PatternFill("solid", fgColor="E9F5EE")
+    zebra_fill = PatternFill("solid", fgColor="F7FAF8")
+    thin_gray = Side(style="thin", color="CDD6DF")
+    table_border = Border(left=thin_gray, right=thin_gray, top=thin_gray, bottom=thin_gray)
+    font_name = "Sarabun"
+
+    def style_header(row):
+        for cell in row:
+            cell.fill = green_fill
+            cell.font = Font(name=font_name, bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = table_border
+
+    def style_table(sheet_obj, header_row: int):
+        style_header(sheet_obj[header_row])
+        for row_index, row in enumerate(sheet_obj.iter_rows(min_row=header_row + 1), start=header_row + 1):
+            for cell in row:
+                cell.border = table_border
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+                cell.font = Font(name=font_name, size=10)
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0.00"
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                if row_index % 2 == 0:
+                    cell.fill = zebra_fill
+
+    def autosize(sheet_obj):
+        for column_cells in sheet_obj.columns:
+            max_length = max(len(str(cell.value or "")) for cell in column_cells)
+            sheet_obj.column_dimensions[get_column_letter(column_cells[0].column)].width = min(max_length + 3, 34)
+
+    sheet.merge_cells("A1:H1")
+    sheet["A1"] = COMPANY_NAME
+    sheet["A1"].font = Font(name=font_name, bold=True, size=18, color="0F7A3D")
+    sheet.merge_cells("A2:H2")
+    sheet["A2"] = "Export รายละเอียดทั้งหมด"
+    sheet["A2"].font = Font(name=font_name, bold=True, size=16, color="111827")
+    sheet.merge_cells("A3:H3")
+    sheet["A3"] = f"ช่วงวันที่ {start_date} ถึง {end_date} | แผนก {department if department != 'all' else 'ทุกแผนก'}"
+    sheet.merge_cells("A4:H4")
+    sheet["A4"] = f"ผู้ Export {printed_by} | วันที่ {print_date} | เวลา {print_time}"
+    for ref in ["A3", "A4"]:
+        sheet[ref].font = Font(name=font_name, size=11, color="344054")
+
+    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    if logo_path.exists():
+        try:
+            logo = ExcelImage(str(logo_path))
+            logo.width = 70
+            logo.height = 70
+            sheet.add_image(logo, "I1")
+        except Exception:
+            pass
+
+    total_weight = sum(float(record.get("water_weight", record.get("water", 0)) or 0) + float(record.get("flower_weight", record.get("flower", 0)) or 0) for record in production_records)
+    total_production_amount = sum(float(record.get("total_amount", record.get("grand_total", 0)) or 0) for record in production_records)
+    total_time_minutes = sum(float(record.get("net_minutes", 0) or 0) for record in time_records)
+    overview_rows = [
+        ["หัวข้อ", "ค่า"],
+        ["จำนวนรายการผลผลิต", len(production_records)],
+        ["น้ำหนักผลผลิตรวม", total_weight],
+        ["ยอดเงินผลผลิตรวม", total_production_amount],
+        ["จำนวนรายการเวลา", len(time_records)],
+        ["ชั่วโมงทำงานรวม", total_time_minutes / 60],
+        ["จำนวนพนักงานทั้งหมด", len(employees)],
+    ]
+    for row in overview_rows:
+        sheet.append(row)
+    style_table(sheet, 6)
+    autosize(sheet)
+
+    prod_sheet = workbook.create_sheet("Production Details")
+    prod_headers = [
+        "วันที่",
+        "เวลา",
+        "รหัสพนักงาน",
+        "ชื่อพนักงาน",
+        "สินค้า",
+        "กอง",
+        "น้ำหนักน้ำ",
+        "น้ำหนักดอก",
+        "รวมเงิน",
+        "ผู้บันทึก",
+    ]
+    prod_sheet.append(prod_headers)
+    for record in sorted(production_records, key=lambda item: ((item.get("record_date") or item.get("date") or ""), item.get("record_time", ""), item.get("emp_code", ""))):
+        prod_sheet.append(
+            [
+                record.get("record_date") or record.get("date") or "",
+                record.get("record_time", ""),
+                record.get("emp_code", ""),
+                record.get("employee_name", ""),
+                record.get("fruit_type", "mangosteen"),
+                record.get("pile_no") or record.get("pile", ""),
+                float(record.get("water_weight", record.get("water", 0)) or 0),
+                float(record.get("flower_weight", record.get("flower", 0)) or 0),
+                float(record.get("total_amount", record.get("grand_total", 0)) or 0),
+                record.get("created_by", ""),
+            ]
+        )
+    style_table(prod_sheet, 1)
+    autosize(prod_sheet)
+
+    time_sheet = workbook.create_sheet("Time Details")
+    time_headers = ["วันที่", "รหัสพนักงาน", "ชื่อพนักงาน", "แผนก", "เข้า", "ออก", "พัก(นาที)", "สุทธิ(นาที)", "ชั่วโมง", "ผู้บันทึก"]
+    time_sheet.append(time_headers)
+    for record in sorted(time_records, key=lambda item: (item.get("record_date", ""), item.get("emp_code", ""), item.get("clock_in", ""))):
+        net_minutes = float(record.get("net_minutes", 0) or 0)
+        time_sheet.append(
+            [
+                record.get("record_date", ""),
+                record.get("emp_code", ""),
+                record.get("fullname", ""),
+                record.get("department", ""),
+                record.get("clock_in", ""),
+                record.get("clock_out", ""),
+                float(record.get("break_minutes", 0) or 0),
+                net_minutes,
+                net_minutes / 60,
+                record.get("created_by", ""),
+            ]
+        )
+    style_table(time_sheet, 1)
+    autosize(time_sheet)
+
+    summary_sheet = workbook.create_sheet("Time Summary")
+    summary_sheet.append(["รหัสพนักงาน", "ชื่อพนักงาน", "แผนก", "จำนวนวัน", "จำนวนรายการ", "ชั่วโมงรวม"])
+    grouped: dict[str, dict] = {}
+    for record in time_records:
+        key = str(record.get("employee_id") or record.get("emp_code") or record.get("fullname") or "")
+        item = grouped.setdefault(
+            key,
+            {
+                "emp_code": record.get("emp_code", ""),
+                "fullname": record.get("fullname", ""),
+                "department": record.get("department", ""),
+                "days": set(),
+                "records": 0,
+                "minutes": 0.0,
+            },
+        )
+        item["days"].add(record.get("record_date", ""))
+        item["records"] += 1
+        item["minutes"] += float(record.get("net_minutes", 0) or 0)
+    for item in sorted(grouped.values(), key=lambda value: (value["emp_code"], value["fullname"])):
+        summary_sheet.append([item["emp_code"], item["fullname"], item["department"], len(item["days"]), item["records"], item["minutes"] / 60])
+    style_table(summary_sheet, 1)
+    autosize(summary_sheet)
+
+    for sheet_obj in workbook.worksheets:
+        sheet_obj.freeze_panes = "A2"
+        sheet_obj.page_setup.paperSize = sheet_obj.PAPERSIZE_A4
+        sheet_obj.page_setup.orientation = "landscape"
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def time_receipt_groups(payload: dict) -> list[dict]:
+    start_date, end_date = normalized_range(payload)
+    department = payload.get("department") or "all"
+    records = [
+        record
+        for record in payload.get("time_records", [])
+        if start_date <= (record.get("record_date") or "") <= end_date
+        and (department == "all" or record.get("department") == department)
+    ]
+    daily_wage = float(payload.get("daily_wage", 347) or 347)
+    standard_hours = float(payload.get("standard_hours", 8) or 8)
+    normal_rate = daily_wage / standard_hours
+    ot_rate = float(payload.get("ot_hourly_rate", 50) or 50)
+    daily_records: dict[tuple[str, str], dict] = {}
+    for record in sorted(records, key=lambda item: (item.get("record_date", ""), item.get("clock_in", ""))):
+        key = str(record.get("employee_id") or record.get("emp_code") or record.get("fullname") or "")
+        date_key = record.get("record_date", "-")
+        daily_key = (key, date_key)
+        if daily_key not in daily_records:
+            daily_records[daily_key] = {
+                **record,
+                "clock_ins": [],
+                "clock_outs": [],
+                "net_minutes": 0.0,
+            }
+        daily_record = daily_records[daily_key]
+        daily_record["clock_ins"].append(record.get("clock_in", "-"))
+        daily_record["clock_outs"].append(record.get("clock_out", "-"))
+        daily_record["net_minutes"] += float(record.get("net_minutes", 0) or 0)
+
+    groups: dict[str, dict] = {}
+    for record in daily_records.values():
+        key = str(record.get("employee_id") or record.get("emp_code") or record.get("fullname") or "")
+        group = groups.setdefault(
+            key,
+            {
+                "emp_code": record.get("emp_code", "-"),
+                "fullname": record.get("fullname", "-"),
+                "department": record.get("department", "-"),
+                "rows": [],
+                "normal_hours": 0.0,
+                "ot_hours": 0.0,
+                "normal_amount": 0.0,
+                "ot_amount": 0.0,
+            },
+        )
+        net_minutes = float(record.get("net_minutes", 0) or 0)
+        normal_minutes = min(net_minutes, standard_hours * 60)
+        ot_minutes = max(0, net_minutes - normal_minutes)
+        normal_hours = normal_minutes / 60
+        ot_hours = ot_minutes / 60
+        # The factory wage table rounds each day's proportional normal wage
+        # to the nearest whole baht (0.50 rounds up) before employee totals.
+        normal_amount = math.floor((normal_hours * normal_rate) + 0.5)
+        ot_amount = ot_hours * ot_rate
+        group["normal_hours"] += normal_hours
+        group["ot_hours"] += ot_hours
+        group["normal_amount"] += normal_amount
+        group["ot_amount"] += ot_amount
+        group["rows"].append(
+            {
+                "date": record.get("record_date", "-"),
+                "clock_in": " / ".join(record.get("clock_ins", [])),
+                "clock_out": " / ".join(record.get("clock_outs", [])),
+                "normal_hours": normal_hours,
+                "ot_hours": ot_hours,
+                "normal_amount": normal_amount,
+                "ot_amount": ot_amount,
+                "total_amount": normal_amount + ot_amount,
+            }
+        )
+    for group in groups.values():
+        group["rows"].sort(key=lambda item: (item["date"], item["clock_in"]))
+        group["total_amount"] = group["normal_amount"] + group["ot_amount"]
+    return sorted(groups.values(), key=lambda item: (str(item["emp_code"]), str(item["fullname"])))
+
+
+def build_time_receipts_pdf(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    groups = time_receipt_groups(payload)
+    printed_by = payload.get("printed_by") or "System Admin"
+    printed_by_position = payload.get("printed_by_position") or ""
+    printed_by_text = f"{printed_by} {printed_by_position}".strip()
+    now = datetime.now()
+    buffer = BytesIO()
+    page_width, page_height = landscape(A4)
+    c = canvas.Canvas(buffer, pagesize=landscape(A4))
+    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    margin = 8 * mm
+    gap = 7 * mm
+    divider_x = page_width / 2
+    panel_width = (page_width - (margin * 2) - gap) / 2
+    panel_height = page_height - (margin * 2)
+
+    def text(x, y, value, size=8, bold=False, fill="#111827"):
+        c.setFillColor(colors.HexColor(fill))
+        c.setFont(THAI_FONT_BOLD if bold else THAI_FONT, size)
+        c.drawString(x, y, str(value))
+
+    def right_text(x, y, value, size=8, bold=False, fill="#111827"):
+        c.setFillColor(colors.HexColor(fill))
+        c.setFont(THAI_FONT_BOLD if bold else THAI_FONT, size)
+        c.drawRightString(x, y, str(value))
+
+    def draw_panel(x, y, group, is_copy=False):
+        c.setStrokeColor(colors.HexColor("#0F7A3D"))
+        c.setLineWidth(1)
+        c.roundRect(x, y, panel_width, panel_height, 6, stroke=1, fill=0)
+        if is_copy:
+            c.saveState()
+            c.translate(x + panel_width / 2, y + panel_height / 2)
+            c.rotate(30)
+            c.setFillColor(colors.Color(0.06, 0.48, 0.24, alpha=0.08))
+            c.setFont(THAI_FONT_BOLD, 58)
+            c.drawCentredString(0, 0, "สำเนา")
+            c.restoreState()
+
+        cursor_y = y + panel_height - 12 * mm
+        if logo_path.exists():
+            try:
+                c.drawImage(str(logo_path), x + 5 * mm, cursor_y - 3 * mm, width=17 * mm, height=17 * mm, preserveAspectRatio=True, mask="auto")
+            except Exception:
+                pass
+        text(x + 25 * mm, cursor_y + 6 * mm, COMPANY_NAME, 11, True, "#0F7A3D")
+        text(x + 25 * mm, cursor_y, "ใบเสร็จเวลาและค่าแรง", 10, True, "#0F7A3D")
+        text(x + 25 * mm, cursor_y - 5 * mm, "ต้นฉบับ" if not is_copy else "สำเนา", 8, True, "#667085")
+        c.setStrokeColor(colors.HexColor("#B8D8D1"))
+        c.line(x + 5 * mm, cursor_y - 9 * mm, x + panel_width - 5 * mm, cursor_y - 9 * mm)
+
+        meta_y = cursor_y - 17 * mm
+        text(x + 5 * mm, meta_y, f"เลขที่: TR-{start_date.replace('-', '')}-{group['emp_code']}", 7.5, True)
+        text(x + 5 * mm, meta_y - 5 * mm, f"ช่วงวันที่: {start_date} - {end_date}", 7.5)
+        right_text(x + panel_width - 5 * mm, meta_y, f"ออกโดย: {printed_by_text}", 7.5)
+        right_text(x + panel_width - 5 * mm, meta_y - 5 * mm, now.strftime("%d/%m/%Y %H:%M"), 7.5)
+
+        employee_y = meta_y - 15 * mm
+        text(x + 5 * mm, employee_y, f"รหัสพนักงาน: {group['emp_code']}", 8, True)
+        text(x + 48 * mm, employee_y, f"ชื่อ: {group['fullname']}", 8, True)
+        text(x + 5 * mm, employee_y - 5 * mm, f"แผนก: {group['department']}", 8)
+
+        table_y = employee_y - 13 * mm
+        col_widths = [20, 13, 13, 16, 13, 19, 17, 18]
+        headers = ["วันที่", "เข้า", "ออก", "ปกติ", "OT", "เงินปกติ", "เงิน OT", "รวม"]
+        c.setFillColor(colors.HexColor("#0F7A3D"))
+        c.rect(x + 5 * mm, table_y, panel_width - 10 * mm, 7 * mm, stroke=0, fill=1)
+        c.setFillColor(colors.white)
+        c.setFont(THAI_FONT_BOLD, 6.5)
+        col_x = x + 6 * mm
+        for header, width in zip(headers, col_widths):
+            c.drawString(col_x, table_y + 2.2 * mm, header)
+            col_x += width * mm
+
+        row_y = table_y - 6 * mm
+        c.setFont(THAI_FONT, 6.2)
+        c.setFillColor(colors.HexColor("#111827"))
+        for row in group["rows"][:10]:
+            c.setStrokeColor(colors.HexColor("#D8E5E1"))
+            c.line(x + 5 * mm, row_y - 1 * mm, x + panel_width - 5 * mm, row_y - 1 * mm)
+            values = [
+                row["date"],
+                row["clock_in"],
+                row["clock_out"],
+                report_number(row["normal_hours"]),
+                report_number(row["ot_hours"]),
+                report_number(row["normal_amount"], 0),
+                report_number(row["ot_amount"], 0),
+                report_number(row["total_amount"], 0),
+            ]
+            col_x = x + 6 * mm
+            for value, width in zip(values, col_widths):
+                c.drawString(col_x, row_y + 1 * mm, str(value))
+                col_x += width * mm
+            row_y -= 5.5 * mm
+        if len(group["rows"]) > 10:
+            text(x + 6 * mm, row_y + 1 * mm, f"มีรายการเพิ่มเติม {len(group['rows']) - 10} รายการ รวมอยู่ในยอดด้านล่าง", 6.2, False, "#667085")
+
+        summary_y = y + 35 * mm
+        c.setFillColor(colors.HexColor("#E9F5EE"))
+        c.roundRect(x + 5 * mm, summary_y, panel_width - 10 * mm, 18 * mm, 4, stroke=0, fill=1)
+        text(x + 8 * mm, summary_y + 12 * mm, f"ชั่วโมงปกติ {report_number(group['normal_hours'])} ชม.", 7.5, True, "#064E25")
+        text(x + 8 * mm, summary_y + 7 * mm, f"OT {report_number(group['ot_hours'])} ชม.", 7.5, True, "#064E25")
+        text(x + 55 * mm, summary_y + 12 * mm, f"เงินปกติ {report_number(group['normal_amount'], 0)} บาท", 7.5, True, "#064E25")
+        text(x + 55 * mm, summary_y + 7 * mm, f"เงิน OT {report_number(group['ot_amount'], 0)} บาท", 7.5, True, "#064E25")
+        right_text(x + panel_width - 8 * mm, summary_y + 8.5 * mm, f"รวมสุทธิ {report_number(group['total_amount'], 0)} บาท", 11, True, "#064E25")
+
+        sign_y = y + 12 * mm
+        c.setStrokeColor(colors.HexColor("#111827"))
+        c.line(x + 14 * mm, sign_y + 5 * mm, x + 54 * mm, sign_y + 5 * mm)
+        c.line(x + panel_width - 54 * mm, sign_y + 5 * mm, x + panel_width - 14 * mm, sign_y + 5 * mm)
+        text(x + 25 * mm, sign_y, "ผู้รับเงิน", 7, False)
+        text(x + panel_width - 43 * mm, sign_y, "ผู้จ่ายเงิน", 7, False)
+
+    if not groups:
+        groups = [{"emp_code": "-", "fullname": "-", "department": "-", "rows": [], "normal_hours": 0, "ot_hours": 0, "normal_amount": 0, "ot_amount": 0, "total_amount": 0}]
+
+    for group in groups:
+        draw_panel(margin, margin, group, False)
+        c.setDash(3, 3)
+        c.setStrokeColor(colors.HexColor("#667085"))
+        c.line(divider_x, margin, divider_x, page_height - margin)
+        c.setDash()
+        draw_panel(divider_x + gap / 2, margin, group, True)
+        c.showPage()
+
+    c.save()
+    return buffer.getvalue()
+
+
+def safe_float(value: float | int | str | None) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def minutes_text(value: float | int | str | None) -> str:
+    minutes = int(round(safe_float(value)))
+    hours, remain = divmod(minutes, 60)
+    return f"{hours} ชม. {remain} นาที"
+
+
+def is_late_time(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        hour, minute = [int(part) for part in str(value).split(":")[:2]]
+        return hour * 60 + minute > 8 * 60
+    except (TypeError, ValueError):
+        return False
+
+
+def is_early_out_time(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        hour, minute = [int(part) for part in str(value).split(":")[:2]]
+        return hour * 60 + minute < 17 * 60
+    except (TypeError, ValueError):
+        return False
+
+
+def filtered_production_records(payload: dict) -> list[dict]:
+    start_date, end_date = normalized_range(payload)
+    return sorted(
+        [
+            record
+            for record in payload.get("production_records", [])
+            if start_date <= (record.get("record_date") or record.get("date") or "") <= end_date
+        ],
+        key=lambda record: (
+            record.get("record_date") or record.get("date") or "",
+            record.get("record_time", ""),
+            str(record.get("pile_no") or record.get("pile") or ""),
+            str(record.get("emp_code") or ""),
+        ),
+    )
+
+
+def filtered_time_records(payload: dict) -> list[dict]:
+    start_date, end_date = normalized_range(payload)
+    department = payload.get("department") or "all"
+    return sorted(
+        [
+            record
+            for record in payload.get("time_records", [])
+            if start_date <= (record.get("record_date") or "") <= end_date
+            and (department == "all" or record.get("department") == department)
+        ],
+        key=lambda record: (
+            record.get("record_date", ""),
+            str(record.get("emp_code") or ""),
+            record.get("clock_in", ""),
+        ),
+    )
+
+
+def export_meta_text(payload: dict) -> str:
+    printed_by = payload.get("printed_by") or "System Admin"
+    printed_by_position = payload.get("printed_by_position") or ""
+    print_date, print_time = format_report_datetime(datetime.now())
+    return f"ออกโดย {printed_by} {printed_by_position} | วันที่ {print_date} | เวลา {print_time}".strip()
+
+
+def add_excel_logo(sheet, cell: str = "H1") -> None:
+    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    if not logo_path.exists():
+        return
+    try:
+        logo = ExcelImage(str(logo_path))
+        logo.width = 72
+        logo.height = 72
+        sheet.add_image(logo, cell)
+    except Exception:
+        pass
+
+
+def style_excel_report_sheet(sheet, header_rows: list[int], widths: list[int]) -> None:
+    font_name = "Sarabun"
+    green_fill = PatternFill("solid", fgColor="0F7A3D")
+    zebra_fill = PatternFill("solid", fgColor="F7FAF8")
+    thin_gray = Side(style="thin", color="CDD6DF")
+    table_border = Border(left=thin_gray, right=thin_gray, top=thin_gray, bottom=thin_gray)
+    for header_row in header_rows:
+        for cell in sheet[header_row]:
+            if cell.value is None:
+                continue
+            cell.fill = green_fill
+            cell.font = Font(name=font_name, bold=True, color="FFFFFF", size=10)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = table_border
+    for row_index, row in enumerate(sheet.iter_rows(), start=1):
+        if row_index in header_rows or row_index < min(header_rows, default=1):
+            continue
+        for cell in row:
+            if cell.value is None:
+                continue
+            cell.font = Font(name=font_name, size=10)
+            cell.border = table_border
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            if row_index % 2 == 0:
+                cell.fill = zebra_fill
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+    sheet.page_setup.orientation = "landscape"
+    sheet.freeze_panes = f"A{max(header_rows) + 1}" if header_rows else None
+
+
+def build_production_summary_excel(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    records = filtered_production_records(payload)
+    rows = pile_summary_rows(records)
+    totals = summary_totals(rows)
+    total_records = len(records)
+    employee_count = len({record.get("employee_id") or record.get("emp_code") or record.get("employee_name") for record in records})
+
+    workbook = Workbook()
+    overview = workbook.active
+    overview.title = "Production Summary"
+    overview.merge_cells("A1:G1")
+    overview["A1"] = COMPANY_NAME
+    overview["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
+    overview.merge_cells("A2:G2")
+    overview["A2"] = "รายงานสรุปผลผลิตและน้ำหนัก"
+    overview["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
+    overview.merge_cells("A3:G3")
+    overview["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
+    overview.merge_cells("A4:G4")
+    overview["A4"] = export_meta_text(payload)
+    add_excel_logo(overview, "H1")
+    overview.append([])
+    overview.append(["หัวข้อ", "ค่า"])
+    overview.append(["จำนวนรายการ", total_records])
+    overview.append(["จำนวนพนักงาน", employee_count])
+    overview.append(["น้ำหนักเข้า", totals["incoming"]])
+    overview.append(["น้ำหนักออก", totals["outgoing"]])
+    overview.append(["น้ำหนักคงเหลือ", totals["balance"]])
+    overview.append(["ยอดเงินรวม", totals["amount"]])
+    style_excel_report_sheet(overview, [6], [28, 22, 14, 14, 14, 14, 14, 14])
+
+    pile_sheet = workbook.create_sheet("Pile Summary")
+    pile_sheet.append(["กอง", "น้ำหนักเข้า", "น้ำหนักออก", "น้ำหนักคงเหลือ", "ยอดเงิน"])
+    for row in rows:
+        pile_sheet.append([row["pile"], row["incoming"], row["outgoing"], row["balance"], row["amount"]])
+    pile_sheet.append(["รวม", totals["incoming"], totals["outgoing"], totals["balance"], totals["amount"]])
+    style_excel_report_sheet(pile_sheet, [1], [18, 18, 18, 18, 18])
+
+    detail_sheet = workbook.create_sheet("Details")
+    detail_sheet.append(["วันที่", "เวลา", "รหัสพนักงาน", "ชื่อพนักงาน", "สินค้า", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "ยอดเงิน", "ผู้บันทึก"])
+    for record in records:
+        detail_sheet.append(
+            [
+                record.get("record_date") or record.get("date") or "",
+                record.get("record_time", ""),
+                record.get("emp_code", ""),
+                record.get("employee_name", ""),
+                record.get("fruit_type", ""),
+                record.get("pile_no") or record.get("pile", ""),
+                safe_float(record.get("water_weight", record.get("water", 0))),
+                safe_float(record.get("flower_weight", record.get("flower", 0))),
+                safe_float(record.get("total_amount", record.get("grand_total", 0))),
+                record.get("created_by", ""),
+            ]
+        )
+    style_excel_report_sheet(detail_sheet, [1], [14, 12, 16, 24, 16, 10, 14, 14, 14, 20])
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def pdf_styles() -> tuple:
+    styles = getSampleStyleSheet()
+    for style_name in ["Title", "Heading1", "Heading2", "Normal", "BodyText"]:
+        styles[style_name].fontName = THAI_FONT
+    title = styles["Title"].clone("PismaiReportTitle")
+    title.fontName = THAI_FONT_BOLD
+    title.fontSize = 17
+    title.leading = 22
+    title.textColor = colors.HexColor(BRAND_GREEN)
+    normal = styles["Normal"].clone("PismaiReportNormal")
+    normal.fontName = THAI_FONT
+    normal.fontSize = 9
+    normal.leading = 12
+    section = styles["Heading2"].clone("PismaiReportSection")
+    section.fontName = THAI_FONT_BOLD
+    section.fontSize = 12
+    section.leading = 16
+    section.textColor = colors.HexColor(BRAND_GREEN)
+    return styles, title, normal, section
+
+
+def report_header_story(title_text: str, subtitle: str, payload: dict, page_width_mm: int = 267) -> list:
+    _, title, normal, _ = pdf_styles()
+    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    logo = Image(str(logo_path), width=20 * mm, height=20 * mm) if logo_path.exists() else Paragraph("SP", title)
+    title_block = [Paragraph(COMPANY_NAME, normal), Paragraph(title_text, title), Paragraph(subtitle, normal)]
+    meta = Paragraph(export_meta_text(payload), normal)
+    header = Table([[logo, title_block, meta]], colWidths=[24 * mm, (page_width_mm - 94) * mm, 70 * mm])
+    header.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    line = Table([[""]], colWidths=[page_width_mm * mm], rowHeights=[1 * mm])
+    line.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(BRAND_GREEN))]))
+    return [header, Spacer(1, 5 * mm), line, Spacer(1, 7 * mm)]
+
+
+def set_pdf_table_style(table: Table, numeric_from: int = 1) -> None:
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(BRAND_GREEN)),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), THAI_FONT_BOLD),
+                ("FONTNAME", (0, 1), (-1, -1), THAI_FONT),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ALIGN", (numeric_from, 1), (-1, -1), "RIGHT"),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CDD6DF")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7FAF8")]),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]
+        )
+    )
+
+
+def build_production_summary_pdf(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    records = filtered_production_records(payload)
+    pile_rows = pile_summary_rows(records)
+    totals = summary_totals(pile_rows)
+    employee_count = len({record.get("employee_id") or record.get("emp_code") or record.get("employee_name") for record in records})
+    _, _, _, section = pdf_styles()
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=14 * mm,
+        bottomMargin=16 * mm,
+    )
+    story = report_header_story(
+        "รายงานสรุปผลผลิตและน้ำหนัก",
+        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}",
+        payload,
+    )
+    overview = Table(
+        [
+            ["จำนวนรายการ", "จำนวนพนักงาน", "น้ำหนักเข้า", "น้ำหนักออก", "คงเหลือ", "ยอดเงินรวม"],
+            [
+                report_number(len(records), 0),
+                report_number(employee_count, 0),
+                report_number(totals["incoming"]),
+                report_number(totals["outgoing"]),
+                report_number(totals["balance"]),
+                money(totals["amount"]),
+            ],
+        ],
+        colWidths=[35 * mm, 35 * mm, 42 * mm, 42 * mm, 42 * mm, 42 * mm],
+    )
+    set_pdf_table_style(overview, 0)
+    story += [Paragraph("ภาพรวม", section), overview, Spacer(1, 7 * mm)]
+
+    pile_table_rows = [["กอง", "น้ำหนักเข้า", "น้ำหนักออก", "คงเหลือ", "ยอดเงิน"]]
+    for row in pile_rows:
+        pile_table_rows.append([row["pile"], report_number(row["incoming"]), report_number(row["outgoing"]), report_number(row["balance"]), money(row["amount"])])
+    if len(pile_table_rows) == 1:
+        pile_table_rows.append(["-", "0", "0", "0", "0"])
+    pile_table_rows.append(["รวม", report_number(totals["incoming"]), report_number(totals["outgoing"]), report_number(totals["balance"]), money(totals["amount"])])
+    pile_table = Table(pile_table_rows, repeatRows=1, colWidths=[45 * mm, 48 * mm, 48 * mm, 48 * mm, 48 * mm])
+    set_pdf_table_style(pile_table)
+    story += [Paragraph("สรุปตามกอง", section), pile_table, Spacer(1, 7 * mm)]
+
+    detail_rows = [["วันที่", "เวลา", "รหัส", "ชื่อพนักงาน", "สินค้า", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "ยอดเงิน"]]
+    for record in records[:80]:
+        detail_rows.append(
+            [
+                format_report_date(record.get("record_date") or record.get("date") or ""),
+                record.get("record_time", ""),
+                record.get("emp_code", ""),
+                record.get("employee_name", ""),
+                record.get("fruit_type", ""),
+                record.get("pile_no") or record.get("pile", ""),
+                report_number(record.get("water_weight", record.get("water", 0))),
+                report_number(record.get("flower_weight", record.get("flower", 0))),
+                money(record.get("total_amount", record.get("grand_total", 0))),
+            ]
+        )
+    detail_table = Table(detail_rows, repeatRows=1, colWidths=[24 * mm, 18 * mm, 22 * mm, 45 * mm, 26 * mm, 14 * mm, 30 * mm, 30 * mm, 28 * mm])
+    set_pdf_table_style(detail_table, 6)
+    story += [Paragraph("รายละเอียดรายการ", section), detail_table]
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def selected_export_sections(payload: dict) -> dict:
+    sections = payload.get("export_sections") or {}
+    return {
+        "overview": bool(sections.get("overview", True)),
+        "piles": bool(sections.get("piles", True)),
+        "details": bool(sections.get("details", True)),
+    }
+
+
+def selected_export_fields(payload: dict, section: str, definitions: list[tuple[str, str, object]]) -> list[tuple[str, str, object]]:
+    fields = payload.get("export_fields") or {}
+    section_fields = fields.get(section) or {}
+    if not section_fields:
+        return definitions
+    return [definition for definition in definitions if bool(section_fields.get(definition[0]))]
+
+
+def employee_name_for_record(payload: dict, record: dict) -> str:
+    if record.get("employee_name"):
+        return str(record.get("employee_name"))
+    employees = payload.get("employees") or []
+    employee_id = record.get("employee_id")
+    for employee in employees:
+        if employee.get("id") == employee_id or str(employee.get("emp_code")) == str(record.get("emp_code")):
+            return str(employee.get("fullname") or "")
+    return ""
+
+
+def production_summary_context(payload: dict) -> tuple[str, str, list[dict], list[dict], dict, int]:
+    start_date, end_date = normalized_range(payload)
+    records = filtered_production_records(payload)
+    pile_rows = pile_summary_rows(records)
+    totals = summary_totals(pile_rows)
+    total_weight = totals["incoming"] + totals["outgoing"]
+    totals = {**totals, "total_weight": total_weight}
+    employee_count = len(
+        {record.get("employee_id") or record.get("emp_code") or record.get("employee_name") for record in records}
+    )
+    return start_date, end_date, records, pile_rows, totals, employee_count
+
+
+def build_production_summary_excel(payload: dict) -> bytes:
+    start_date, end_date, records, pile_rows, totals, employee_count = production_summary_context(payload)
+    sections = selected_export_sections(payload)
+    workbook = Workbook()
+    overview = workbook.active
+    overview.title = "Production Summary"
+    overview.merge_cells("A1:G1")
+    overview["A1"] = COMPANY_NAME
+    overview["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
+    overview.merge_cells("A2:G2")
+    overview["A2"] = "รายงานสรุปผลผลิตและน้ำหนัก"
+    overview["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
+    overview.merge_cells("A3:G3")
+    overview["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
+    overview.merge_cells("A4:G4")
+    overview["A4"] = export_meta_text(payload)
+    add_excel_logo(overview, "H1")
+
+    overview_fields = selected_export_fields(
+        payload,
+        "overview",
+        [
+            ("totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", totals["total_weight"]),
+            ("water", "น้ำหนักน้ำ (กก.)", totals["incoming"]),
+            ("flower", "น้ำหนักดอก (กก.)", totals["outgoing"]),
+            ("amount", "ยอดเงินรวม", totals["amount"]),
+            ("employees", "พนักงานที่มีรายการ", employee_count),
+            ("records", "จำนวนรายการ", len(records)),
+        ],
+    )
+    overview.append([])
+    if sections["overview"] and overview_fields:
+        overview.append(["หัวข้อ", "ค่า"])
+        for _, label, value in overview_fields:
+            overview.append([label, value])
+        style_excel_report_sheet(overview, [6], [30, 22, 14, 14, 14, 14, 14, 14])
+
+    if sections["piles"]:
+        pile_defs = selected_export_fields(
+            payload,
+            "piles",
+            [
+                ("pile", "กอง", lambda row: row["pile"]),
+                ("water", "น้ำหนักน้ำ (กก.)", lambda row: row["incoming"]),
+                ("flower", "น้ำหนักดอก (กก.)", lambda row: row["outgoing"]),
+                ("total", "รวม (กก.)", lambda row: row["incoming"] + row["outgoing"]),
+                ("amount", "รวมเงิน", lambda row: row["amount"]),
+            ],
+        )
+        if pile_defs:
+            pile_sheet = workbook.create_sheet("Pile Summary")
+            pile_sheet.append([label for _, label, _ in pile_defs])
+            for row in pile_rows:
+                pile_sheet.append([getter(row) for _, _, getter in pile_defs])
+            total_row = {
+                "pile": "รวม",
+                "incoming": totals["incoming"],
+                "outgoing": totals["outgoing"],
+                "amount": totals["amount"],
+            }
+            pile_sheet.append([getter(total_row) for _, _, getter in pile_defs])
+            style_excel_report_sheet(pile_sheet, [1], [18] * max(1, len(pile_defs)))
+
+    if sections["details"]:
+        detail_defs = selected_export_fields(
+            payload,
+            "details",
+            [
+                ("date", "วันที่", lambda record: record.get("record_date") or record.get("date") or ""),
+                ("time", "เวลา", lambda record: record.get("record_time", "")),
+                ("empCode", "รหัสพนักงาน", lambda record: record.get("emp_code", "")),
+                ("employeeName", "ชื่อพนักงาน", lambda record: employee_name_for_record(payload, record)),
+                ("pile", "กอง", lambda record: record.get("pile_no") or record.get("pile", "")),
+                ("water", "น้ำหนักน้ำ (กก.)", lambda record: safe_float(record.get("water_weight", record.get("water", 0)))),
+                ("flower", "น้ำหนักดอก (กก.)", lambda record: safe_float(record.get("flower_weight", record.get("flower", 0)))),
+                ("amount", "รวมเงิน", lambda record: safe_float(record.get("total_amount", record.get("grand_total", 0)))),
+                ("createdBy", "ผู้บันทึก", lambda record: record.get("created_by", "")),
+            ],
+        )
+        if detail_defs:
+            detail_sheet = workbook.create_sheet("Details")
+            detail_sheet.append([label for _, label, _ in detail_defs])
+            for record in records:
+                detail_sheet.append([getter(record) for _, _, getter in detail_defs])
+            style_excel_report_sheet(detail_sheet, [1], [16] * max(1, len(detail_defs)))
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def build_production_summary_pdf(payload: dict) -> bytes:
+    start_date, end_date, records, pile_rows, totals, employee_count = production_summary_context(payload)
+    sections = selected_export_sections(payload)
+    _, _, _, section = pdf_styles()
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=14 * mm,
+        bottomMargin=16 * mm,
+    )
+    story = report_header_story(
+        "รายงานสรุปผลผลิตและน้ำหนัก",
+        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}",
+        payload,
+    )
+
+    overview_fields = selected_export_fields(
+        payload,
+        "overview",
+        [
+            ("totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", report_number(totals["total_weight"])),
+            ("water", "น้ำหนักน้ำ (กก.)", report_number(totals["incoming"])),
+            ("flower", "น้ำหนักดอก (กก.)", report_number(totals["outgoing"])),
+            ("amount", "ยอดเงินรวม", money(totals["amount"])),
+            ("employees", "พนักงานที่มีรายการ", report_number(employee_count, 0)),
+            ("records", "จำนวนรายการ", report_number(len(records), 0)),
+        ],
+    )
+    if sections["overview"] and overview_fields:
+        overview = Table(
+            [["หัวข้อ", "ค่า"], *[[label, value] for _, label, value in overview_fields]],
+            colWidths=[78 * mm, 45 * mm],
+        )
+        set_pdf_table_style(overview, 1)
+        story += [Paragraph("ภาพรวม", section), overview, Spacer(1, 7 * mm)]
+
+    if sections["piles"]:
+        pile_defs = selected_export_fields(
+            payload,
+            "piles",
+            [
+                ("pile", "กอง", lambda row: row["pile"]),
+                ("water", "น้ำหนักน้ำ (กก.)", lambda row: report_number(row["incoming"])),
+                ("flower", "น้ำหนักดอก (กก.)", lambda row: report_number(row["outgoing"])),
+                ("total", "รวม (กก.)", lambda row: report_number(row["incoming"] + row["outgoing"])),
+                ("amount", "รวมเงิน", lambda row: money(row["amount"])),
+            ],
+        )
+        if pile_defs:
+            pile_table_rows = [[label for _, label, _ in pile_defs]]
+            for row in pile_rows:
+                pile_table_rows.append([getter(row) for _, _, getter in pile_defs])
+            total_row = {"pile": "รวม", "incoming": totals["incoming"], "outgoing": totals["outgoing"], "amount": totals["amount"]}
+            pile_table_rows.append([getter(total_row) for _, _, getter in pile_defs])
+            col_width = (267 / len(pile_defs)) * mm
+            pile_table = Table(pile_table_rows, repeatRows=1, colWidths=[col_width] * len(pile_defs))
+            set_pdf_table_style(pile_table, 1)
+            story += [Paragraph("สรุปตามกอง", section), pile_table, Spacer(1, 7 * mm)]
+
+    if sections["details"]:
+        detail_defs = selected_export_fields(
+            payload,
+            "details",
+            [
+                ("date", "วันที่", lambda record: format_report_date(record.get("record_date") or record.get("date") or "")),
+                ("time", "เวลา", lambda record: record.get("record_time", "")),
+                ("empCode", "รหัสพนักงาน", lambda record: record.get("emp_code", "")),
+                ("employeeName", "ชื่อพนักงาน", lambda record: employee_name_for_record(payload, record)),
+                ("pile", "กอง", lambda record: record.get("pile_no") or record.get("pile", "")),
+                ("water", "น้ำหนักน้ำ (กก.)", lambda record: report_number(record.get("water_weight", record.get("water", 0)))),
+                ("flower", "น้ำหนักดอก (กก.)", lambda record: report_number(record.get("flower_weight", record.get("flower", 0)))),
+                ("amount", "รวมเงิน", lambda record: money(record.get("total_amount", record.get("grand_total", 0)))),
+                ("createdBy", "ผู้บันทึก", lambda record: record.get("created_by", "")),
+            ],
+        )
+        if detail_defs:
+            detail_rows = [[label for _, label, _ in detail_defs]]
+            for record in records[:100]:
+                detail_rows.append([getter(record) for _, _, getter in detail_defs])
+            col_width = (267 / len(detail_defs)) * mm
+            detail_table = Table(detail_rows, repeatRows=1, colWidths=[col_width] * len(detail_defs))
+            set_pdf_table_style(detail_table, max(1, len(detail_defs) - 3))
+            story += [Paragraph("รายละเอียดรายการ", section), detail_table]
+
+    if len(story) <= 4:
+        story.append(Paragraph("ไม่มีฟิลด์ที่เลือกสำหรับรายงานนี้", section))
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def employee_lookup_maps(payload: dict) -> tuple[dict[str, dict], dict[str, dict]]:
+    employees = payload.get("employees") or []
+    by_id = {str(employee.get("id")): employee for employee in employees}
+    by_code = {str(employee.get("emp_code")): employee for employee in employees}
+    return by_id, by_code
+
+
+GROUP_REPORT_PAY_GROUPS = ["เหมาโรงงาน", "เหมา(นนท์)", "เหมาปุ้ย"]
+GROUP_REPORT_LEGACY_MAP = {
+    "กลุ่ม A": "เหมาโรงงาน",
+    "กลุ่ม B": "เหมา(นนท์)",
+    "กลุ่ม C": "เหมาปุ้ย",
+    "กลุ่ม D": "เหมาปุ้ย",
+}
+
+
+def normalize_group_report_pay_group(value: str) -> str:
+    pay_group = str(value or "").strip()
+    if pay_group in GROUP_REPORT_LEGACY_MAP:
+        return GROUP_REPORT_LEGACY_MAP[pay_group]
+    if pay_group in GROUP_REPORT_PAY_GROUPS:
+        return pay_group
+    return ""
+
+
+def production_fruit_id(record: dict) -> str:
+    return record.get("fruit_type") or "mangosteen"
+
+
+def production_fruit_label(payload: dict, fruit_id: str) -> str:
+    if fruit_id == "all":
+        return "ทั้งหมด"
+    labels = {
+        "mangosteen": "มังคุด",
+        "durian": "ทุเรียน",
+        "mango": "มะม่วง",
+    }
+    return (payload.get("fruit_labels") or {}).get(fruit_id) or labels.get(fruit_id, fruit_id)
+
+
+def group_report_records(payload: dict) -> list[dict]:
+    start_date, end_date = normalized_range(payload)
+    selected_group = payload.get("pay_group") or "all"
+    selected_fruit = payload.get("fruit_type") or "all"
+    by_id, by_code = employee_lookup_maps(payload)
+    rows = []
+    for record in payload.get("production_records", []):
+        record_date = record.get("record_date") or record.get("date") or ""
+        if not (start_date <= record_date <= end_date):
+            continue
+        employee = by_id.get(str(record.get("employee_id") or "")) or by_code.get(str(record.get("emp_code") or ""))
+        pay_group = normalize_group_report_pay_group((employee or {}).get("pay_group") or record.get("pay_group"))
+        fruit_id = production_fruit_id(record)
+        if not pay_group:
+            continue
+        if selected_group != "all" and pay_group != selected_group:
+            continue
+        if selected_fruit != "all" and fruit_id != selected_fruit:
+            continue
+        rows.append(
+            {
+                **record,
+                "record_date": record_date,
+                "employee": employee or {},
+                "pay_group": pay_group,
+                "fruit_type": fruit_id,
+                "fruit_label": production_fruit_label(payload, fruit_id),
+                "employee_name": record.get("employee_name") or (employee or {}).get("fullname") or "",
+            }
+        )
+    return sorted(rows, key=lambda item: (item["pay_group"], item["fruit_label"], item["record_date"], str(item.get("emp_code", ""))))
+
+
+def summarize_group_report(records: list[dict], mode: str = "group") -> list[dict]:
+    summaries: dict[str, dict] = {}
+    for record in records:
+        key = record["pay_group"] if mode == "group" else f"{record['pay_group']}__{record['fruit_type']}"
+        row = summaries.setdefault(
+            key,
+            {
+                "pay_group": record["pay_group"],
+                "fruit_label": record["fruit_label"] if mode == "fruit" else "ทั้งหมด",
+                "employees": set(),
+                "records": 0,
+                "water": 0.0,
+                "flower": 0.0,
+                "total": 0.0,
+                "amount": 0.0,
+            },
+        )
+        water = safe_float(record.get("water_weight", record.get("water", 0)))
+        flower = safe_float(record.get("flower_weight", record.get("flower", 0)))
+        row["employees"].add(record.get("employee_id") or record.get("emp_code") or record.get("employee_name") or "")
+        row["records"] += 1
+        row["water"] += water
+        row["flower"] += flower
+        row["total"] += water + flower
+        row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
+    return sorted(summaries.values(), key=lambda item: (item["pay_group"], item["fruit_label"]))
+
+
+def group_report_employee_rows(records: list[dict]) -> list[dict]:
+    rows: dict[str, dict] = {}
+    for record in records:
+        key = str(record.get("employee_id") or record.get("emp_code") or record.get("employee_name") or "")
+        row = rows.setdefault(
+            key,
+            {
+                "pay_group": record["pay_group"],
+                "emp_code": record.get("emp_code") or record.get("employee", {}).get("emp_code") or "-",
+                "fullname": record.get("employee_name") or record.get("employee", {}).get("fullname") or "-",
+                "records": 0,
+                "water": 0.0,
+                "flower": 0.0,
+                "total": 0.0,
+                "amount": 0.0,
+            },
+        )
+        water = safe_float(record.get("water_weight", record.get("water", 0)))
+        flower = safe_float(record.get("flower_weight", record.get("flower", 0)))
+        row["records"] += 1
+        row["water"] += water
+        row["flower"] += flower
+        row["total"] += water + flower
+        row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
+    return sorted(rows.values(), key=lambda item: (item["pay_group"], item["emp_code"]))
+
+
+def group_report_options(payload: dict) -> dict:
+    options = payload.get("export_options") or {}
+    return {
+        "summary": bool(options.get("summary", True)),
+        "fruit": bool(options.get("fruit", True)),
+        "employees": bool(options.get("employees", True)),
+        "details": bool(options.get("details", False)),
+    }
+
+
+def build_group_report_excel(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    records = group_report_records(payload)
+    options = group_report_options(payload)
+    group_rows = summarize_group_report(records, "group")
+    fruit_rows = summarize_group_report(records, "fruit")
+    employee_rows = group_report_employee_rows(records)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Group Report"
+    sheet.merge_cells("A1:H1")
+    sheet["A1"] = COMPANY_NAME
+    sheet["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
+    sheet.merge_cells("A2:H2")
+    sheet["A2"] = "รายงานแบบกลุ่ม"
+    sheet["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
+    sheet.merge_cells("A3:H3")
+    sheet["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | กลุ่ม {payload.get('group_label', 'ทุกกลุ่ม')} | ผลไม้ {payload.get('fruit_label', 'ทั้งหมด')}"
+    sheet.merge_cells("A4:H4")
+    sheet["A4"] = export_meta_text(payload)
+    sheet.append([])
+    style_excel_report_sheet(sheet, [1], [18, 18, 18, 18, 18, 18, 18, 18])
+
+    if options["summary"]:
+        summary = workbook.create_sheet("Summary By Group")
+        summary.append(["กลุ่ม", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน"])
+        for row in group_rows:
+            summary.append([row["pay_group"], len(row["employees"]), row["records"], row["water"], row["flower"], row["total"], row["amount"]])
+        style_excel_report_sheet(summary, [1], [20, 12, 12, 14, 14, 14, 16])
+
+    if options["fruit"]:
+        fruit = workbook.create_sheet("Group By Fruit")
+        fruit.append(["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน"])
+        for row in fruit_rows:
+            fruit.append([row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], row["water"], row["flower"], row["total"], row["amount"]])
+        style_excel_report_sheet(fruit, [1], [20, 16, 12, 12, 14, 14, 14, 16])
+
+    if options["employees"]:
+        employees = workbook.create_sheet("Employees")
+        employees.append(["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน"])
+        for row in employee_rows:
+            employees.append([row["pay_group"], row["emp_code"], row["fullname"], row["records"], row["water"], row["flower"], row["total"], row["amount"]])
+        style_excel_report_sheet(employees, [1], [20, 14, 26, 12, 14, 14, 14, 16])
+
+    if options["details"]:
+        details = workbook.create_sheet("Details")
+        details.append(["วันที่", "กลุ่ม", "ผลไม้", "รหัส", "ชื่อพนักงาน", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวมเงิน"])
+        for record in records:
+            details.append([record["record_date"], record["pay_group"], record["fruit_label"], record.get("emp_code", ""), record.get("employee_name", ""), record.get("pile_no") or record.get("pile", ""), safe_float(record.get("water_weight", record.get("water", 0))), safe_float(record.get("flower_weight", record.get("flower", 0))), safe_float(record.get("total_amount", record.get("grand_total", 0)))])
+        style_excel_report_sheet(details, [1], [14, 20, 16, 14, 26, 10, 14, 14, 16])
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def build_group_report_pdf(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    records = group_report_records(payload)
+    options = group_report_options(payload)
+    group_rows = summarize_group_report(records, "group")
+    fruit_rows = summarize_group_report(records, "fruit")
+    employee_rows = group_report_employee_rows(records)
+    _, _, _, section = pdf_styles()
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=15 * mm, rightMargin=15 * mm, topMargin=14 * mm, bottomMargin=16 * mm)
+    story = report_header_story(
+        "รายงานแบบกลุ่ม",
+        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | กลุ่ม {payload.get('group_label', 'ทุกกลุ่ม')} | ผลไม้ {payload.get('fruit_label', 'ทั้งหมด')}",
+        payload,
+    )
+
+    def add_table(title: str, headers: list[str], rows: list[list], widths: list[float] | None = None):
+        table_rows = [headers] + rows
+        if len(table_rows) == 1:
+            table_rows.append(["-" for _ in headers])
+        col_widths = widths or [(267 / len(headers)) * mm for _ in headers]
+        table = Table(table_rows, repeatRows=1, colWidths=col_widths)
+        set_pdf_table_style(table, 1)
+        story.extend([Paragraph(title, section), table, Spacer(1, 7 * mm)])
+
+    if options["summary"]:
+        add_table(
+            "สรุปตามกลุ่ม",
+            ["กลุ่ม", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน"],
+            [[row["pay_group"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"])] for row in group_rows],
+        )
+
+    if options["fruit"]:
+        add_table(
+            "สรุปตามกลุ่มและผลไม้",
+            ["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน"],
+            [[row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"])] for row in fruit_rows],
+        )
+
+    if options["employees"]:
+        add_table(
+            "รายละเอียดพนักงานในกลุ่ม",
+            ["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน"],
+            [[row["pay_group"], row["emp_code"], row["fullname"], row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"])] for row in employee_rows[:80]],
+        )
+
+    if options["details"]:
+        add_table(
+            "รายละเอียดรายการ",
+            ["วันที่", "กลุ่ม", "ผลไม้", "รหัส", "ชื่อ", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวมเงิน"],
+            [[format_report_date(record["record_date"]), record["pay_group"], record["fruit_label"], record.get("emp_code", ""), record.get("employee_name", ""), record.get("pile_no") or record.get("pile", ""), report_number(record.get("water_weight", record.get("water", 0))), report_number(record.get("flower_weight", record.get("flower", 0))), money(record.get("total_amount", record.get("grand_total", 0)))] for record in records[:100]],
+        )
+
+    if len(story) <= 4:
+        story.append(Paragraph("ไม่มีส่วนรายงานที่เลือก", section))
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def summarize_time(records: list[dict]) -> tuple[dict, list[dict], list[dict]]:
+    summary = {
+        "records": len(records),
+        "employees": len({record.get("employee_id") or record.get("emp_code") or record.get("fullname") for record in records}),
+        "days": len({record.get("record_date") for record in records}),
+        "raw_minutes": sum(safe_float(record.get("raw_minutes")) for record in records),
+        "break_minutes": sum(safe_float(record.get("break_minutes")) for record in records),
+        "net_minutes": sum(safe_float(record.get("net_minutes")) for record in records),
+        "late": sum(1 for record in records if is_late_time(record.get("clock_in"))),
+        "early": sum(1 for record in records if is_early_out_time(record.get("clock_out"))),
+    }
+    by_date: dict[str, dict] = {}
+    by_employee: dict[str, dict] = {}
+    for record in records:
+        date_key = record.get("record_date") or "-"
+        daily = by_date.setdefault(date_key, {"date": date_key, "records": 0, "employees": set(), "net_minutes": 0.0, "late": 0, "early": 0})
+        daily["records"] += 1
+        daily["employees"].add(record.get("employee_id") or record.get("emp_code") or record.get("fullname") or "")
+        daily["net_minutes"] += safe_float(record.get("net_minutes"))
+        daily["late"] += 1 if is_late_time(record.get("clock_in")) else 0
+        daily["early"] += 1 if is_early_out_time(record.get("clock_out")) else 0
+
+        employee_key = str(record.get("employee_id") or record.get("emp_code") or record.get("fullname") or "")
+        employee = by_employee.setdefault(
+            employee_key,
+            {
+                "emp_code": record.get("emp_code", "-"),
+                "fullname": record.get("fullname", "-"),
+                "department": record.get("department", "-"),
+                "records": 0,
+                "days": set(),
+                "net_minutes": 0.0,
+                "late": 0,
+                "early": 0,
+                "first_in": record.get("clock_in") or "-",
+                "last_out": record.get("clock_out") or "-",
+            },
+        )
+        employee["records"] += 1
+        employee["days"].add(date_key)
+        employee["net_minutes"] += safe_float(record.get("net_minutes"))
+        employee["late"] += 1 if is_late_time(record.get("clock_in")) else 0
+        employee["early"] += 1 if is_early_out_time(record.get("clock_out")) else 0
+        if record.get("clock_in") and (employee["first_in"] == "-" or record["clock_in"] < employee["first_in"]):
+            employee["first_in"] = record["clock_in"]
+        if record.get("clock_out") and (employee["last_out"] == "-" or record["clock_out"] > employee["last_out"]):
+            employee["last_out"] = record["clock_out"]
+
+    daily_rows = sorted(by_date.values(), key=lambda item: item["date"])
+    employee_rows = sorted(by_employee.values(), key=lambda item: (str(item["emp_code"]), str(item["fullname"])))
+    return summary, daily_rows, employee_rows
+
+
+def build_time_summary_excel(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    records = filtered_time_records(payload)
+    summary, daily_rows, employee_rows = summarize_time(records)
+    department_label = payload.get("department_label") or payload.get("department") or "ทุกแผนก"
+    workbook = Workbook()
+    overview = workbook.active
+    overview.title = "Time Summary"
+    overview.merge_cells("A1:H1")
+    overview["A1"] = COMPANY_NAME
+    overview["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
+    overview.merge_cells("A2:H2")
+    overview["A2"] = "รายงานสรุปเวลาเข้างาน"
+    overview["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
+    overview.merge_cells("A3:H3")
+    overview["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | แผนก {department_label}"
+    overview.merge_cells("A4:H4")
+    overview["A4"] = export_meta_text(payload)
+    add_excel_logo(overview, "I1")
+    overview.append([])
+    overview.append(["หัวข้อ", "ค่า"])
+    overview.append(["จำนวนรายการ", summary["records"]])
+    overview.append(["จำนวนพนักงาน", summary["employees"]])
+    overview.append(["จำนวนวัน", summary["days"]])
+    overview.append(["เวลาทำงานสุทธิ", summary["net_minutes"] / 60])
+    overview.append(["เวลาพักรวม", summary["break_minutes"] / 60])
+    overview.append(["มาสาย", summary["late"]])
+    overview.append(["ออกก่อน", summary["early"]])
+    style_excel_report_sheet(overview, [6], [30, 22, 14, 14, 14, 14, 14, 14, 14])
+
+    daily = workbook.create_sheet("Daily Summary")
+    daily.append(["วันที่", "จำนวนรายการ", "จำนวนพนักงาน", "ชั่วโมงสุทธิ", "มาสาย", "ออกก่อน"])
+    for row in daily_rows:
+        daily.append([row["date"], row["records"], len(row["employees"]), row["net_minutes"] / 60, row["late"], row["early"]])
+    style_excel_report_sheet(daily, [1], [15, 16, 18, 16, 12, 12])
+
+    employee_sheet = workbook.create_sheet("Employee Summary")
+    employee_sheet.append(["รหัสพนักงาน", "ชื่อพนักงาน", "แผนก", "จำนวนวัน", "จำนวนรายการ", "ชั่วโมงสุทธิ", "มาสาย", "ออกก่อน", "เข้าเร็วสุด", "ออกช้าสุด"])
+    for row in employee_rows:
+        employee_sheet.append([row["emp_code"], row["fullname"], row["department"], len(row["days"]), row["records"], row["net_minutes"] / 60, row["late"], row["early"], row["first_in"], row["last_out"]])
+    style_excel_report_sheet(employee_sheet, [1], [16, 25, 16, 12, 14, 14, 12, 12, 14, 14])
+
+    detail = workbook.create_sheet("Details")
+    detail.append(["วันที่", "รหัสพนักงาน", "ชื่อพนักงาน", "แผนก", "เข้า", "ออก", "พัก(นาที)", "สุทธิ(นาที)", "ชั่วโมง", "ผู้บันทึก"])
+    for record in records:
+        net_minutes = safe_float(record.get("net_minutes"))
+        detail.append([record.get("record_date", ""), record.get("emp_code", ""), record.get("fullname", ""), record.get("department", ""), record.get("clock_in", ""), record.get("clock_out", ""), safe_float(record.get("break_minutes")), net_minutes, net_minutes / 60, record.get("created_by", "")])
+    style_excel_report_sheet(detail, [1], [14, 16, 25, 16, 12, 12, 12, 14, 12, 20])
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def build_time_summary_pdf(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    records = filtered_time_records(payload)
+    summary, daily_rows, employee_rows = summarize_time(records)
+    department_label = payload.get("department_label") or payload.get("department") or "ทุกแผนก"
+    _, _, _, section = pdf_styles()
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=14 * mm,
+        bottomMargin=16 * mm,
+    )
+    story = report_header_story(
+        "รายงานสรุปเวลาเข้างาน",
+        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | แผนก {department_label}",
+        payload,
+    )
+    overview = Table(
+        [
+            ["รายการ", "พนักงาน", "จำนวนวัน", "เวลาสุทธิ", "เวลาพัก", "มาสาย", "ออกก่อน"],
+            [
+                report_number(summary["records"], 0),
+                report_number(summary["employees"], 0),
+                report_number(summary["days"], 0),
+                minutes_text(summary["net_minutes"]),
+                minutes_text(summary["break_minutes"]),
+                report_number(summary["late"], 0),
+                report_number(summary["early"], 0),
+            ],
+        ],
+        colWidths=[28 * mm, 28 * mm, 28 * mm, 43 * mm, 43 * mm, 28 * mm, 28 * mm],
+    )
+    set_pdf_table_style(overview, 0)
+    story += [Paragraph("ภาพรวม", section), overview, Spacer(1, 7 * mm)]
+
+    daily_table_rows = [["วันที่", "รายการ", "พนักงาน", "เวลาสุทธิ", "มาสาย", "ออกก่อน"]]
+    for row in daily_rows:
+        daily_table_rows.append([format_report_date(row["date"]), report_number(row["records"], 0), report_number(len(row["employees"]), 0), minutes_text(row["net_minutes"]), report_number(row["late"], 0), report_number(row["early"], 0)])
+    if len(daily_table_rows) == 1:
+        daily_table_rows.append(["-", "0", "0", "0 ชม. 0 นาที", "0", "0"])
+    daily_table = Table(daily_table_rows, repeatRows=1, colWidths=[38 * mm, 32 * mm, 35 * mm, 55 * mm, 32 * mm, 32 * mm])
+    set_pdf_table_style(daily_table, 1)
+    story += [Paragraph("สรุปรายวัน", section), daily_table, Spacer(1, 7 * mm)]
+
+    employee_table_rows = [["รหัส", "ชื่อพนักงาน", "แผนก", "วัน", "รายการ", "เวลาสุทธิ", "สาย", "ออกก่อน"]]
+    for row in employee_rows[:80]:
+        employee_table_rows.append([row["emp_code"], row["fullname"], row["department"], report_number(len(row["days"]), 0), report_number(row["records"], 0), minutes_text(row["net_minutes"]), report_number(row["late"], 0), report_number(row["early"], 0)])
+    if len(employee_table_rows) == 1:
+        employee_table_rows.append(["-", "-", "-", "0", "0", "0 ชม. 0 นาที", "0", "0"])
+    employee_table = Table(employee_table_rows, repeatRows=1, colWidths=[24 * mm, 48 * mm, 34 * mm, 20 * mm, 25 * mm, 45 * mm, 20 * mm, 25 * mm])
+    set_pdf_table_style(employee_table, 3)
+    story += [Paragraph("สรุปรายพนักงาน", section), employee_table]
+    doc.build(story)
+    return buffer.getvalue()
+
+
+class ReportHandler(BaseHTTPRequestHandler):
+    def end_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        super().end_headers()
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.end_headers()
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        payload = self.read_json()
+
+        if parsed.path == "/reports/sync":
+            save_data(payload)
+            self.send_json({"status": "ok"})
+            return
+
+        if parsed.path == "/reports/selected-employees-pdf":
+            data = {
+                "employees": payload.get("employees", []),
+                "production_records": payload.get("production_records", []),
+            }
+            date = payload.get("date", datetime.now().date().isoformat())
+            employee_ids = [int(value) for value in payload.get("employee_ids", [])]
+            content = build_pdf(data, date, employee_ids)
+            self.send_file(
+                content,
+                "application/pdf",
+                f"selected-employees-{date}.pdf",
+            )
+            return
+
+        if parsed.path == "/reports/employee-range-pdf":
+            data = {
+                "employees": payload.get("employees", []),
+                "production_records": payload.get("production_records", []),
+            }
+            start_date = payload.get("start_date", datetime.now().date().isoformat())
+            end_date = payload.get("end_date", start_date)
+            employee_id = int(payload.get("employee_id", 0))
+            content = build_employee_range_pdf(data, start_date, end_date, employee_id)
+            self.send_file(
+                content,
+                "application/pdf",
+                f"employee-{employee_id}-{start_date}-to-{end_date}.pdf",
+            )
+            return
+
+        if parsed.path == "/reports/employee-range-excel":
+            data = {
+                "employees": payload.get("employees", []),
+                "production_records": payload.get("production_records", []),
+            }
+            start_date = payload.get("start_date", datetime.now().date().isoformat())
+            end_date = payload.get("end_date", start_date)
+            employee_id = int(payload.get("employee_id", 0))
+            content = build_employee_range_excel(data, start_date, end_date, employee_id)
+            self.send_file(
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                f"employee-{employee_id}-{start_date}-to-{end_date}.xlsx",
+            )
+            return
+
+        if parsed.path == "/reports/summary-by-pile-pdf":
+            data = {
+                "employees": payload.get("employees", []),
+                "production_records": payload.get("production_records", []),
+            }
+            start_date = payload.get("start_date", datetime.now().date().isoformat())
+            content = build_summary_by_pile_pdf(data, payload)
+            self.send_file(
+                content,
+                "application/pdf",
+                f"Summary_ByPile_{clean_filename_date(start_date)}.pdf",
+            )
+            return
+
+        if parsed.path == "/reports/summary-by-pile-excel":
+            data = {
+                "employees": payload.get("employees", []),
+                "production_records": payload.get("production_records", []),
+            }
+            start_date = payload.get("start_date", datetime.now().date().isoformat())
+            content = build_summary_by_pile_excel(data, payload)
+            self.send_file(
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                f"Summary_ByPile_{clean_filename_date(start_date)}.xlsx",
+            )
+            return
+
+        if parsed.path == "/reports/time-full-export-excel":
+            start_date = payload.get("start_date", datetime.now().date().isoformat())
+            end_date = payload.get("end_date", start_date)
+            content = build_time_full_export_excel(payload)
+            self.send_file(
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                f"Full_Details_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.xlsx",
+            )
+            return
+
+        if parsed.path == "/reports/time-receipts-pdf":
+            start_date = payload.get("start_date", datetime.now().date().isoformat())
+            end_date = payload.get("end_date", start_date)
+            content = build_time_receipts_pdf(payload)
+            self.send_file(
+                content,
+                "application/pdf",
+                f"Time_Receipts_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.pdf",
+            )
+            return
+
+        if parsed.path == "/reports/production-summary-pdf":
+            start_date, end_date = normalized_range(payload)
+            content = build_production_summary_pdf(payload)
+            self.send_file(
+                content,
+                "application/pdf",
+                f"Production_Summary_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.pdf",
+            )
+            return
+
+        if parsed.path == "/reports/production-summary-excel":
+            start_date, end_date = normalized_range(payload)
+            content = build_production_summary_excel(payload)
+            self.send_file(
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                f"Production_Summary_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.xlsx",
+            )
+            return
+
+        if parsed.path == "/reports/group-report-pdf":
+            start_date, end_date = normalized_range(payload)
+            content = build_group_report_pdf(payload)
+            self.send_file(
+                content,
+                "application/pdf",
+                f"Group_Report_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.pdf",
+            )
+            return
+
+        if parsed.path == "/reports/group-report-excel":
+            start_date, end_date = normalized_range(payload)
+            content = build_group_report_excel(payload)
+            self.send_file(
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                f"Group_Report_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.xlsx",
+            )
+            return
+
+        if parsed.path == "/reports/time-summary-pdf":
+            start_date, end_date = normalized_range(payload)
+            content = build_time_summary_pdf(payload)
+            self.send_file(
+                content,
+                "application/pdf",
+                f"Time_Summary_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.pdf",
+            )
+            return
+
+        if parsed.path == "/reports/time-summary-excel":
+            start_date, end_date = normalized_range(payload)
+            content = build_time_summary_excel(payload)
+            self.send_file(
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                f"Time_Summary_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.xlsx",
+            )
+            return
+
+        self.send_error(404, "Not found")
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+
+        if parsed.path == "/reports/employee-daily-pdf":
+            data = load_data()
+            date = query.get("date", [datetime.now().date().isoformat()])[0]
+            employee_id = int(query.get("employee_id", ["0"])[0])
+            content = build_pdf(data, date, [employee_id])
+            self.send_file(content, "application/pdf", f"employee-{employee_id}-{date}.pdf")
+            return
+
+        if parsed.path == "/reports/daily-excel":
+            data = load_data()
+            date = query.get("date", [datetime.now().date().isoformat()])[0]
+            content = build_daily_excel(data, date)
+            self.send_file(
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                f"daily-production-{date}.xlsx",
+            )
+            return
+
+        if self.send_static_file(parsed.path):
+            return
+
+        self.send_error(404, "Not found")
+
+    def read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        if not length:
+            return {}
+        return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def send_json(self, payload: dict) -> None:
+        content = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def send_file(self, content: bytes, content_type: str, filename: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def send_static_file(self, request_path: str) -> bool:
+        safe_path = request_path.split("?", 1)[0].lstrip("/")
+        if not safe_path:
+            safe_path = "index.html"
+        file_path = (BASE_DIR / safe_path).resolve()
+        if not str(file_path).startswith(str(BASE_DIR.resolve())):
+            return False
+        if not file_path.is_file():
+            return False
+
+        content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        content = file_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+        return True
+
+
+def main() -> None:
+    server = ThreadingHTTPServer((HOST, PORT), ReportHandler)
+    try:
+        print(f"Report server running at http://{HOST}:{PORT}", flush=True)
+    except Exception:
+        pass
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
