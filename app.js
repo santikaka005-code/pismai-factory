@@ -765,18 +765,19 @@ function isOneDecimalWeightInput(value) {
 }
 
 function getSession() {
-  const raw = localStorage.getItem(SESSION_KEY);
+  const raw = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY);
   if (!raw) return null;
 
   try {
     return JSON.parse(raw);
   } catch {
+    sessionStorage.removeItem(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
     return null;
   }
 }
 
-function saveSession(user) {
+function saveSession(user, rememberSession = false) {
   const session = {
     token: `mock-token-${user.role}-${Date.now()}`,
     user: {
@@ -794,10 +795,16 @@ function saveSession(user) {
     loginAt: new Date().toISOString()
   };
 
-  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  if (rememberSession) {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  } else {
+    localStorage.removeItem(SESSION_KEY);
+  }
 }
 
 function clearSession() {
+  sessionStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(SESSION_KEY);
 }
 
@@ -2206,17 +2213,17 @@ function renderLogin(errorMessage = "") {
 
             <label class="field">
               <span>ชื่อผู้ใช้งาน</span>
-              <input id="username" name="username" autocomplete="username" placeholder="กรอกชื่อผู้ใช้งาน" value="admin" required />
+              <input id="username" name="username" autocomplete="username" placeholder="กรอกชื่อผู้ใช้งาน" required />
             </label>
 
             <label class="field">
               <span>รหัสผ่าน</span>
-              <input id="password" name="password" type="password" autocomplete="current-password" placeholder="กรอกรหัสผ่าน" value="admin123" required />
+              <input id="password" name="password" type="password" autocomplete="current-password" placeholder="กรอกรหัสผ่าน" required />
             </label>
 
             <div class="login-options">
               <label class="remember-check">
-                <input type="checkbox" checked />
+                <input name="remember_session" type="checkbox" />
                 <span>จดจำการเข้าสู่ระบบ</span>
               </label>
               <button class="forgot-button" type="button">ลืมรหัสผ่าน?</button>
@@ -2249,6 +2256,7 @@ function handleLogin(event) {
   const form = new FormData(event.currentTarget);
   const username = String(form.get("username") || "").trim();
   const password = String(form.get("password") || "");
+  const rememberSession = form.get("remember_session") === "on";
   const user =
     getAccountUsers().find(
       (accountUser) =>
@@ -2268,8 +2276,13 @@ function handleLogin(event) {
     return;
   }
 
-  saveSession(user);
-  location.hash = "#/dashboard";
+  saveSession(user, rememberSession);
+  sessionStorage.setItem("pismai_welcome_user", user.username);
+  if (location.hash === "#/dashboard") {
+    render();
+  } else {
+    location.hash = "#/dashboard";
+  }
 }
 
 function renderApp(user, route) {
@@ -2279,10 +2292,16 @@ function renderApp(user, route) {
   );
   const navOrder = ["dashboard", "production", "time-report", "summary-person", "summary-all", "compare-data", "settings"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
+  const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
 
   app.innerHTML = `
     <main class="app-layout">
       <div class="drawer-overlay" data-close-drawer></div>
+      ${
+        shouldShowWelcome
+          ? `<div class="welcome-toast" role="status">ยินดีต้อนรับ ${escapeHtml(user.fullname)}</div>`
+          : ""
+      }
       <header class="topbar">
         <div class="topbar-inner">
           <div class="topbar-brand-row">
@@ -2336,6 +2355,15 @@ function renderApp(user, route) {
       </section>
     </main>
   `;
+
+  if (shouldShowWelcome) {
+    sessionStorage.removeItem("pismai_welcome_user");
+    window.setTimeout(() => {
+      const toast = document.querySelector(".welcome-toast");
+      toast?.classList.add("welcome-toast-hide");
+      window.setTimeout(() => toast?.remove(), 280);
+    }, 3200);
+  }
 
   bindAppEvents(user, moduleItem);
 }
@@ -8991,13 +9019,13 @@ function renderSummaryGroupReport(moduleItem) {
       <section class="summary-grid group-report-top-grid">
         <section class="panel chart-panel">
           <div class="section-title-row">
-            <h3>เปรียบเทียบน้ำหนักรวมตามกลุ่ม</h3>
+            <h3>น้ำหนักตามกลุ่ม</h3>
             <span class="summary-mode-pill">${escapeHtml(getProductionFruitLabel(groupReportFruit))}</span>
           </div>
           ${groupRows.length ? renderGroupReportBarChart(groupRows) : `<div class="empty-state">ยังไม่มีข้อมูลตามตัวกรองที่เลือก</div>`}
         </section>
 
-        <section class="table-card">
+        <section class="table-card group-report-summary-card">
           <div class="table-heading">สรุปตามกลุ่ม</div>
           <div class="table-scroll">
             <table class="group-report-compact-table">

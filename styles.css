@@ -630,6 +630,31 @@ input:disabled {
   min-height: 100vh;
 }
 
+.welcome-toast {
+  position: fixed;
+  top: 78px;
+  left: 50%;
+  z-index: 120;
+  max-width: min(360px, calc(100vw - 32px));
+  border: 1px solid rgba(167, 243, 208, 0.42);
+  border-radius: 8px;
+  padding: 12px 16px;
+  color: #ffffff;
+  background: rgba(15, 118, 110, 0.96);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.18);
+  font-weight: 800;
+  line-height: 1.45;
+  text-align: center;
+  transform: translateX(-50%);
+  transition: opacity 0.24s ease, transform 0.24s ease;
+}
+
+.welcome-toast-hide {
+  opacity: 0;
+  transform: translate(-50%, -8px);
+  pointer-events: none;
+}
+
 .topbar {
   border-bottom: 1px solid #0f1c2a;
   background: #0f1723;
@@ -2315,45 +2340,51 @@ tr:last-child td {
 }
 
 .group-report-top-grid {
-  grid-template-columns: minmax(280px, 0.68fr) minmax(560px, 1.32fr);
-  gap: 18px;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 14px;
 }
 
 .group-report-top-grid .chart-panel {
-  min-height: 260px;
+  min-height: 245px;
+  padding-inline: 14px;
 }
 
 .group-report-top-grid .table-card {
   min-width: 0;
+  overflow: hidden;
 }
 
 .group-report-top-grid .table-scroll {
-  overflow-x: hidden;
+  overflow-x: clip;
+  width: 100%;
 }
 
 .group-report-compact-table {
   table-layout: fixed;
   min-width: 0;
   width: 100%;
+  max-width: 100%;
 }
 
 .group-report-compact-table th,
 .group-report-compact-table td {
-  padding: 10px 7px;
-  font-size: 12px;
+  padding: 8px 4px;
+  font-size: 11px;
+  line-height: 1.25;
   white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .group-report-compact-table th:nth-child(1),
 .group-report-compact-table td:nth-child(1) {
-  width: 22%;
+  width: 25%;
 }
 
 .group-report-compact-table th:nth-child(2),
 .group-report-compact-table td:nth-child(2),
 .group-report-compact-table th:nth-child(3),
 .group-report-compact-table td:nth-child(3) {
-  width: 11%;
+  width: 9%;
   text-align: center;
 }
 
@@ -2363,14 +2394,45 @@ tr:last-child td {
 .group-report-compact-table td:nth-child(5),
 .group-report-compact-table th:nth-child(6),
 .group-report-compact-table td:nth-child(6) {
-  width: 13%;
+  width: 11%;
   text-align: right;
 }
 
 .group-report-compact-table th:nth-child(7),
 .group-report-compact-table td:nth-child(7) {
-  width: 17%;
+  width: 13%;
   text-align: right;
+}
+
+.group-report-summary-card {
+  max-width: 100%;
+}
+
+.group-report-summary-card th,
+.group-report-summary-card td {
+  min-width: 0;
+}
+
+.group-report-top-grid .group-report-bars {
+  gap: 8px;
+  padding-inline: 0;
+}
+
+.group-report-top-grid .group-report-bar-track {
+  width: 42px;
+  height: 135px;
+}
+
+@media (max-width: 1180px) {
+  .group-report-top-grid {
+    grid-template-columns: 300px minmax(0, 1fr);
+  }
+
+  .group-report-compact-table th,
+  .group-report-compact-table td {
+    padding-inline: 3px;
+    font-size: 10.5px;
+  }
 }
 
 .table-title-row {
