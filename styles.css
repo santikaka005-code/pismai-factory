@@ -422,11 +422,31 @@ p {
 }
 
 .remember-check input {
+  position: relative;
+  display: grid;
   flex: 0 0 auto;
   width: 18px;
   height: 18px;
+  place-content: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
   margin: 0;
-  accent-color: #3f8f35;
+  appearance: none;
+  background: #ffffff;
+}
+
+.remember-check input:checked {
+  border-color: #3f8f35;
+  background: #3f8f35;
+}
+
+.remember-check input:checked::after {
+  width: 5px;
+  height: 9px;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  content: "";
+  transform: translateY(-1px) rotate(45deg);
 }
 
 .forgot-button {
