@@ -87,7 +87,7 @@ const systemDeveloperAccount = {
 const modules = [
   {
     id: "dashboard",
-    label: "สรุปผลทั้งหมด",
+    label: "หน้าหลัก",
     roles: ["admin", "hr", "operator", "supervisor"],
     description: "Production, wage, and approval overview."
   },
@@ -306,8 +306,8 @@ modules.forEach((moduleItem) => {
 });
 
 const levelRouteAccess = {
-  C1: ["production"],
-  C2: ["production", "summary-person"],
+  C1: ["dashboard", "production"],
+  C2: ["dashboard", "production", "summary-person"],
   C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report"],
   C4: ["dashboard", "summary-all", "summary-main", "summary-person", "reports", "time-report", "settings", "employees"],
   C5: [
@@ -347,8 +347,8 @@ const levelRouteAccess = {
 };
 
 const defaultRouteByLevel = {
-  C1: "production",
-  C2: "production",
+  C1: "dashboard",
+  C2: "dashboard",
   C3: "dashboard",
   C4: "dashboard",
   C5: "dashboard",
@@ -895,6 +895,14 @@ function getDefaultRouteForUser(user) {
   const preferredRoute = defaultRouteByLevel[getUserLevel(user)] || "dashboard";
   if (canOpen(user, preferredRoute)) return preferredRoute;
   return getAllowedRoutesForUser(user).find((route) => canOpen(user, route)) || "dashboard";
+}
+
+function visibleNavModulesForUser(user) {
+  const navRouteIds = ["dashboard", "production", "time-report", "summary-person", "summary-all", "compare-data", "reports", "settings"];
+  return navRouteIds
+    .map((routeId) => modules.find((item) => item.id === routeId))
+    .filter((item) => item && !item.hidden)
+    .map((item) => ({ ...item, locked: !canOpen(user, item.id) }));
 }
 
 function canOpen(user, moduleId) {
@@ -2500,9 +2508,7 @@ function renderApp(user, route) {
   }
 
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
-  const visibleModules = modules.filter(
-    (item) => !item.hidden && canOpen(user, item.id)
-  );
+  const visibleModules = visibleNavModulesForUser(user);
   const navOrder = ["dashboard", "production", "time-report", "summary-person", "summary-all", "compare-data", "reports", "settings"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
@@ -2545,11 +2551,12 @@ function renderApp(user, route) {
             ${visibleModules
               .map(
                 (item) => `
-                  <button class="nav-button ${item.id === route ? "active" : ""}" data-route="${item.id}" type="button">
+                  <button class="nav-button ${item.id === route ? "active" : ""} ${item.locked ? "locked" : ""}" data-route="${item.id}" type="button">
                     <span class="nav-label">
                       <span class="nav-icon">${escapeHtml(item.icon || "•")}</span>
                       ${escapeHtml(item.label)}
                     </span>
+                    ${item.locked ? `<span class="nav-lock">ล็อก</span>` : ""}
                   </button>
                 `
               )
@@ -2767,6 +2774,18 @@ function renderLegacyDashboard(moduleItem) {
     </section>
   `;
 }
+function renderDashboardActionCard(user, route, icon, title, description) {
+  const locked = !canOpen(user, route);
+  return `
+    <button class="factory-action-card ${locked ? "locked" : ""}" type="button" data-route="${route}">
+      <span class="factory-action-icon">${escapeHtml(icon)}</span>
+      <strong>${escapeHtml(title)}</strong>
+      <small>${escapeHtml(description)}</small>
+      ${locked ? `<span class="factory-card-lock">ต้องใช้สิทธิ์สูงกว่า</span>` : ""}
+    </button>
+  `;
+}
+
 function renderDashboard(user, moduleItem) {
   const dateLabel = new Intl.DateTimeFormat("th-TH", {
     weekday: "long",
@@ -2774,8 +2793,7 @@ function renderDashboard(user, moduleItem) {
     month: "long",
     day: "numeric"
   }).format(new Date());
-  const canManageReports = ["admin", "hr"].includes(user.role);
-  const canManageSettings = user.role === "admin";
+  const canViewSummary = canOpen(user, "summary-all");
 
   return `
     <section class="factory-dashboard">
@@ -2789,7 +2807,11 @@ function renderDashboard(user, moduleItem) {
           </p>
           <div class="factory-hero-actions">
             <button class="btn btn-primary" type="button" data-route="production">บันทึกผลผลิต</button>
-            <button class="btn btn-outline" type="button" data-route="summary-all">ดูสรุปข้อมูลทั้งหมด</button>
+            ${
+              canViewSummary
+                ? `<button class="btn btn-outline" type="button" data-route="summary-all">ดูสรุปข้อมูลทั้งหมด</button>`
+                : `<button class="btn btn-outline btn-locked" type="button" data-route="summary-all">สรุปข้อมูลถูกล็อก</button>`
+            }
           </div>
         </div>
         <div class="factory-hero-brand">
@@ -2821,34 +2843,12 @@ function renderDashboard(user, moduleItem) {
           </div>
         </div>
         <div class="factory-action-grid">
-          <button class="factory-action-card" type="button" data-route="production">
-            <span class="factory-action-icon">▣</span>
-            <strong>บันทึกผลผลิต</strong>
-            <small>กรอกน้ำหนักน้ำ ดอก และค่าแรงของพนักงาน</small>
-          </button>
-          <button class="factory-action-card" type="button" data-route="summary-all">
-            <span class="factory-action-icon">▤</span>
-            <strong>สรุปข้อมูลทั้งหมด</strong>
-            <small>เปิดหน้ารายงานตัวเลข กราฟ และตารางรายละเอียด</small>
-          </button>
-          ${
-            canManageReports
-              ? `<button class="factory-action-card" type="button" data-route="summary-person">
-                  <span class="factory-action-icon">◎</span>
-                  <strong>สรุปรายบุคคล</strong>
-                  <small>ตรวจสอบผลงานแยกตามพนักงาน</small>
-                </button>`
-              : ""
-          }
-          ${
-            canManageSettings
-              ? `<button class="factory-action-card" type="button" data-route="settings">
-                  <span class="factory-action-icon">⚙</span>
-                  <strong>ตั้งค่าระบบ</strong>
-                  <small>จัดการข้อมูลหลักและสิทธิ์ผู้ใช้งาน</small>
-                </button>`
-              : ""
-          }
+          ${renderDashboardActionCard(user, "production", "▣", "บันทึกผลผลิต", "กรอกน้ำหนักน้ำ ดอก และค่าแรงของพนักงาน")}
+          ${renderDashboardActionCard(user, "summary-all", "▤", "สรุปข้อมูลทั้งหมด", "เปิดหน้ารายงานตัวเลข กราฟ และตารางรายละเอียด")}
+          ${renderDashboardActionCard(user, "summary-person", "◎", "สรุปรายบุคคล", "ตรวจสอบผลงานแยกตามพนักงาน")}
+          ${renderDashboardActionCard(user, "time-report", "◷", "เวลาทำงาน", "ดูและจัดการข้อมูลเวลาเข้างานตามสิทธิ์")}
+          ${renderDashboardActionCard(user, "reports", "▧", "ส่งออกรายงาน", "สร้างไฟล์ PDF และ Excel สำหรับส่งต่อ")}
+          ${renderDashboardActionCard(user, "settings", "⚙", "ตั้งค่าระบบ", "จัดการข้อมูลหลักและสิทธิ์ผู้ใช้งาน")}
         </div>
       </section>
 
@@ -2858,7 +2858,11 @@ function renderDashboard(user, moduleItem) {
             <h3>แนวทางการใช้งานประจำวัน</h3>
             <p>เริ่มจากบันทึกผลผลิต ตรวจสอบความถูกต้อง แล้วจึงเปิดหน้าสรุปเพื่อพิมพ์หรือส่งต่อรายงาน</p>
           </div>
-          <button class="btn btn-outline" type="button" data-route="summary-all">ไปหน้าสรุป</button>
+          ${
+            canViewSummary
+              ? `<button class="btn btn-outline" type="button" data-route="summary-all">ไปหน้าสรุป</button>`
+              : `<button class="btn btn-primary" type="button" data-route="production">เริ่มบันทึกผลผลิต</button>`
+          }
         </div>
       </section>
     </section>
@@ -6405,15 +6409,17 @@ function renderProductionRow(row) {
 }
 
 function renderAccessDenied(user, route) {
+  const moduleItem = modules.find((item) => item.id === route);
   app.innerHTML = `
     <main class="access-page">
       <section class="access-card">
-        <p class="eyebrow">Access Control</p>
-        <h1>Access denied</h1>
+        <p class="eyebrow">สิทธิ์การเข้าใช้งาน</p>
+        <h1>เมนูนี้ถูกล็อก</h1>
         <p class="intro-text">
-          ${escapeHtml(user.fullname)} (${escapeHtml(user.role)}) cannot open ${escapeHtml(route)}.
+          ${escapeHtml(user.fullname)} ระดับ ${escapeHtml(getUserLevel(user))}
+          ยังไม่มีสิทธิ์เข้าเมนู ${escapeHtml(moduleItem?.label || route)}
         </p>
-        <button class="btn btn-primary" id="backButton" type="button">กลับแดชบอร์ด</button>
+        <button class="btn btn-primary" id="backButton" type="button">กลับหน้าหลัก</button>
       </section>
     </main>
   `;
@@ -6870,8 +6876,7 @@ function renderDashboard(user, moduleItem) {
     month: "long",
     day: "numeric"
   }).format(new Date());
-  const canManageReports = ["admin", "hr"].includes(user.role);
-  const canManageSettings = user.role === "admin";
+  const canViewSummary = canOpen(user, "summary-all");
 
   return `
     <section class="factory-dashboard">
@@ -6885,7 +6890,11 @@ function renderDashboard(user, moduleItem) {
           </p>
           <div class="factory-hero-actions">
             <button class="btn btn-primary" type="button" data-route="production">บันทึกผลผลิต</button>
-            <button class="btn btn-outline" type="button" data-route="summary-all">ดูสรุปข้อมูลทั้งหมด</button>
+            ${
+              canViewSummary
+                ? `<button class="btn btn-outline" type="button" data-route="summary-all">ดูสรุปข้อมูลทั้งหมด</button>`
+                : `<button class="btn btn-outline btn-locked" type="button" data-route="summary-all">สรุปข้อมูลถูกล็อก</button>`
+            }
           </div>
         </div>
         <div class="factory-hero-brand">
@@ -6917,34 +6926,12 @@ function renderDashboard(user, moduleItem) {
           </div>
         </div>
         <div class="factory-action-grid">
-          <button class="factory-action-card" type="button" data-route="production">
-            <span class="factory-action-icon">▣</span>
-            <strong>บันทึกผลผลิต</strong>
-            <small>กรอกน้ำหนักน้ำ ดอก และค่าแรงของพนักงาน</small>
-          </button>
-          <button class="factory-action-card" type="button" data-route="summary-all">
-            <span class="factory-action-icon">▤</span>
-            <strong>สรุปข้อมูลทั้งหมด</strong>
-            <small>เปิดหน้ารายงานตัวเลข กราฟ และตารางรายละเอียด</small>
-          </button>
-          ${
-            canManageReports
-              ? `<button class="factory-action-card" type="button" data-route="summary-person">
-                  <span class="factory-action-icon">◎</span>
-                  <strong>สรุปรายบุคคล</strong>
-                  <small>ตรวจสอบผลงานแยกตามพนักงาน</small>
-                </button>`
-              : ""
-          }
-          ${
-            canManageSettings
-              ? `<button class="factory-action-card" type="button" data-route="settings">
-                  <span class="factory-action-icon">⚙</span>
-                  <strong>ตั้งค่าระบบ</strong>
-                  <small>จัดการข้อมูลหลักและสิทธิ์ผู้ใช้งาน</small>
-                </button>`
-              : ""
-          }
+          ${renderDashboardActionCard(user, "production", "▣", "บันทึกผลผลิต", "กรอกน้ำหนักน้ำ ดอก และค่าแรงของพนักงาน")}
+          ${renderDashboardActionCard(user, "summary-all", "▤", "สรุปข้อมูลทั้งหมด", "เปิดหน้ารายงานตัวเลข กราฟ และตารางรายละเอียด")}
+          ${renderDashboardActionCard(user, "summary-person", "◎", "สรุปรายบุคคล", "ตรวจสอบผลงานแยกตามพนักงาน")}
+          ${renderDashboardActionCard(user, "time-report", "◷", "เวลาทำงาน", "ดูและจัดการข้อมูลเวลาเข้างานตามสิทธิ์")}
+          ${renderDashboardActionCard(user, "reports", "▧", "ส่งออกรายงาน", "สร้างไฟล์ PDF และ Excel สำหรับส่งต่อ")}
+          ${renderDashboardActionCard(user, "settings", "⚙", "ตั้งค่าระบบ", "จัดการข้อมูลหลักและสิทธิ์ผู้ใช้งาน")}
         </div>
       </section>
 
@@ -6954,7 +6941,11 @@ function renderDashboard(user, moduleItem) {
             <h3>แนวทางการใช้งานประจำวัน</h3>
             <p>เริ่มจากบันทึกผลผลิต ตรวจสอบความถูกต้อง แล้วจึงเปิดหน้าสรุปเพื่อพิมพ์หรือส่งต่อรายงาน</p>
           </div>
-          <button class="btn btn-outline" type="button" data-route="summary-all">ไปหน้าสรุป</button>
+          ${
+            canViewSummary
+              ? `<button class="btn btn-outline" type="button" data-route="summary-all">ไปหน้าสรุป</button>`
+              : `<button class="btn btn-primary" type="button" data-route="production">เริ่มบันทึกผลผลิต</button>`
+          }
         </div>
       </section>
     </section>
