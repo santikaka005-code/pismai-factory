@@ -2807,6 +2807,8 @@ class ReportHandler(BaseHTTPRequestHandler):
         content = file_path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        if file_path.name in {"index.html", "app.js", "styles.css"}:
+            self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
