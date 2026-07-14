@@ -1041,7 +1041,7 @@ function getAccountUsers() {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) throw new Error("Invalid account data.");
     const normalizedAccounts = applyBuiltInAccountLevelDefaults(
-      ensureSystemDeveloperAccount(parsed.map(normalizeAccountUser))
+      parsed.map(normalizeAccountUser)
     );
     if (
       normalizedAccounts.length !== parsed.length ||
@@ -1061,7 +1061,7 @@ function getAccountUsers() {
 function saveAccountUsers(accountUsers) {
   localStorage.setItem(
     ACCOUNT_USERS_KEY,
-    JSON.stringify(ensureSystemDeveloperAccount(accountUsers.map(normalizeAccountUser)))
+    JSON.stringify(accountUsers.map(normalizeAccountUser))
   );
 }
 
@@ -1165,6 +1165,17 @@ async function createCloudWageRate(payload) {
     saveWageRates([...merged.values()]);
   }
   return created[0] || null;
+}
+
+async function deleteCloudAccountUser(accountUser) {
+  if (!accountUser?.id && !accountUser?.username) return;
+  await cloudApiRequest("/api/accounts", {
+    method: "DELETE",
+    body: JSON.stringify({
+      id: accountUser.id,
+      username: accountUser.username
+    })
+  });
 }
 
 function apiGetAccountUsers(search = "") {
@@ -1301,7 +1312,7 @@ function apiUpdateAccountUser(id, payload, actor) {
   return updatedUser;
 }
 
-function apiDeleteAccountUser(id, actor) {
+async function apiDeleteAccountUser(id, actor) {
   if (id === actor.id) {
     throw new Error("ไม่สามารถลบบัญชีที่กำลังใช้งานอยู่");
   }
@@ -1321,6 +1332,7 @@ function apiDeleteAccountUser(id, actor) {
     throw new Error("ต้องเหลือบัญชีผู้จัดการที่ใช้งานได้อย่างน้อย 1 บัญชี");
   }
 
+  await deleteCloudAccountUser(existing);
   saveAccountUsers(nextUsers);
   addAuditLog(actor, "DELETE_ACCOUNT", `Deleted ${existing.username} (${existing.role_label}, ${existing.level})`);
 }
@@ -3691,13 +3703,13 @@ function bindAccountManagementEvents(user) {
   });
 
   document.querySelectorAll("[data-delete-account]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const id = Number(button.dataset.deleteAccount);
       const accountUser = getAccountUsers().find((item) => item.id === id);
       if (!window.confirm(`Delete account ${accountUser?.username || id}?`)) return;
 
       try {
-        apiDeleteAccountUser(id, user);
+        await apiDeleteAccountUser(id, user);
         if (editingAccountUserId === id) editingAccountUserId = null;
         setAccountMessage("Account deleted.");
         render();

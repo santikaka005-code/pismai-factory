@@ -2771,6 +2771,26 @@ class ReportHandler(BaseHTTPRequestHandler):
 
         self.send_error(404, "Not found")
 
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        payload = self.read_json()
+
+        if parsed.path == "/api/accounts":
+            account_id = payload.get("id")
+            username = str(payload.get("username", "")).strip()
+            if account_id not in [None, ""]:
+                filter_path = f"account_users?id=eq.{quote(str(account_id))}"
+            elif username:
+                filter_path = f"account_users?username=eq.{quote(username)}"
+            else:
+                self.send_json({"error": "id or username is required."}, 400)
+                return
+            status, body = supabase_request("DELETE", filter_path, prefer="return=minimal")
+            self.send_json({"data": {"deleted": True} if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        self.send_error(404, "Not found")
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
