@@ -1343,10 +1343,13 @@ def time_receipt_groups(payload: dict) -> list[dict]:
         ot_minutes = max(0, net_minutes - normal_minutes)
         normal_hours = normal_minutes / 60
         ot_hours = ot_minutes / 60
+        record_daily_wage = float(record.get("daily_wage") or daily_wage)
+        record_normal_rate = float(record.get("normal_hourly_rate") or (record_daily_wage / standard_hours))
+        record_ot_rate = float(record.get("ot_hourly_rate") or ot_rate)
         # The factory wage table rounds each day's proportional normal wage
         # to the nearest whole baht (0.50 rounds up) before employee totals.
-        normal_amount = math.floor((normal_hours * normal_rate) + 0.5)
-        ot_amount = ot_hours * ot_rate
+        normal_amount = math.floor((normal_hours * record_normal_rate) + 0.5)
+        ot_amount = ot_hours * record_ot_rate
         group["normal_hours"] += normal_hours
         group["ot_hours"] += ot_hours
         group["normal_amount"] += normal_amount

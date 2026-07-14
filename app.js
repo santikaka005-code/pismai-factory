@@ -1,5 +1,6 @@
 ﻿const SESSION_KEY = "pismai_factory_session";
 const EMPLOYEES_KEY = "pismai_factory_employees";
+const TIME_EMPLOYEES_KEY = "pismai_factory_time_employees";
 const WAGE_RATES_KEY = "pismai_factory_wage_rates";
 const PRODUCTION_RECORDS_KEY = "pismai_factory_production_records";
 const PRODUCTION_SESSIONS_KEY = "pismai_factory_production_sessions";
@@ -10,9 +11,14 @@ const AUDIT_LOG_PASSWORD = "1150";
 const REPORT_API_BASE =
   location.protocol === "file:" ? "http://127.0.0.1:8787" : location.origin;
 const TIME_DAILY_WAGE = 347;
+const TIME_SPECIAL_DAILY_WAGE = 420;
 const TIME_STANDARD_HOURS = 8;
 const TIME_NORMAL_HOURLY_RATE = TIME_DAILY_WAGE / TIME_STANDARD_HOURS;
 const TIME_OT_HOURLY_RATE = 50;
+const timeEmployeeTypeOptions = [
+  { id: "normal", label: "พนักงานปกติ", dailyWage: TIME_DAILY_WAGE },
+  { id: "special", label: "พนักงานพิเศษ", dailyWage: TIME_SPECIAL_DAILY_WAGE }
+];
 
 const users = [
   {
@@ -225,8 +231,24 @@ modules.splice(
     id: "employees",
     label: "จัดการพนักงาน",
     roles: ["admin"],
-    description: "จัดการรหัสพนักงาน ชื่อ แผนก และสถานะ",
+    description: "เลือกจัดการพนักงานเหมาน้ำหนักหรือพนักงานตามเวลา",
     icon: "♙",
+    hidden: true
+  },
+  {
+    id: "production-employees",
+    label: "พนักงานเหมาน้ำหนัก",
+    roles: ["admin"],
+    description: "จัดการรหัสพนักงานสำหรับบันทึกน้ำหนักผลไม้",
+    icon: "♙",
+    hidden: true
+  },
+  {
+    id: "time-employees",
+    label: "พนักงานตามเวลา",
+    roles: ["admin"],
+    description: "จัดการพนักงานสำหรับบันทึกเวลาและประเภทค่าแรงรายวัน",
+    icon: "◷",
     hidden: true
   },
   {
@@ -291,6 +313,8 @@ modules.forEach((moduleItem) => {
 const adminSettingsModuleIds = new Set([
   "settings",
   "employees",
+  "production-employees",
+  "time-employees",
   "wage-rates",
   "pile-management",
   "account-management",
@@ -308,7 +332,7 @@ const levelRouteAccess = {
   C1: ["dashboard", "production"],
   C2: ["dashboard", "production", "summary-person"],
   C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report"],
-  C4: ["dashboard", "summary-all", "summary-main", "summary-person", "reports", "time-report", "settings", "employees"],
+  C4: ["dashboard", "summary-all", "summary-main", "summary-person", "reports", "time-report", "settings", "employees", "production-employees", "time-employees"],
   C5: [
     "dashboard",
     "production",
@@ -320,6 +344,8 @@ const levelRouteAccess = {
     "time-report",
     "settings",
     "employees",
+    "production-employees",
+    "time-employees",
     "pile-management",
     "wage-rates",
     "audit-log"
@@ -337,6 +363,8 @@ const levelRouteAccess = {
     "time-report",
     "settings",
     "employees",
+    "production-employees",
+    "time-employees",
     "pile-management",
     "wage-rates",
     "account-management",
@@ -545,6 +573,10 @@ let employeeSearch = "";
 let editingEmployeeId = null;
 let employeeMessage = "";
 let employeeMessageType = "success";
+let timeEmployeeSearch = "";
+let editingTimeEmployeeId = null;
+let timeEmployeeMessage = "";
+let timeEmployeeMessageType = "success";
 let accountSearch = "";
 let editingAccountUserId = null;
 let accountMode = "";
@@ -942,7 +974,7 @@ function canOpen(user, moduleId) {
 }
 
 function canManageEmployees(user) {
-  return canOpen(user, "employees");
+  return canOpen(user, "employees") || canOpen(user, "production-employees") || canOpen(user, "time-employees");
 }
 
 function canDeleteEmployees(user) {
@@ -1473,6 +1505,150 @@ function apiDeleteEmployee(id) {
     throw new Error("Employee was not found.");
   }
   saveEmployees(employees.filter((employee) => employee.id !== id));
+}
+
+function normalizeTimeEmployeeType(value) {
+  const type = String(value || "").trim();
+  return timeEmployeeTypeOptions.some((option) => option.id === type) ? type : "normal";
+}
+
+function getTimeEmployeeTypeOption(value) {
+  const type = normalizeTimeEmployeeType(value);
+  return timeEmployeeTypeOptions.find((option) => option.id === type) || timeEmployeeTypeOptions[0];
+}
+
+function defaultTimeEmployeesFromWeightEmployees() {
+  return getEmployees().map((employee) => ({
+    id: employee.id,
+    emp_code: employee.emp_code,
+    fullname: employee.fullname,
+    employee_type: "normal",
+    daily_wage: TIME_DAILY_WAGE,
+    status: employee.status || "Active",
+    created_at: employee.created_at || new Date().toISOString(),
+    updated_at: employee.updated_at || employee.created_at || new Date().toISOString()
+  }));
+}
+
+function normalizeTimeEmployee(employee) {
+  const typeOption = getTimeEmployeeTypeOption(employee?.employee_type);
+  return {
+    id: Number(employee?.id) || 0,
+    emp_code: normalizeEmployeeCodeInput(employee?.emp_code || ""),
+    fullname: String(employee?.fullname || "").trim(),
+    employee_type: typeOption.id,
+    daily_wage: typeOption.dailyWage,
+    status: employee?.status || "Active",
+    created_at: employee?.created_at || new Date().toISOString(),
+    updated_at: employee?.updated_at || employee?.created_at || new Date().toISOString()
+  };
+}
+
+function getTimeEmployees() {
+  const raw = localStorage.getItem(TIME_EMPLOYEES_KEY);
+  if (!raw) {
+    const defaults = defaultTimeEmployeesFromWeightEmployees();
+    localStorage.setItem(TIME_EMPLOYEES_KEY, JSON.stringify(defaults));
+    return defaults;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const migrated = parsed.map(normalizeTimeEmployee).filter((employee) => employee.emp_code && employee.fullname);
+    if (JSON.stringify(migrated) !== JSON.stringify(parsed)) {
+      localStorage.setItem(TIME_EMPLOYEES_KEY, JSON.stringify(migrated));
+    }
+    return migrated;
+  } catch {
+    localStorage.removeItem(TIME_EMPLOYEES_KEY);
+    return [];
+  }
+}
+
+function saveTimeEmployees(employees) {
+  localStorage.setItem(TIME_EMPLOYEES_KEY, JSON.stringify(employees.map(normalizeTimeEmployee)));
+}
+
+function apiGetTimeEmployees(search = "") {
+  const keyword = search.trim().toLowerCase();
+  const employees = getTimeEmployees();
+  if (!keyword) return employees;
+
+  return employees.filter((employee) => (
+    employee.emp_code.toLowerCase().includes(keyword) ||
+    employee.fullname.toLowerCase().includes(keyword) ||
+    getTimeEmployeeTypeOption(employee.employee_type).label.toLowerCase().includes(keyword)
+  ));
+}
+
+function apiGetTimeEmployeeByCode(empCode) {
+  const normalizedCode = normalizeEmployeeCodeInput(empCode).toLowerCase();
+  return (
+    getTimeEmployees().find(
+      (employee) =>
+        employee.emp_code.toLowerCase() === normalizedCode &&
+        employee.status === "Active"
+    ) || null
+  );
+}
+
+function apiCreateTimeEmployee(payload) {
+  const employees = getTimeEmployees();
+  const empCode = normalizeEmployeeCodeInput(payload.emp_code);
+  const duplicate = employees.some((employee) => employee.emp_code.toLowerCase() === empCode.toLowerCase());
+  if (duplicate) {
+    throw new Error("รหัสพนักงานตามเวลาต้องไม่ซ้ำกัน");
+  }
+
+  const typeOption = getTimeEmployeeTypeOption(payload.employee_type);
+  const now = new Date().toISOString();
+  const nextId = employees.length ? Math.max(...employees.map((employee) => employee.id || 0)) + 1 : 1;
+  const employee = {
+    id: nextId,
+    emp_code: empCode,
+    fullname: String(payload.fullname || "").trim(),
+    employee_type: typeOption.id,
+    daily_wage: typeOption.dailyWage,
+    status: "Active",
+    created_at: now,
+    updated_at: now
+  };
+
+  saveTimeEmployees([...employees, employee]);
+  return employee;
+}
+
+function apiUpdateTimeEmployee(id, payload) {
+  const employees = getTimeEmployees();
+  const empCode = normalizeEmployeeCodeInput(payload.emp_code);
+  const duplicate = employees.some((employee) => employee.id !== id && employee.emp_code.toLowerCase() === empCode.toLowerCase());
+  if (duplicate) {
+    throw new Error("รหัสพนักงานตามเวลาต้องไม่ซ้ำกัน");
+  }
+  const typeOption = getTimeEmployeeTypeOption(payload.employee_type);
+  saveTimeEmployees(
+    employees.map((employee) => {
+      if (employee.id !== id) return employee;
+      return {
+        ...employee,
+        emp_code: empCode,
+        fullname: String(payload.fullname || "").trim(),
+        employee_type: typeOption.id,
+        daily_wage: typeOption.dailyWage,
+        updated_at: new Date().toISOString()
+      };
+    })
+  );
+}
+
+function apiDeleteTimeEmployee(id) {
+  const employees = getTimeEmployees();
+  const existing = employees.find((employee) => employee.id === id);
+  if (!existing) {
+    throw new Error("ไม่พบพนักงานตามเวลาที่ต้องการลบ");
+  }
+  saveTimeEmployees(employees.filter((employee) => employee.id !== id));
 }
 
 function getWageRates() {
@@ -2064,11 +2240,9 @@ function calculateWorkMinutes(clockIn, clockOut) {
 }
 
 function buildTimeRecord(payload, user) {
-  const employee = getEmployees().find(
-    (item) => item.emp_code === String(payload.emp_code || "").trim()
-  );
+  const employee = apiGetTimeEmployeeByCode(payload.emp_code);
   if (!employee) {
-    throw new Error(`ไม่พบรหัสพนักงาน ${payload.emp_code}`);
+    throw new Error(`ไม่พบรหัสพนักงานตามเวลา ${payload.emp_code}`);
   }
 
   const recordDate = String(payload.record_date || "").trim();
@@ -2087,6 +2261,11 @@ function buildTimeRecord(payload, user) {
     emp_code: employee.emp_code,
     fullname: employee.fullname,
     department: employee.department || "",
+    employee_type: employee.employee_type || "normal",
+    employee_type_label: getTimeEmployeeTypeOption(employee.employee_type).label,
+    daily_wage: employee.daily_wage || TIME_DAILY_WAGE,
+    normal_hourly_rate: (employee.daily_wage || TIME_DAILY_WAGE) / TIME_STANDARD_HOURS,
+    ot_hourly_rate: TIME_OT_HOURLY_RATE,
     clock_in: clockIn,
     clock_out: clockOut,
     ...calculation,
@@ -2696,7 +2875,7 @@ function renderApp(user, route) {
   bindAppEvents(user, moduleItem);
 }
 function renderModuleContent(user, moduleItem) {
-  const settingsSubpageIds = new Set(["employees", "wage-rates", "account-management", "audit-log", "backup"]);
+  const settingsSubpageIds = new Set(["employees", "production-employees", "time-employees", "wage-rates", "account-management", "audit-log", "backup"]);
   const wrapSettingsSubpage = (content) =>
     settingsSubpageIds.has(moduleItem.id) ? `${renderSettingsBackBar()}${content}` : content;
 
@@ -2731,7 +2910,13 @@ function renderModuleContent(user, moduleItem) {
     return renderReports(moduleItem);
   }
   if (moduleItem.id === "employees") {
+    return wrapSettingsSubpage(renderEmployeeManagementHub(user, moduleItem));
+  }
+  if (moduleItem.id === "production-employees") {
     return wrapSettingsSubpage(renderEmployees(user, moduleItem));
+  }
+  if (moduleItem.id === "time-employees") {
+    return wrapSettingsSubpage(renderTimeEmployees(user, moduleItem));
   }
   if (moduleItem.id === "wage-rates") {
     return wrapSettingsSubpage(renderWageRateForm());
@@ -2787,7 +2972,8 @@ function bindAppEvents(user, moduleItem) {
   if (moduleItem.id === "reports") bindReportEvents();
   if (moduleItem.id === "summary-person") bindPersonalReportEvents();
   if (moduleItem.id === "time-report") bindTimeReportEvents(user);
-  if (moduleItem.id === "employees") bindEmployeeEvents(user);
+  if (moduleItem.id === "production-employees") bindEmployeeEvents(user);
+  if (moduleItem.id === "time-employees") bindTimeEmployeeEvents(user);
   if (moduleItem.id === "wage-rates") bindWageRateEvents(user);
   if (moduleItem.id === "account-management") bindAccountManagementEvents(user);
   if (moduleItem.id === "backup") bindBackupEvents(user);
@@ -3439,7 +3625,7 @@ function renderFullSettingsModule(user) {
   const accounts = getAccountUsers();
   const logs = getAuditLogs();
   const settingsTiles = [
-    ["employees", "จัดการพนักงาน", "เพิ่ม แก้ไข ค้นหา ลบ และตั้งค่าสถานะพนักงาน"],
+    ["employees", "จัดการพนักงาน", "เลือกจัดการพนักงานเหมาน้ำหนักหรือพนักงานตามเวลา"],
     ["wage-rates", "ตั้งค่าอัตราค่าจ้าง", "เพิ่มอัตราใหม่และดูประวัติค่าน้ำ/ค่าดอกย้อนหลัง"],
     ["account-management", "บัญชีเข้าใช้งาน", "Register และแก้ไข ID สำหรับเข้าเว็บ"],
     ["audit-log", "Audit Log", "ดูประวัติระบบ หลังกรอกรหัส 4 หลัก"],
@@ -3836,9 +4022,11 @@ function buildBackupData() {
     version: 1,
     data: {
       employees: getEmployees(),
+      time_employees: getTimeEmployees(),
       wage_rates: getWageRates(),
       production_records: getProductionRecords(),
       production_sessions: getProductionSessions(),
+      time_records: getTimeRecords(),
       audit_logs: getAuditLogs(),
       account_users: getAccountUsers()
     }
@@ -3877,7 +4065,8 @@ function renderBackupModule(moduleItem) {
         <span class="badge badge-success">Supabase</span>
       </div>
       <div class="metrics-grid metrics-spaced">
-        <div class="metric-card"><span>Local Employees</span><strong>${counts.employees.length.toLocaleString("th-TH")}</strong><small>ข้อมูลใน browser นี้</small></div>
+        <div class="metric-card"><span>Local Employees</span><strong>${counts.employees.length.toLocaleString("th-TH")}</strong><small>พนักงานเหมาน้ำหนัก</small></div>
+        <div class="metric-card"><span>Time Employees</span><strong>${counts.time_employees.length.toLocaleString("th-TH")}</strong><small>พนักงานตามเวลา</small></div>
         <div class="metric-card"><span>Local Records</span><strong>${counts.production_records.length.toLocaleString("th-TH")}</strong><small>ใช้เทียบกับฐานกลาง</small></div>
         <div class="metric-card"><span>Local Rates</span><strong>${counts.wage_rates.length.toLocaleString("th-TH")}</strong><small>รายการในเครื่อง</small></div>
         <div class="metric-card"><span>Local Accounts</span><strong>${counts.account_users.length.toLocaleString("th-TH")}</strong><small>บัญชีที่ cache ไว้</small></div>
@@ -3954,7 +4143,7 @@ function bindBackupEvents(user) {
         const parsed = JSON.parse(String(reader.result || "{}"));
         const data = parsed.data || parsed;
         if (!data || typeof data !== "object") throw new Error("Invalid backup file.");
-        const knownKeys = ["account_users", "employees", "wage_rates", "production_records", "production_sessions", "time_records", "audit_logs"];
+        const knownKeys = ["account_users", "employees", "time_employees", "wage_rates", "production_records", "production_sessions", "time_records", "audit_logs"];
         const hasKnownData = knownKeys.some((key) => Array.isArray(data[key]));
         if (!hasKnownData) throw new Error("Backup file does not contain supported data.");
         const confirmed = window.confirm(
@@ -5838,7 +6027,8 @@ function renderTimeReport(user, moduleItem) {
             <button class="btn btn-primary form-submit" type="submit">บันทึกรายการ</button>
           </form>
           <datalist id="timeEmployeeCodes">
-            ${getEmployees()
+            ${getTimeEmployees()
+              .filter((employee) => employee.status !== "Inactive")
               .map((employee) => `<option value="${escapeHtml(employee.emp_code)}">${escapeHtml(employee.fullname)}</option>`)
               .join("")}
           </datalist>
@@ -5857,8 +6047,8 @@ function renderTimeReport(user, moduleItem) {
             <div><span>เงื่อนไขการหักพัก</span><strong>เข้า ก่อน 12:00 และออก หลัง 13:00</strong></div>
             <div><span>ตัวอย่างมาตรฐาน</span><strong>08:00-17:00 = 8:00 ชั่วโมง</strong></div>
             <div><span>เริ่มงานช่วงบ่าย</span><strong>ไม่หักเวลาพัก</strong></div>
-            <div><span>ค่าแรงไม่ครบ 8 ชั่วโมง</span><strong>ปัดเป็นบาท: ชั่วโมงสุทธิ × (347 ÷ 8)</strong></div>
-            <div><span>ค่าแรงครบ 8 ชั่วโมง</span><strong>347 บาท</strong></div>
+            <div><span>ค่าแรงไม่ครบ 8 ชั่วโมง</span><strong>ปัดเป็นบาท: ชั่วโมงสุทธิ × ฐานรายวันของพนักงาน ÷ 8</strong></div>
+            <div><span>ฐานรายวัน</span><strong>ปกติ ${TIME_DAILY_WAGE} บาท · พิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
             <div><span>ค่าล่วงเวลา</span><strong>ส่วนที่เกิน 8 ชั่วโมง × 50 บาท/ชั่วโมง</strong></div>
             <div><span>เข้า-ออกหลายรอบ</span><strong>กรอกพนักงานและวันที่เดิมซ้ำได้ ระบบรวมชั่วโมงก่อนคิดเงิน</strong></div>
           </div>
@@ -5871,7 +6061,7 @@ function renderTimeReport(user, moduleItem) {
 
 function renderWeeklyTimeEntry(user) {
   const weekDates = Array.from({ length: 7 }, (_, index) => addDaysToDate(timeRecordDate, index));
-  const activeEmployees = getEmployees().filter((employee) => employee.status !== "Inactive");
+  const activeEmployees = getTimeEmployees().filter((employee) => employee.status !== "Inactive");
   const weeklyRecords = getTimeRecords()
     .filter((record) => {
       const recordDate = record.record_date || "";
@@ -5951,8 +6141,8 @@ function renderWeeklyTimeEntry(user) {
             <div><span>ปัดเวลาเข้า-ออก</span><strong>00-15 = ต้นชม. · 16-45 = ครึ่งชม. · 46-59 = ชม.ถัดไป</strong></div>
             <div><span>พักกลางวัน</span><strong>12:00-13:00</strong></div>
             <div><span>เริ่มเที่ยงหรือบ่าย</span><strong>ไม่หักพัก</strong></div>
-            <div><span>ค่าแรงปกติ</span><strong>347 ÷ 8 × ชั่วโมงสุทธิ แล้วปัดเป็นบาท</strong></div>
-            <div><span>ครบ 8 ชั่วโมง</span><strong>347 บาท</strong></div>
+            <div><span>ค่าแรงปกติ</span><strong>ฐานรายวันของพนักงาน ÷ 8 × ชั่วโมงสุทธิ แล้วปัดเป็นบาท</strong></div>
+            <div><span>ฐานครบ 8 ชั่วโมง</span><strong>ปกติ ${TIME_DAILY_WAGE} บาท · พิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
             <div><span>เกิน 8 ชั่วโมง</span><strong>OT 50 บาท/ชั่วโมง</strong></div>
             <div><span>หลายรอบในวันเดียว</span><strong>กรอกวันเดิมซ้ำได้ แล้วระบบรวมชั่วโมงก่อนคิดเงิน</strong></div>
           </div>
@@ -6240,6 +6430,48 @@ function bindTimeReportEvents(user) {
     }
   });
 
+}
+
+function renderEmployeeManagementHub(user, moduleItem) {
+  const weightEmployees = getEmployees();
+  const timeEmployees = getTimeEmployees();
+  const activeWeightEmployees = weightEmployees.filter((employee) => employee.status === "Active").length;
+  const activeTimeEmployees = timeEmployees.filter((employee) => employee.status === "Active").length;
+
+  return `
+    <section class="panel settings-home-panel">
+      <div class="panel-head">
+        <div>
+          <h2>${escapeHtml(moduleItem.label)}</h2>
+          <p>แยกฐานพนักงานออกเป็น 2 กลุ่ม: กลุ่มชั่งน้ำหนักผลไม้ และกลุ่มบันทึกเวลาทำงาน</p>
+        </div>
+        <span class="badge badge-success">แยกฐานข้อมูล</span>
+      </div>
+      <div class="metrics-grid metrics-spaced">
+        <div class="metric-card"><span>พนักงานเหมาน้ำหนัก</span><strong>${activeWeightEmployees.toLocaleString("th-TH")}</strong><small>จาก ${weightEmployees.length.toLocaleString("th-TH")} คน</small></div>
+        <div class="metric-card"><span>พนักงานตามเวลา</span><strong>${activeTimeEmployees.toLocaleString("th-TH")}</strong><small>จาก ${timeEmployees.length.toLocaleString("th-TH")} คน</small></div>
+        <div class="metric-card"><span>ฐานปกติ</span><strong>${TIME_DAILY_WAGE.toLocaleString("th-TH")}</strong><small>บาทต่อวัน</small></div>
+        <div class="metric-card"><span>ฐานพิเศษ</span><strong>${TIME_SPECIAL_DAILY_WAGE.toLocaleString("th-TH")}</strong><small>บาทต่อวัน</small></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <h3>เลือกประเภทพนักงาน</h3>
+        <p class="muted-text">พนักงานสองกลุ่มนี้ใช้คนละฐานและคนละวิธีคิดเงิน</p>
+      </div>
+      <div class="settings-grid settings-grid-wide">
+        <button class="settings-tile" data-route="production-employees" type="button">
+          <strong>พนักงานเหมาน้ำหนัก</strong>
+          <span>ใช้ฟังก์ชั่นจัดการพนักงานเดิม สำหรับบันทึกน้ำหนักผลไม้และคิดเงินตามผลผลิต</span>
+        </button>
+        <button class="settings-tile" data-route="time-employees" type="button">
+          <strong>พนักงานตามเวลา</strong>
+          <span>สร้าง แก้ไข ลบพนักงานที่ใช้กับหน้าเวลา พร้อมแยกพนักงานปกติ/พิเศษ</span>
+        </button>
+      </div>
+    </section>
+  `;
 }
 
 function renderEmployees(user, moduleItem) {
@@ -6548,6 +6780,275 @@ function bindEmployeeEvents(user) {
           employeeMessageType = "error";
           render();
         }
+      }
+    });
+  });
+}
+
+function renderTimeEmployees(user, moduleItem) {
+  const employees = apiGetTimeEmployees(timeEmployeeSearch);
+  const allEmployees = getTimeEmployees();
+  const activeEmployees = allEmployees.filter((employee) => employee.status === "Active").length;
+  const specialEmployees = allEmployees.filter((employee) => employee.employee_type === "special").length;
+  const canManage = canManageEmployees(user);
+  const canDelete = canDeleteEmployees(user);
+  const editingEmployee = editingTimeEmployeeId
+    ? getTimeEmployees().find((employee) => employee.id === editingTimeEmployeeId)
+    : null;
+
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>${escapeHtml(moduleItem.label)}</h2>
+          <p>${escapeHtml(moduleItem.description)}</p>
+        </div>
+        <span class="badge ${canManage ? "badge-success" : "badge-warning"}">
+          ${canManage ? "Can add/edit" : "View only"}
+        </span>
+      </div>
+      <div class="metrics-grid metrics-spaced">
+        <div class="metric-card"><span>พนักงานตามเวลาทั้งหมด</span><strong>${allEmployees.length.toLocaleString("th-TH")}</strong><small>ฐานแยกจากพนักงานน้ำหนัก</small></div>
+        <div class="metric-card"><span>ใช้งานอยู่</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>พร้อมเลือกในหน้าบันทึกเวลา</small></div>
+        <div class="metric-card"><span>พนักงานพิเศษ</span><strong>${specialEmployees.toLocaleString("th-TH")}</strong><small>${TIME_SPECIAL_DAILY_WAGE.toLocaleString("th-TH")} บาท/วัน</small></div>
+        <div class="metric-card"><span>ผลค้นหา</span><strong>${employees.length.toLocaleString("th-TH")}</strong><small>${timeEmployeeSearch ? escapeHtml(timeEmployeeSearch) : "ทั้งหมด"}</small></div>
+      </div>
+
+      <div class="toolbar">
+        <form class="search-form" id="timeEmployeeSearchForm">
+          <label class="search-box">
+            <span>Search</span>
+            <input
+              id="timeEmployeeSearch"
+              name="timeEmployeeSearch"
+              placeholder="ค้นหารหัส ชื่อ หรือประเภท"
+              value="${escapeHtml(timeEmployeeSearch)}"
+            />
+          </label>
+          <button class="btn btn-outline" type="submit">Search</button>
+          <button class="btn btn-outline" id="clearTimeEmployeeSearch" type="button">Clear</button>
+        </form>
+      </div>
+    </section>
+
+    ${
+      timeEmployeeMessage
+        ? `<div class="alert ${timeEmployeeMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(timeEmployeeMessage)}</div>`
+        : ""
+    }
+
+    ${
+      canManage
+        ? renderTimeEmployeeForm(editingEmployee)
+        : `<section class="panel compact-panel">
+            <p class="muted-text">Your role can view time employees only. Add, edit, and delete are restricted.</p>
+          </section>`
+    }
+
+    <section class="table-card">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>รหัสพนักงาน</th>
+              <th>ชื่อพนักงาน</th>
+              <th>ประเภท</th>
+              <th>ฐานรายวัน</th>
+              <th>Created</th>
+              <th>Updated</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              employees.length
+                ? employees.map((employee) => renderTimeEmployeeRow(employee, canManage, canDelete)).join("")
+                : `<tr><td colspan="8" class="empty-cell">ยังไม่มีพนักงานตามเวลา</td></tr>`
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function renderTimeEmployeeForm(employee) {
+  const mode = employee ? "แก้ไขพนักงานตามเวลา" : "เพิ่มพนักงานตามเวลา";
+  const selectedType = normalizeTimeEmployeeType(employee?.employee_type);
+  return `
+    <section class="panel">
+      <div class="section-title-row">
+        <h3>${mode}</h3>
+        ${
+          employee
+            ? `<button class="btn btn-outline" id="cancelTimeEmployeeEdit" type="button">Cancel edit</button>`
+            : ""
+        }
+      </div>
+      <form class="employee-form" id="timeEmployeeForm">
+        <input type="hidden" name="id" value="${employee ? employee.id : ""}" />
+
+        <label class="field">
+          <span>หมายเลขพนักงาน</span>
+          <input name="emp_code" inputmode="numeric" maxlength="5" pattern="[0-9]{5}" value="${employee ? escapeHtml(employee.emp_code) : ""}" required />
+        </label>
+
+        <label class="field">
+          <span>ชื่อพนักงาน</span>
+          <input name="fullname" value="${employee ? escapeHtml(employee.fullname) : ""}" required />
+        </label>
+
+        <label class="field">
+          <span>ประเภทพนักงาน</span>
+          <select name="employee_type" required>
+            ${timeEmployeeTypeOptions
+              .map(
+                (option) =>
+                  `<option value="${option.id}" ${selectedType === option.id ? "selected" : ""}>${escapeHtml(option.label)} - ${option.dailyWage.toLocaleString("th-TH")} บาท/วัน</option>`
+              )
+              .join("")}
+          </select>
+        </label>
+
+        <button class="btn btn-primary form-submit" type="submit">
+          ${employee ? "Save changes" : "Add time employee"}
+        </button>
+      </form>
+    </section>
+  `;
+}
+
+function renderTimeEmployeeRow(employee, canManage, canDelete) {
+  const typeOption = getTimeEmployeeTypeOption(employee.employee_type);
+  return `
+    <tr>
+      <td>${employee.id}</td>
+      <td><strong>${escapeHtml(employee.emp_code)}</strong></td>
+      <td>${escapeHtml(employee.fullname)}</td>
+      <td><span class="badge ${employee.employee_type === "special" ? "badge-warning" : "badge-success"}">${escapeHtml(typeOption.label)}</span></td>
+      <td>${typeOption.dailyWage.toLocaleString("th-TH")} บาท</td>
+      <td>${formatDate(employee.created_at)}</td>
+      <td>${formatDate(employee.updated_at)}</td>
+      <td>
+        <div class="row-actions">
+          ${
+            canManage
+              ? `<button class="btn btn-small btn-outline" data-edit-time-employee="${employee.id}" type="button">Edit</button>`
+              : `<span class="muted-text">View</span>`
+          }
+          ${
+            canDelete
+              ? `<button class="btn btn-small btn-danger" data-delete-time-employee="${employee.id}" type="button">Delete</button>`
+              : ""
+          }
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function bindTimeEmployeeEvents(user) {
+  document.querySelector("#timeEmployeeSearchForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    timeEmployeeSearch = String(form.get("timeEmployeeSearch") || "");
+    render();
+  });
+
+  document.querySelector("#clearTimeEmployeeSearch")?.addEventListener("click", () => {
+    timeEmployeeSearch = "";
+    render();
+  });
+
+  document.querySelector("#cancelTimeEmployeeEdit")?.addEventListener("click", () => {
+    editingTimeEmployeeId = null;
+    timeEmployeeMessage = "";
+    render();
+  });
+
+  document.querySelector("#timeEmployeeForm input[name='emp_code']")?.addEventListener("input", (event) => {
+    event.target.value = normalizeEmployeeCodeInput(event.target.value);
+  });
+
+  document.querySelector("#timeEmployeeForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!canManageEmployees(user)) {
+      window.alert("Your role cannot add or edit employees.");
+      return;
+    }
+
+    const form = new FormData(event.currentTarget);
+    const id = Number(form.get("id"));
+    const empCode = normalizeEmployeeCodeInput(form.get("emp_code"));
+    if (empCode.length !== 5) {
+      timeEmployeeMessage = "หมายเลขพนักงานต้องเป็นตัวเลข 5 หลัก";
+      timeEmployeeMessageType = "error";
+      render();
+      return;
+    }
+
+    const payload = {
+      emp_code: empCode,
+      fullname: String(form.get("fullname") || ""),
+      employee_type: String(form.get("employee_type") || "normal")
+    };
+
+    if (!payload.fullname.trim()) {
+      timeEmployeeMessage = "กรุณากรอกชื่อพนักงาน";
+      timeEmployeeMessageType = "error";
+      render();
+      return;
+    }
+
+    try {
+      if (id) {
+        apiUpdateTimeEmployee(id, payload);
+        timeEmployeeMessage = `Updated time employee ${payload.emp_code}.`;
+      } else {
+        apiCreateTimeEmployee(payload);
+        timeEmployeeMessage = `Added time employee ${payload.emp_code}.`;
+      }
+      timeEmployeeMessageType = "success";
+      editingTimeEmployeeId = null;
+      render();
+    } catch (error) {
+      timeEmployeeMessage = error instanceof Error ? error.message : "Save failed.";
+      timeEmployeeMessageType = "error";
+      render();
+    }
+  });
+
+  document.querySelectorAll("[data-edit-time-employee]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!canManageEmployees(user)) return;
+      editingTimeEmployeeId = Number(button.dataset.editTimeEmployee);
+      timeEmployeeMessage = "";
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-delete-time-employee]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!canDeleteEmployees(user)) {
+        window.alert("Only Admin can delete employees.");
+        return;
+      }
+      const id = Number(button.dataset.deleteTimeEmployee);
+      const employee = getTimeEmployees().find((item) => item.id === id);
+      const confirmed = window.confirm(`Delete time employee ${employee?.emp_code || id}?`);
+      if (!confirmed) return;
+
+      try {
+        apiDeleteTimeEmployee(id);
+        if (editingTimeEmployeeId === id) editingTimeEmployeeId = null;
+        timeEmployeeMessage = `Deleted time employee ${employee?.emp_code || id}.`;
+        timeEmployeeMessageType = "success";
+        render();
+      } catch (error) {
+        timeEmployeeMessage = error instanceof Error ? error.message : "Delete failed.";
+        timeEmployeeMessageType = "error";
+        render();
       }
     });
   });
@@ -7305,8 +7806,10 @@ function getTimeReceiptRow(record) {
   const otMinutes = Math.max(0, netMinutes - normalMinutes);
   const normalHours = normalMinutes / 60;
   const otHours = otMinutes / 60;
-  const normalAmount = Math.round(normalHours * TIME_NORMAL_HOURLY_RATE);
-  const otAmount = otHours * TIME_OT_HOURLY_RATE;
+  const normalHourlyRate = Number(record.normal_hourly_rate) || ((Number(record.daily_wage) || TIME_DAILY_WAGE) / TIME_STANDARD_HOURS);
+  const otHourlyRate = Number(record.ot_hourly_rate) || TIME_OT_HOURLY_RATE;
+  const normalAmount = Math.round(normalHours * normalHourlyRate);
+  const otAmount = otHours * otHourlyRate;
 
   return {
     ...record,
@@ -8075,7 +8578,7 @@ async function exportTimeSummaryReport(user, format) {
         department_label: departmentLabel,
         printed_by: user?.fullname || "System Admin",
         printed_by_position: getExportPositionLabel(user),
-        employees: getEmployees(),
+        employees: getTimeEmployees(),
         time_records: getTimeRecords()
       })
     });
@@ -8090,7 +8593,8 @@ async function exportTimeSummaryReport(user, format) {
 }
 
 function getPersonalReportContext() {
-  const employees = getEmployees().filter((employee) => employee.status === "Active");
+  const employees = (personalReportActiveTab === "time" ? getTimeEmployees() : getEmployees())
+    .filter((employee) => employee.status === "Active");
   const preferredEmployeeId = Number(personalReportEmployeeId);
   const selectedEmployeeId = employees.some((employee) => employee.id === preferredEmployeeId)
     ? preferredEmployeeId
