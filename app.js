@@ -837,7 +837,7 @@ function normalizeEmployeeCodeInput(value) {
   return String(value || "")
     .replace(/[๐-๙]/g, (digit) => String(thaiDigits.indexOf(digit)))
     .replace(/\D/g, "")
-    .slice(0, 5);
+    .slice(0, 8);
 }
 
 function normalizeTimeEmployeeCodeInput(value) {
@@ -850,16 +850,16 @@ function normalizeTimeEmployeeCodeInput(value) {
 
 function getEmployeeLookupText(employee, empCode) {
   if (employee) return employee.fullname;
-  return empCode.length === 5
+  return empCode.length >= 2
     ? "ไม่พบพนักงานหรือสถานะไม่ใช้งาน"
-    : "รอกรอกรหัสพนักงาน 5 หลัก";
+    : "รอกรอกรหัสพนักงานอย่างน้อย 2 หลัก";
 }
 
 function updateFastEmployeeFromCode(empCode) {
   syncFastInputStateForSelectedFruit();
   const value = normalizeEmployeeCodeInput(empCode);
   fastInputState.emp_code = value;
-  fastInputState.employee = value.length === 5 ? apiGetEmployeeByCode(value) : null;
+  fastInputState.employee = value.length >= 2 ? apiGetEmployeeByCode(value) : null;
   return fastInputState.employee;
 }
 
@@ -1460,6 +1460,9 @@ function apiGetEmployeeByCode(empCode) {
 function apiCreateEmployee(payload) {
   const employees = getEmployees();
   const empCode = payload.emp_code.trim();
+  if (empCode.length < 2) {
+    throw new Error("รหัสพนักงานต้องเป็นตัวเลขอย่างน้อย 2 หลัก");
+  }
   const duplicate = employees.some(
     (employee) => employee.emp_code.toLowerCase() === empCode.toLowerCase()
   );
@@ -1492,6 +1495,9 @@ function apiCreateEmployee(payload) {
 function apiUpdateEmployee(id, payload) {
   const employees = getEmployees();
   const empCode = payload.emp_code.trim();
+  if (empCode.length < 2) {
+    throw new Error("รหัสพนักงานต้องเป็นตัวเลขอย่างน้อย 2 หลัก");
+  }
   const duplicate = employees.some((employee) => {
     return (
       employee.id !== id &&
@@ -4421,7 +4427,7 @@ function renderBatchEntry() {
   const labels = getProductionFieldLabels();
   const employeeName = batchGridState.employee
     ? batchGridState.employee.fullname
-    : "รอกรอกรหัสพนักงาน 5 หลัก";
+    : "รอกรอกรหัสพนักงานอย่างน้อย 2 หลัก";
   const renderWeightInputs = (type, values) =>
     values
       .map(
@@ -4444,7 +4450,7 @@ function renderBatchEntry() {
       <div class="batch-employee-row">
         <label class="field">
           <span>รหัสพนักงาน</span>
-          <input id="batchEmpCode" inputmode="numeric" maxlength="5" value="${escapeHtml(batchGridState.emp_code)}" autocomplete="off" />
+          <input id="batchEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(batchGridState.emp_code)}" autocomplete="off" />
         </label>
         <div class="employee-result">
           <span>พนักงาน</span>
@@ -4620,7 +4626,7 @@ function renderProductionFast(user, moduleItem) {
             name="emp_code"
             id="fastEmpCode"
             inputmode="numeric"
-            maxlength="5"
+            maxlength="8"
             value="${escapeHtml(fastInputState.emp_code)}"
             autocomplete="off"
             required
@@ -4753,7 +4759,7 @@ function saveProductionFastForm(user) {
   if (waterInput) fastInputState.water_weight = waterInput.value;
   if (flowerInput) fastInputState.flower_weight = flowerInput.value;
   fastInputState.employee =
-    fastInputState.emp_code.length === 5 ? apiGetEmployeeByCode(fastInputState.emp_code) : null;
+    fastInputState.emp_code.length >= 2 ? apiGetEmployeeByCode(fastInputState.emp_code) : null;
 
   const labels = getProductionFieldLabels();
   const employee = fastInputState.employee;
@@ -4985,15 +4991,15 @@ function bindProductionManagementEvents(user) {
     const value = normalizeEmployeeCodeInput(event.target.value);
     event.target.value = value;
     batchGridState.emp_code = value;
-    batchGridState.employee = value.length === 5 ? apiGetEmployeeByCode(value) : null;
+    batchGridState.employee = value.length >= 2 ? apiGetEmployeeByCode(value) : null;
 
     const result = document.querySelector(".batch-employee-row .employee-result strong");
     if (result) {
       result.textContent = batchGridState.employee
         ? batchGridState.employee.fullname
-        : value.length === 5
-          ? "ไม่พบพนักงานหรือสถานะไม่ใช้งาน"
-          : "รอกรอกรหัสพนักงาน 5 หลัก";
+        : value.length >= 2
+        ? "ไม่พบพนักงานหรือสถานะไม่ใช้งาน"
+          : "รอกรอกรหัสพนักงานอย่างน้อย 2 หลัก";
     }
   });
 
@@ -5150,7 +5156,7 @@ function syncBatchEmployeeFromInput() {
   const empCode = normalizeEmployeeCodeInput(empInput.value);
   empInput.value = empCode;
   batchGridState.emp_code = empCode;
-  batchGridState.employee = empCode.length === 5 ? apiGetEmployeeByCode(empCode) : null;
+  batchGridState.employee = empCode.length >= 2 ? apiGetEmployeeByCode(empCode) : null;
 }
 
 function readBatchWeightValues(values, label) {
@@ -6630,7 +6636,7 @@ function renderEmployeeForm(employee) {
 
         <label class="field">
           <span>Emp Code</span>
-          <input name="emp_code" inputmode="numeric" maxlength="5" pattern="[0-9]{5}" value="${employee ? escapeHtml(employee.emp_code) : ""}" required />
+          <input name="emp_code" inputmode="numeric" maxlength="8" pattern="[0-9]{2,8}" value="${employee ? escapeHtml(employee.emp_code) : ""}" required />
         </label>
 
         <label class="field">
@@ -6744,8 +6750,8 @@ function bindEmployeeEvents(user) {
     const form = new FormData(event.currentTarget);
     const id = Number(form.get("id"));
     const empCode = normalizeEmployeeCodeInput(form.get("emp_code"));
-    if (empCode.length !== 5) {
-      employeeMessage = "รหัสพนักงานต้องเป็นตัวเลข 5 หลัก";
+    if (empCode.length < 2) {
+      employeeMessage = "รหัสพนักงานต้องเป็นตัวเลขอย่างน้อย 2 หลัก";
       employeeMessageType = "error";
       render();
       return;
