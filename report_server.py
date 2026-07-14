@@ -2592,6 +2592,26 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path == "/api/wage-rates":
+            wage_rate = {
+                "item_type": str(payload.get("item_type", "")).strip(),
+                "rate": payload.get("rate", 0),
+                "effective_date": str(payload.get("effective_date", "")).strip(),
+                "note": str(payload.get("note", "")).strip() or None,
+                "created_by": str(payload.get("created_by", "")).strip() or None,
+            }
+            if not wage_rate["item_type"] or not wage_rate["effective_date"]:
+                self.send_json({"error": "item_type and effective_date are required."}, 400)
+                return
+            status, body = supabase_request(
+                "POST",
+                "wage_rates",
+                wage_rate,
+                prefer="return=representation",
+            )
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
         if parsed.path == "/reports/selected-employees-pdf":
             data = {
                 "employees": payload.get("employees", []),
@@ -2803,6 +2823,15 @@ class ReportHandler(BaseHTTPRequestHandler):
             status, body = supabase_request("GET", f"account_users?{params}")
             data = [account_to_client(item) for item in body] if status < 400 and isinstance(body, list) else []
             self.send_json({"data": data, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/wage-rates":
+            item_type = query.get("item_type", ["all"])[0].strip()
+            params = "select=*&order=effective_date.desc,created_at.desc"
+            if item_type and item_type != "all":
+                params += f"&item_type=eq.{quote(item_type)}"
+            status, body = supabase_request("GET", f"wage_rates?{params}")
+            self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 
         if parsed.path == "/api/backup":

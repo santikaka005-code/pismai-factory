@@ -646,6 +646,7 @@ let productionMessageType = "success";
 let auditLogUnlocked = false;
 let auditLogMessage = "";
 let accountCloudBootstrapped = false;
+let wageRateCloudBootstrapped = false;
 let batchEntryText = "";
 let batchGridState = {
   emp_code: "",
@@ -683,7 +684,7 @@ const productionFruitOptions = [
     id: "mango",
     label: "มะม่วง",
     status: "พร้อมใช้งาน",
-    description: "ใช้หน้าบันทึกผลผลิตสำหรับมะม่วงฝาและมะม่วงเต๋า"
+    description: "ใช้หน้าบันทึกผลผลิตสำหรับมะม่วงฝาและมะม่วงหั่นเต๋า"
   },
   {
     id: "coconut",
@@ -703,12 +704,45 @@ const productionFruitFieldLabels = {
   },
   mango: {
     water: "มะม่วงฝา",
-    flower: "มะม่วงเต๋า",
+    flower: "มะม่วงหั่นเต๋า",
     waterShort: "มะม่วงฝา",
-    flowerShort: "มะม่วงเต๋า",
-    description: "กรอกกอง รหัสพนักงาน มะม่วงฝา และมะม่วงเต๋าสำหรับงานมะม่วง"
+    flowerShort: "มะม่วงหั่นเต๋า",
+    description: "กรอกกอง รหัสพนักงาน มะม่วงฝา และมะม่วงหั่นเต๋าสำหรับงานมะม่วง"
   }
 };
+
+function wageRateItemTypeForFruitField(fruitId, fieldKey) {
+  const normalizedFruitId = fruitId || "mangosteen";
+  if (normalizedFruitId === "mangosteen") return fieldKey;
+  return `${normalizedFruitId}:${fieldKey}`;
+}
+
+function getWageRateTypeOptions() {
+  return productionFruitOptions
+    .filter((fruit) => productionFruitFieldLabels[fruit.id])
+    .flatMap((fruit) => {
+      const labels = getProductionFieldLabels(fruit.id);
+      return [
+        {
+          value: wageRateItemTypeForFruitField(fruit.id, "water"),
+          label: `${fruit.label} - ${labels.water}`,
+          fruitId: fruit.id,
+          fieldKey: "water"
+        },
+        {
+          value: wageRateItemTypeForFruitField(fruit.id, "flower"),
+          label: `${fruit.label} - ${labels.flower}`,
+          fruitId: fruit.id,
+          fieldKey: "flower"
+        }
+      ];
+    });
+}
+
+function wageRateTypeLabel(itemType) {
+  return getWageRateTypeOptions().find((option) => option.value === itemType)?.label || itemType;
+}
+
 function productionFruitTypeForRecord(record) {
   return record.fruit_type || "mangosteen";
 }
@@ -1103,6 +1137,41 @@ async function hydrateAccountsFromCloud() {
   return cloudAccounts;
 }
 
+function normalizeCloudWageRate(wageRate) {
+  return {
+    id: Number(wageRate.id),
+    item_type: String(wageRate.item_type || ""),
+    rate: Number(wageRate.rate || 0),
+    effective_date: String(wageRate.effective_date || ""),
+    created_by: String(wageRate.created_by || ""),
+    created_at: wageRate.created_at || new Date().toISOString()
+  };
+}
+
+async function hydrateWageRatesFromCloud() {
+  const data = await cloudApiRequest("/api/wage-rates");
+  const cloudRates = Array.isArray(data.data) ? data.data.map(normalizeCloudWageRate) : [];
+  if (!cloudRates.length) return [];
+  const merged = new Map(getWageRates().map((rate) => [String(rate.id), rate]));
+  cloudRates.forEach((rate) => merged.set(String(rate.id), rate));
+  saveWageRates([...merged.values()]);
+  return cloudRates;
+}
+
+async function createCloudWageRate(payload) {
+  const data = await cloudApiRequest("/api/wage-rates", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+  const created = Array.isArray(data.data) ? data.data.map(normalizeCloudWageRate) : [];
+  if (created.length) {
+    const merged = new Map(getWageRates().map((rate) => [String(rate.id), rate]));
+    created.forEach((rate) => merged.set(String(rate.id), rate));
+    saveWageRates([...merged.values()]);
+  }
+  return created[0] || null;
+}
+
 function apiGetAccountUsers(search = "") {
   const keyword = search.trim().toLowerCase();
   const accountUsers = getAccountUsers().sort((a, b) => a.id - b.id);
@@ -1433,13 +1502,14 @@ function apiGetWageRates(itemType = "all") {
   });
 }
 
-function apiCreateWageRate(payload, createdBy) {
+async function apiCreateWageRate(payload, createdBy) {
   const itemType = String(payload.item_type);
   const rate = Number(payload.rate);
   const effectiveDate = String(payload.effective_date);
+  const validItemTypes = getWageRateTypeOptions().map((option) => option.value);
 
-  if (!["water", "flower"].includes(itemType)) {
-    throw new Error("Item type must be water or flower.");
+  if (!validItemTypes.includes(itemType)) {
+    throw new Error("กรุณาเลือกชนิดงานค่าจ้างที่มีอยู่ในระบบ");
   }
 
   if (!Number.isFinite(rate) || rate <= 0) {
@@ -1450,13 +1520,7 @@ function apiCreateWageRate(payload, createdBy) {
     throw new Error("Effective date is required.");
   }
 
-  const wageRates = getWageRates();
-  const nextId = wageRates.length
-    ? Math.max(...wageRates.map((wageRate) => wageRate.id)) + 1
-    : 1;
-
   const wageRate = {
-    id: nextId,
     item_type: itemType,
     rate,
     effective_date: effectiveDate,
@@ -1464,8 +1528,9 @@ function apiCreateWageRate(payload, createdBy) {
     created_at: new Date().toISOString()
   };
 
-  saveWageRates([...wageRates, wageRate]);
-  return wageRate;
+  const createdCloudRate = await createCloudWageRate(wageRate);
+  if (!createdCloudRate) throw new Error("บันทึกอัตราค่าจ้างลงฐานข้อมูลไม่สำเร็จ");
+  return createdCloudRate;
 }
 
 function apiGetCurrentRate(itemType, productionDate) {
@@ -1483,6 +1548,14 @@ function apiGetCurrentRate(itemType, productionDate) {
     });
 
   return matchingRates[0] || null;
+}
+
+function apiGetCurrentProductionRate(fruitId, fieldKey, productionDate) {
+  const itemType = wageRateItemTypeForFruitField(fruitId, fieldKey);
+  const specificRate = apiGetCurrentRate(itemType, productionDate);
+  if (specificRate) return specificRate;
+  if ((fruitId || "mangosteen") === "mangosteen") return apiGetCurrentRate(fieldKey, productionDate);
+  return null;
 }
 
 function getProductionSessions() {
@@ -2120,8 +2193,21 @@ function buildProductionRecord(payload, user, existingRecord = null) {
   const now = new Date();
   const recordDate = payload.record_date || existingRecord?.record_date || now.toISOString().slice(0, 10);
   const recordTime = now.toTimeString().slice(0, 8);
-  const waterRate = 5;
-  const flowerRate = 8;
+  const fruitType = payload.fruit_type || existingRecord?.fruit_type || "mangosteen";
+  const labels = getProductionFieldLabels(fruitType);
+  const waterRateRecord = apiGetCurrentProductionRate(fruitType, "water", recordDate);
+  const flowerRateRecord = apiGetCurrentProductionRate(fruitType, "flower", recordDate);
+
+  if (!waterRateRecord || !flowerRateRecord) {
+    const missing = [
+      !waterRateRecord ? labels.water : "",
+      !flowerRateRecord ? labels.flower : ""
+    ].filter(Boolean).join(", ");
+    throw new Error(`ยังไม่มีอัตราค่าจ้างสำหรับ ${missing} วันที่ ${recordDate}`);
+  }
+
+  const waterRate = Number(waterRateRecord.rate);
+  const flowerRate = Number(flowerRateRecord.rate);
 
   const waterWeight = Number(payload.water_weight);
   const flowerWeight = Number(payload.flower_weight);
@@ -2133,7 +2219,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
     ...base,
     id: existingRecord?.id,
     session_id: payload.session_id || existingRecord?.session_id || 0,
-    fruit_type: payload.fruit_type || existingRecord?.fruit_type || "mangosteen",
+    fruit_type: fruitType,
     employee_id: payload.employee.id,
     emp_code: payload.employee.emp_code,
     pile_no: Number(payload.pile_no || existingRecord?.pile_no || 1),
@@ -2504,6 +2590,14 @@ function renderApp(user, route) {
     accountCloudBootstrapped = true;
     syncAccountsToCloud().then(() => hydrateAccountsFromCloud()).catch((error) => {
       console.warn("Account cloud bootstrap failed.", error);
+    });
+  }
+  if (!wageRateCloudBootstrapped) {
+    wageRateCloudBootstrapped = true;
+    hydrateWageRatesFromCloud().then(() => {
+      if (location.hash.replace("#/", "") === "wage-rates") render();
+    }).catch((error) => {
+      console.warn("Wage rate cloud bootstrap failed.", error);
     });
   }
 
@@ -5008,10 +5102,14 @@ function editProductionRecord(recordId, user) {
 }
 
 function renderWageRateForm() {
+  const wageRateTypeOptions = getWageRateTypeOptions();
   const rates = apiGetWageRates(wageRateFilter);
   const allRates = apiGetWageRates("all");
-  const latestWater = allRates.find((rate) => rate.item_type === "water");
-  const latestFlower = allRates.find((rate) => rate.item_type === "flower");
+  const latestByType = new Map();
+  wageRateTypeOptions.forEach((option) => {
+    latestByType.set(option.value, allRates.find((rate) => rate.item_type === option.value) || null);
+  });
+  const latestPreviewOptions = wageRateTypeOptions.slice(0, 4);
 
   return `
     <section class="panel">
@@ -5023,8 +5121,12 @@ function renderWageRateForm() {
         <span class="badge badge-success">${rates.length.toLocaleString("th-TH")} records</span>
       </div>
       <div class="metrics-grid metrics-spaced">
-        <div class="metric-card"><span>ค่าน้ำล่าสุด</span><strong>${latestWater ? money(latestWater.rate) : "-"}</strong><small>${latestWater ? escapeHtml(latestWater.effective_date) : "ยังไม่มีข้อมูล"}</small></div>
-        <div class="metric-card"><span>ค่าดอกล่าสุด</span><strong>${latestFlower ? money(latestFlower.rate) : "-"}</strong><small>${latestFlower ? escapeHtml(latestFlower.effective_date) : "ยังไม่มีข้อมูล"}</small></div>
+        ${latestPreviewOptions
+          .map((option) => {
+            const latestRate = latestByType.get(option.value);
+            return `<div class="metric-card"><span>${escapeHtml(option.label)}</span><strong>${latestRate ? money(latestRate.rate) : "-"}</strong><small>${latestRate ? escapeHtml(latestRate.effective_date) : "ยังไม่มีข้อมูล"}</small></div>`;
+          })
+          .join("")}
         <div class="metric-card"><span>รายการทั้งหมด</span><strong>${allRates.length.toLocaleString("th-TH")}</strong><small>ประวัติอัตราค่าจ้าง</small></div>
       </div>
     </section>
@@ -5036,24 +5138,25 @@ function renderWageRateForm() {
       </div>
       <form class="rate-form" id="wageRateForm">
         <label class="field">
-          <span>Item Type</span>
+          <span>ชนิดงาน / ผลไม้</span>
           <select name="item_type" required>
-            <option value="water">water</option>
-            <option value="flower">flower</option>
+            ${wageRateTypeOptions
+              .map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`)
+              .join("")}
           </select>
         </label>
 
         <label class="field">
-          <span>Rate</span>
+          <span>อัตราค่าจ้างต่อหน่วย</span>
           <input name="rate" type="number" min="0.01" step="0.01" required />
         </label>
 
         <label class="field">
-          <span>Effective Date</span>
+          <span>วันที่เริ่มใช้</span>
           <input name="effective_date" type="date" value="${escapeHtml(currentRateDate)}" required />
         </label>
 
-        <button class="btn btn-primary form-submit" type="submit">Add rate</button>
+        <button class="btn btn-primary form-submit" type="submit">เพิ่มอัตรา</button>
       </form>
     </section>
 
@@ -5062,17 +5165,13 @@ function renderWageRateForm() {
         <label class="compact-field">
           <span>Filter</span>
           <select id="wageRateFilter">
-            ${[
-              ["all", "All"],
-              ["water", "Water"],
-              ["flower", "Flower"]
-            ]
+            ${[["all", "ทั้งหมด"], ...wageRateTypeOptions.map((option) => [option.value, option.label])]
               .map(([value, label]) => `<option value="${value}" ${wageRateFilter === value ? "selected" : ""}>${label}</option>`)
               .join("")}
           </select>
         </label>
         <label class="compact-field">
-          <span>Default date</span>
+          <span>วันที่เริ่มใช้เริ่มต้น</span>
           <input id="currentRateDate" type="date" value="${escapeHtml(currentRateDate)}" />
         </label>
       </div>
@@ -5082,7 +5181,7 @@ function renderWageRateForm() {
       <div class="table-scroll">
         <table>
           <thead>
-            <tr><th>ID</th><th>Type</th><th>Rate</th><th>Effective</th><th>Created By</th><th>Created</th></tr>
+            <tr><th>ID</th><th>ชนิดงาน</th><th>Rate</th><th>Effective</th><th>Created By</th><th>Created</th></tr>
           </thead>
           <tbody>
             ${rates.length ? rates.map(renderWageRateRow).join("") : `<tr><td colspan="6" class="empty-cell">No wage rates found.</td></tr>`}
@@ -5096,7 +5195,7 @@ function renderWageRateRow(wageRate) {
   return `
     <tr>
       <td>${wageRate.id}</td>
-      <td><span class="badge badge-warning">${escapeHtml(wageRate.item_type)}</span></td>
+      <td><span class="badge badge-warning">${escapeHtml(wageRateTypeLabel(wageRate.item_type))}</span></td>
       <td><strong>${money(wageRate.rate)}</strong></td>
       <td>${escapeHtml(wageRate.effective_date)}</td>
       <td>${escapeHtml(wageRate.created_by)}</td>
@@ -5116,7 +5215,7 @@ function bindWageRateEvents(user) {
     render();
   });
 
-  document.querySelector("#wageRateForm")?.addEventListener("submit", (event) => {
+  document.querySelector("#wageRateForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
 
     if (user.role !== "admin") {
@@ -5132,7 +5231,7 @@ function bindWageRateEvents(user) {
     };
 
     try {
-      apiCreateWageRate(payload, user.fullname);
+      await apiCreateWageRate(payload, user.fullname);
       render();
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Save failed.");
