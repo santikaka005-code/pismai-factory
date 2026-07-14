@@ -4,6 +4,8 @@ import json
 import math
 import mimetypes
 import os
+import urllib.error
+import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -41,6 +43,8 @@ SYSTEM_NAME = "SystemPro by Pitsamai Frozen Fruits"
 BRAND_GREEN = "#0F7A3D"
 THAI_FONT = "Helvetica"
 THAI_FONT_BOLD = "Helvetica-Bold"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
 
 def register_thai_font() -> str:
@@ -96,6 +100,52 @@ def load_data() -> dict:
 
 def save_data(data: dict) -> None:
     DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def supabase_configured() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+
+def supabase_request(
+    method: str,
+    path: str,
+    payload: dict | list | None = None,
+    prefer: str | None = None,
+) -> tuple[int, dict | list | str | None]:
+    if not supabase_configured():
+        return 503, {"error": "Supabase environment variables are not configured."}
+
+    url = f"{SUPABASE_URL}/rest/v1/{path.lstrip('/')}"
+    data = None
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8")
+            if not raw:
+                return response.status, None
+            try:
+                return response.status, json.loads(raw)
+            except json.JSONDecodeError:
+                return response.status, raw
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8")
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError:
+            body = {"error": raw or error.reason}
+        return error.code, body
+    except Exception as error:
+        return 500, {"error": str(error)}
 
 
 def find_employee(data: dict, employee_id: int) -> dict | None:
@@ -2314,7 +2364,7 @@ def build_time_summary_pdf(payload: dict) -> bytes:
 class ReportHandler(BaseHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         super().end_headers()
 
@@ -2329,6 +2379,31 @@ class ReportHandler(BaseHTTPRequestHandler):
         if parsed.path == "/reports/sync":
             save_data(payload)
             self.send_json({"status": "ok"})
+            return
+
+        if parsed.path == "/api/employees":
+            employee = {
+                "emp_code": str(payload.get("emp_code", "")).strip(),
+                "fullname": str(payload.get("fullname", "")).strip(),
+                "department": str(payload.get("department", "")).strip(),
+                "position": str(payload.get("position", "")).strip(),
+                "pay_group": str(payload.get("pay_group", "")).strip(),
+                "status": str(payload.get("status", "Active")).strip() or "Active",
+                "note": str(payload.get("note", "")).strip() or None,
+                "created_by": str(payload.get("created_by", "")).strip() or None,
+            }
+            required = ["emp_code", "fullname", "department", "position", "pay_group"]
+            missing = [key for key in required if not employee[key]]
+            if missing:
+                self.send_json({"error": f"Missing required fields: {', '.join(missing)}"}, 400)
+                return
+            status, body = supabase_request(
+                "POST",
+                "employees",
+                employee,
+                prefer="return=representation",
+            )
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
         if parsed.path == "/reports/selected-employees-pdf":
@@ -2494,6 +2569,38 @@ class ReportHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
 
+        if parsed.path == "/api/health":
+            status, body = supabase_request("GET", "employees?select=id&limit=1")
+            self.send_json(
+                {
+                    "status": "ok" if status < 400 else "error",
+                    "server": "ready",
+                    "supabase_configured": supabase_configured(),
+                    "supabase_status": status,
+                    "supabase_response": body,
+                },
+                200 if status < 500 else status,
+            )
+            return
+
+        if parsed.path == "/api/employees":
+            search = query.get("search", [""])[0].strip()
+            params = "select=*&order=emp_code.asc"
+            if search:
+                escaped = search.replace("*", "").replace(",", " ")
+                params += (
+                    "&or=("
+                    f"emp_code.ilike.*{escaped}*,"
+                    f"fullname.ilike.*{escaped}*,"
+                    f"department.ilike.*{escaped}*,"
+                    f"position.ilike.*{escaped}*,"
+                    f"pay_group.ilike.*{escaped}*"
+                    ")"
+                )
+            status, body = supabase_request("GET", f"employees?{params}")
+            self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
+            return
+
         if parsed.path == "/reports/employee-daily-pdf":
             data = load_data()
             date = query.get("date", [datetime.now().date().isoformat()])[0]
@@ -2524,9 +2631,9 @@ class ReportHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
-    def send_json(self, payload: dict) -> None:
-        content = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
+    def send_json(self, payload: dict, status: int = 200) -> None:
+        content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
