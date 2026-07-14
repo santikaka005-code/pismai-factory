@@ -1254,6 +1254,8 @@ function normalizeCloudTimeEmployee(employee) {
 async function hydrateEmployeesFromCloud() {
   const data = await cloudApiRequest("/api/employees");
   const cloudEmployees = Array.isArray(data.data) ? data.data.map(normalizeCloudEmployee) : [];
+  const localEmployees = getEmployees();
+  if (!cloudEmployees.length && localEmployees.length) return localEmployees;
   saveEmployees(cloudEmployees);
   return cloudEmployees;
 }
@@ -1261,6 +1263,8 @@ async function hydrateEmployeesFromCloud() {
 async function hydrateTimeEmployeesFromCloud() {
   const data = await cloudApiRequest("/api/time-employees");
   const cloudEmployees = Array.isArray(data.data) ? data.data.map(normalizeCloudTimeEmployee) : [];
+  const localEmployees = getTimeEmployees();
+  if (!cloudEmployees.length && localEmployees.length) return localEmployees;
   saveTimeEmployees(cloudEmployees);
   return cloudEmployees;
 }
@@ -1303,6 +1307,7 @@ async function syncTimeEmployeesToCloud(employees = getTimeEmployees()) {
 }
 
 async function syncLocalEmployeesToCloud() {
+  restoreLocalEmployeesFromRecordsIfEmpty();
   const [weightEmployees, timeEmployees] = await Promise.all([
     syncEmployeesToCloud(),
     syncTimeEmployeesToCloud()
@@ -2331,6 +2336,90 @@ function getTimeRecords() {
 
 function saveTimeRecords(records) {
   localStorage.setItem(TIME_RECORDS_KEY, JSON.stringify(records));
+}
+
+function nextLocalEmployeeId(...groups) {
+  const ids = groups
+    .flat()
+    .map((item) => Number(item?.id || item?.employee_id || 0))
+    .filter((id) => Number.isFinite(id) && id > 0);
+  return ids.length ? Math.max(...ids) + 1 : 1;
+}
+
+function restoreWeightEmployeesFromRecordsIfEmpty() {
+  const existingEmployees = getEmployees();
+  if (existingEmployees.length) return existingEmployees;
+
+  const restoredByCode = new Map();
+  getProductionRecords().forEach((record) => {
+    const empCode = normalizeEmployeeCodeInput(record.emp_code || record.employee_code || "");
+    if (!empCode || restoredByCode.has(empCode)) return;
+    const fullname = String(
+      record.employee_name ||
+      record.fullname ||
+      record.employee?.fullname ||
+      `พนักงาน ${empCode}`
+    ).trim();
+    restoredByCode.set(empCode, {
+      id: Number(record.employee_id) || 0,
+      emp_code: empCode,
+      fullname,
+      department: String(record.department || record.employee?.department || "-").trim() || "-",
+      position: String(record.position || record.employee?.position || "").trim(),
+      pay_group: normalizeEmployeePayGroupValue(record.pay_group || record.employee?.pay_group || primaryPayGroups[0]),
+      shift: String(record.shift || "").trim(),
+      status: "Active",
+      created_at: record.created_at || new Date().toISOString(),
+      updated_at: record.updated_at || record.created_at || new Date().toISOString()
+    });
+  });
+
+  const restoredEmployees = [...restoredByCode.values()];
+  let nextId = nextLocalEmployeeId(restoredEmployees);
+  const normalizedEmployees = restoredEmployees.map((employee) => ({
+    ...employee,
+    id: employee.id || nextId++
+  }));
+  if (normalizedEmployees.length) saveEmployees(normalizedEmployees);
+  return normalizedEmployees;
+}
+
+function restoreTimeEmployeesFromRecordsIfEmpty() {
+  const existingEmployees = getTimeEmployees();
+  if (existingEmployees.length) return existingEmployees;
+
+  const restoredByCode = new Map();
+  getTimeRecords().forEach((record) => {
+    const empCode = normalizeTimeEmployeeCodeInput(record.emp_code || record.employee_code || "");
+    if (!empCode || restoredByCode.has(empCode)) return;
+    const typeOption = getTimeEmployeeTypeOption(record.employee_type);
+    restoredByCode.set(empCode, normalizeTimeEmployee({
+      id: Number(record.employee_id) || 0,
+      emp_code: empCode,
+      fullname: record.fullname || record.employee_name || `พนักงาน ${empCode}`,
+      employee_type: typeOption.id,
+      daily_wage: record.daily_wage || typeOption.dailyWage,
+      status: "Active",
+      created_at: record.created_at || new Date().toISOString(),
+      updated_at: record.updated_at || record.created_at || new Date().toISOString()
+    }));
+  });
+
+  const restoredEmployees = [...restoredByCode.values()];
+  let nextId = nextLocalEmployeeId(restoredEmployees);
+  const normalizedEmployees = restoredEmployees.map((employee) => ({
+    ...employee,
+    id: employee.id || nextId++
+  }));
+  if (normalizedEmployees.length) saveTimeEmployees(normalizedEmployees);
+  return normalizedEmployees;
+}
+
+function restoreLocalEmployeesFromRecordsIfEmpty() {
+  return {
+    weightEmployees: restoreWeightEmployeesFromRecordsIfEmpty(),
+    timeEmployees: restoreTimeEmployeesFromRecordsIfEmpty()
+  };
 }
 
 function parseTimeToMinutes(value) {
