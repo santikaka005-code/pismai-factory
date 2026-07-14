@@ -3,7 +3,6 @@ const EMPLOYEES_KEY = "pismai_factory_employees";
 const WAGE_RATES_KEY = "pismai_factory_wage_rates";
 const PRODUCTION_RECORDS_KEY = "pismai_factory_production_records";
 const PRODUCTION_SESSIONS_KEY = "pismai_factory_production_sessions";
-const PRODUCTION_SELECTED_FRUIT_KEY = "pismai_factory_selected_production_fruit";
 const TIME_RECORDS_KEY = "pismai_factory_time_records";
 const AUDIT_LOG_KEY = "pismai_factory_audit_log";
 const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
@@ -640,13 +639,14 @@ let timeRecordMessageType = "success";
 let weeklyTimeEmployeeCode = "";
 let weeklyTimeDraft = Array.from({ length: 7 }, () => ({ clock_in: "", clock_out: "" }));
 let productionView = "fast-entry";
-let selectedProductionFruit = localStorage.getItem(PRODUCTION_SELECTED_FRUIT_KEY) || "";
+let selectedProductionFruit = "";
 let productionMessage = "";
 let productionMessageType = "success";
 let auditLogUnlocked = false;
 let auditLogMessage = "";
 let accountCloudBootstrapped = false;
 let wageRateCloudBootstrapped = false;
+let lastRenderedRoute = "";
 let batchEntryText = "";
 let batchGridState = {
   emp_code: "",
@@ -757,11 +757,6 @@ function getProductionFieldLabels(fruitId = getSelectedProductionFruitId()) {
 
 function setSelectedProductionFruit(fruitId) {
   selectedProductionFruit = fruitId || "";
-  if (selectedProductionFruit) {
-    localStorage.setItem(PRODUCTION_SELECTED_FRUIT_KEY, selectedProductionFruit);
-  } else {
-    localStorage.removeItem(PRODUCTION_SELECTED_FRUIT_KEY);
-  }
   syncFastInputStateForSelectedFruit();
 }
 
@@ -2415,8 +2410,15 @@ function render() {
 
   if (!canOpen(session.user, route)) {
     renderAccessDenied(session.user, route);
+    lastRenderedRoute = route;
     return;
   }
+
+  if (route === "production" && lastRenderedRoute !== "production") {
+    setSelectedProductionFruit("");
+    productionMessage = "";
+  }
+  lastRenderedRoute = route;
 
   renderApp(session.user, route);
 }
