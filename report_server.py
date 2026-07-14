@@ -68,6 +68,7 @@ BACKUP_ACCESS_CODE = os.environ.get("BACKUP_ACCESS_CODE", "1150")
 BACKUP_TABLES = [
     "account_users",
     "employees",
+    "time_employees",
     "wage_rates",
     "production_sessions",
     "production_records",
@@ -182,6 +183,33 @@ def account_to_client(account: dict) -> dict:
         "isActive": account.get("status", "Active") == "Active",
         "created_at": account.get("created_at"),
         "updated_at": account.get("updated_at") or account.get("created_at"),
+    }
+
+
+def employee_from_payload(payload: dict) -> dict:
+    return {
+        "emp_code": str(payload.get("emp_code", "")).strip(),
+        "fullname": str(payload.get("fullname", "")).strip(),
+        "department": str(payload.get("department", "")).strip(),
+        "position": str(payload.get("position", "")).strip() or "-",
+        "pay_group": str(payload.get("pay_group", "")).strip(),
+        "status": str(payload.get("status", "Active")).strip() or "Active",
+        "note": str(payload.get("note", "")).strip() or None,
+        "created_by": str(payload.get("created_by", "")).strip() or None,
+    }
+
+
+def time_employee_from_payload(payload: dict) -> dict:
+    employee_type = str(payload.get("employee_type", "normal")).strip() or "normal"
+    daily_wage = payload.get("daily_wage", 365 if employee_type == "special" else 347)
+    return {
+        "emp_code": str(payload.get("emp_code", "")).strip(),
+        "fullname": str(payload.get("fullname", "")).strip(),
+        "employee_type": employee_type,
+        "daily_wage": daily_wage,
+        "status": str(payload.get("status", "Active")).strip() or "Active",
+        "note": str(payload.get("note", "")).strip() or None,
+        "created_by": str(payload.get("created_by", "")).strip() or None,
     }
 
 
@@ -2593,17 +2621,8 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/employees":
-            employee = {
-                "emp_code": str(payload.get("emp_code", "")).strip(),
-                "fullname": str(payload.get("fullname", "")).strip(),
-                "department": str(payload.get("department", "")).strip(),
-                "position": str(payload.get("position", "")).strip(),
-                "pay_group": str(payload.get("pay_group", "")).strip(),
-                "status": str(payload.get("status", "Active")).strip() or "Active",
-                "note": str(payload.get("note", "")).strip() or None,
-                "created_by": str(payload.get("created_by", "")).strip() or None,
-            }
-            required = ["emp_code", "fullname", "department", "position", "pay_group"]
+            employee = employee_from_payload(payload)
+            required = ["emp_code", "fullname", "department", "pay_group"]
             missing = [key for key in required if not employee[key]]
             if missing:
                 self.send_json({"error": f"Missing required fields: {', '.join(missing)}"}, 400)
@@ -2611,6 +2630,22 @@ class ReportHandler(BaseHTTPRequestHandler):
             status, body = supabase_request(
                 "POST",
                 "employees",
+                employee,
+                prefer="return=representation",
+            )
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/time-employees":
+            employee = time_employee_from_payload(payload)
+            required = ["emp_code", "fullname", "employee_type", "daily_wage"]
+            missing = [key for key in required if employee.get(key) in [None, ""]]
+            if missing:
+                self.send_json({"error": f"Missing required fields: {', '.join(missing)}"}, 400)
+                return
+            status, body = supabase_request(
+                "POST",
+                "time_employees",
                 employee,
                 prefer="return=representation",
             )
@@ -2796,6 +2831,44 @@ class ReportHandler(BaseHTTPRequestHandler):
 
         self.send_error(404, "Not found")
 
+    def do_PUT(self) -> None:
+        parsed = urlparse(self.path)
+        payload = self.read_json()
+
+        if parsed.path == "/api/employees":
+            employee_id = payload.get("id")
+            if employee_id in [None, ""]:
+                self.send_json({"error": "id is required."}, 400)
+                return
+            employee = employee_from_payload(payload)
+            employee["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            status, body = supabase_request(
+                "PATCH",
+                f"employees?id=eq.{quote(str(employee_id))}",
+                employee,
+                prefer="return=representation",
+            )
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/time-employees":
+            employee_id = payload.get("id")
+            if employee_id in [None, ""]:
+                self.send_json({"error": "id is required."}, 400)
+                return
+            employee = time_employee_from_payload(payload)
+            employee["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            status, body = supabase_request(
+                "PATCH",
+                f"time_employees?id=eq.{quote(str(employee_id))}",
+                employee,
+                prefer="return=representation",
+            )
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        self.send_error(404, "Not found")
+
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
         payload = self.read_json()
@@ -2814,6 +2887,32 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": {"deleted": True} if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path == "/api/employees":
+            employee_id = payload.get("id")
+            if employee_id in [None, ""]:
+                self.send_json({"error": "id is required."}, 400)
+                return
+            status, body = supabase_request(
+                "DELETE",
+                f"employees?id=eq.{quote(str(employee_id))}",
+                prefer="return=minimal",
+            )
+            self.send_json({"data": {"deleted": True} if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/time-employees":
+            employee_id = payload.get("id")
+            if employee_id in [None, ""]:
+                self.send_json({"error": "id is required."}, 400)
+                return
+            status, body = supabase_request(
+                "DELETE",
+                f"time_employees?id=eq.{quote(str(employee_id))}",
+                prefer="return=minimal",
+            )
+            self.send_json({"data": {"deleted": True} if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
         self.send_error(404, "Not found")
 
     def do_GET(self) -> None:
@@ -2822,15 +2921,18 @@ class ReportHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/health":
             status, body = supabase_request("GET", "employees?select=id&limit=1")
+            time_status, time_body = supabase_request("GET", "time_employees?select=id&limit=1")
             self.send_json(
                 {
-                    "status": "ok" if status < 400 else "error",
+                    "status": "ok" if status < 400 and time_status < 400 else "error",
                     "server": "ready",
                     "supabase_configured": supabase_configured(),
                     "supabase_status": status,
                     "supabase_response": body,
+                    "time_employees_status": time_status,
+                    "time_employees_response": time_body,
                 },
-                200 if status < 500 else status,
+                200 if status < 500 and time_status < 500 else max(status, time_status),
             )
             return
 
@@ -2849,6 +2951,22 @@ class ReportHandler(BaseHTTPRequestHandler):
                     ")"
                 )
             status, body = supabase_request("GET", f"employees?{params}")
+            self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/time-employees":
+            search = query.get("search", [""])[0].strip()
+            params = "select=*&order=emp_code.asc"
+            if search:
+                escaped = search.replace("*", "").replace(",", " ")
+                params += (
+                    "&or=("
+                    f"emp_code.ilike.*{escaped}*,"
+                    f"fullname.ilike.*{escaped}*,"
+                    f"employee_type.ilike.*{escaped}*"
+                    ")"
+                )
+            status, body = supabase_request("GET", f"time_employees?{params}")
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 

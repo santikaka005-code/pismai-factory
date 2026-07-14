@@ -693,6 +693,7 @@ let auditLogUnlocked = false;
 let auditLogMessage = "";
 let accountCloudBootstrapped = false;
 let wageRateCloudBootstrapped = false;
+let employeeCloudBootstrapped = false;
 let lastRenderedRoute = "";
 let batchEntryText = "";
 let batchGridState = {
@@ -1222,6 +1223,106 @@ async function createCloudWageRate(payload) {
   return created[0] || null;
 }
 
+function normalizeCloudEmployee(employee) {
+  return {
+    id: Number(employee.id),
+    emp_code: normalizeEmployeeCodeInput(employee.emp_code || ""),
+    fullname: String(employee.fullname || ""),
+    department: String(employee.department || ""),
+    position: String(employee.position || ""),
+    pay_group: normalizeEmployeePayGroupValue(employee.pay_group || ""),
+    shift: employee.shift || "",
+    status: employee.status || "Active",
+    created_at: employee.created_at || new Date().toISOString(),
+    updated_at: employee.updated_at || employee.created_at || new Date().toISOString()
+  };
+}
+
+function normalizeCloudTimeEmployee(employee) {
+  return normalizeTimeEmployee({
+    id: Number(employee.id),
+    emp_code: employee.emp_code,
+    fullname: employee.fullname,
+    employee_type: employee.employee_type,
+    daily_wage: employee.daily_wage,
+    status: employee.status || "Active",
+    created_at: employee.created_at,
+    updated_at: employee.updated_at || employee.created_at
+  });
+}
+
+async function hydrateEmployeesFromCloud() {
+  const data = await cloudApiRequest("/api/employees");
+  const cloudEmployees = Array.isArray(data.data) ? data.data.map(normalizeCloudEmployee) : [];
+  saveEmployees(cloudEmployees);
+  return cloudEmployees;
+}
+
+async function hydrateTimeEmployeesFromCloud() {
+  const data = await cloudApiRequest("/api/time-employees");
+  const cloudEmployees = Array.isArray(data.data) ? data.data.map(normalizeCloudTimeEmployee) : [];
+  saveTimeEmployees(cloudEmployees);
+  return cloudEmployees;
+}
+
+async function hydrateAllEmployeesFromCloud() {
+  const [weightEmployees, timeEmployees] = await Promise.all([
+    hydrateEmployeesFromCloud(),
+    hydrateTimeEmployeesFromCloud()
+  ]);
+  return { weightEmployees, timeEmployees };
+}
+
+async function createCloudEmployee(payload) {
+  const data = await cloudApiRequest("/api/employees", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+  const created = Array.isArray(data.data) ? data.data.map(normalizeCloudEmployee) : [];
+  return created[0] || null;
+}
+
+async function updateCloudEmployee(id, payload) {
+  const data = await cloudApiRequest("/api/employees", {
+    method: "PUT",
+    body: JSON.stringify({ id, ...payload })
+  });
+  const updated = Array.isArray(data.data) ? data.data.map(normalizeCloudEmployee) : [];
+  return updated[0] || null;
+}
+
+async function deleteCloudEmployee(id) {
+  await cloudApiRequest("/api/employees", {
+    method: "DELETE",
+    body: JSON.stringify({ id })
+  });
+}
+
+async function createCloudTimeEmployee(payload) {
+  const data = await cloudApiRequest("/api/time-employees", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+  const created = Array.isArray(data.data) ? data.data.map(normalizeCloudTimeEmployee) : [];
+  return created[0] || null;
+}
+
+async function updateCloudTimeEmployee(id, payload) {
+  const data = await cloudApiRequest("/api/time-employees", {
+    method: "PUT",
+    body: JSON.stringify({ id, ...payload })
+  });
+  const updated = Array.isArray(data.data) ? data.data.map(normalizeCloudTimeEmployee) : [];
+  return updated[0] || null;
+}
+
+async function deleteCloudTimeEmployee(id) {
+  await cloudApiRequest("/api/time-employees", {
+    method: "DELETE",
+    body: JSON.stringify({ id })
+  });
+}
+
 async function deleteCloudAccountUser(accountUser) {
   if (!accountUser?.id && !accountUser?.username) return;
   await cloudApiRequest("/api/accounts", {
@@ -1457,7 +1558,7 @@ function apiGetEmployeeByCode(empCode) {
   );
 }
 
-function apiCreateEmployee(payload) {
+async function apiCreateEmployee(payload) {
   const employees = getEmployees();
   const empCode = payload.emp_code.trim();
   if (empCode.length < 2) {
@@ -1471,28 +1572,23 @@ function apiCreateEmployee(payload) {
     throw new Error("Employee code must be unique.");
   }
 
-  const now = new Date().toISOString();
-  const nextId = employees.length
-    ? Math.max(...employees.map((employee) => employee.id)) + 1
-    : 1;
-
-  const employee = {
-    id: nextId,
+  const localEmployee = {
     emp_code: empCode,
     fullname: payload.fullname.trim(),
     department: payload.department.trim(),
+    position: payload.position || "",
     pay_group: normalizeEmployeePayGroupValue(payload.pay_group),
     shift: payload.shift,
-    status: payload.status,
-    created_at: now,
-    updated_at: now
+    status: payload.status
   };
 
+  const employee = await createCloudEmployee(localEmployee);
+  if (!employee) throw new Error("ไม่สามารถบันทึกพนักงานลงฐานข้อมูลกลางได้");
   saveEmployees([...employees, employee]);
   return employee;
 }
 
-function apiUpdateEmployee(id, payload) {
+async function apiUpdateEmployee(id, payload) {
   const employees = getEmployees();
   const empCode = payload.emp_code.trim();
   if (empCode.length < 2) {
@@ -1509,30 +1605,28 @@ function apiUpdateEmployee(id, payload) {
     throw new Error("Employee code must be unique.");
   }
 
-  const updatedEmployees = employees.map((employee) => {
-    if (employee.id !== id) return employee;
-
-    return {
-      ...employee,
-      emp_code: empCode,
-      fullname: payload.fullname.trim(),
-      department: payload.department.trim(),
-      pay_group: normalizeEmployeePayGroupValue(payload.pay_group),
-      shift: payload.shift,
-      status: payload.status,
-      updated_at: new Date().toISOString()
-    };
+  const updatedEmployee = await updateCloudEmployee(id, {
+    emp_code: empCode,
+    fullname: payload.fullname.trim(),
+    department: payload.department.trim(),
+    position: payload.position || "",
+    pay_group: normalizeEmployeePayGroupValue(payload.pay_group),
+    shift: payload.shift,
+    status: payload.status
   });
+  if (!updatedEmployee) throw new Error("ไม่สามารถแก้ไขพนักงานในฐานข้อมูลกลางได้");
+  const updatedEmployees = employees.map((employee) => (employee.id === id ? updatedEmployee : employee));
 
   saveEmployees(updatedEmployees);
 }
 
-function apiDeleteEmployee(id) {
+async function apiDeleteEmployee(id) {
   const employees = getEmployees();
   const existing = employees.find((employee) => employee.id === id);
   if (!existing) {
     throw new Error("Employee was not found.");
   }
+  await deleteCloudEmployee(id);
   saveEmployees(employees.filter((employee) => employee.id !== id));
 }
 
@@ -1622,7 +1716,7 @@ function apiGetTimeEmployeeByCode(empCode) {
   );
 }
 
-function apiCreateTimeEmployee(payload) {
+async function apiCreateTimeEmployee(payload) {
   const employees = getTimeEmployees();
   const empCode = normalizeTimeEmployeeCodeInput(payload.emp_code);
   if (empCode.length < 2) {
@@ -1634,24 +1728,21 @@ function apiCreateTimeEmployee(payload) {
   }
 
   const typeOption = getTimeEmployeeTypeOption(payload.employee_type);
-  const now = new Date().toISOString();
-  const nextId = employees.length ? Math.max(...employees.map((employee) => employee.id || 0)) + 1 : 1;
-  const employee = {
-    id: nextId,
+  const localEmployee = {
     emp_code: empCode,
     fullname: String(payload.fullname || "").trim(),
     employee_type: typeOption.id,
     daily_wage: typeOption.dailyWage,
-    status: "Active",
-    created_at: now,
-    updated_at: now
+    status: "Active"
   };
 
+  const employee = await createCloudTimeEmployee(localEmployee);
+  if (!employee) throw new Error("ไม่สามารถบันทึกพนักงานตามเวลาลงฐานข้อมูลกลางได้");
   saveTimeEmployees([...employees, employee]);
   return employee;
 }
 
-function apiUpdateTimeEmployee(id, payload) {
+async function apiUpdateTimeEmployee(id, payload) {
   const employees = getTimeEmployees();
   const empCode = normalizeTimeEmployeeCodeInput(payload.emp_code);
   if (empCode.length < 2) {
@@ -1662,27 +1753,26 @@ function apiUpdateTimeEmployee(id, payload) {
     throw new Error("รหัสพนักงานตามเวลาต้องไม่ซ้ำกัน");
   }
   const typeOption = getTimeEmployeeTypeOption(payload.employee_type);
+  const updatedEmployee = await updateCloudTimeEmployee(id, {
+    emp_code: empCode,
+    fullname: String(payload.fullname || "").trim(),
+    employee_type: typeOption.id,
+    daily_wage: typeOption.dailyWage,
+    status: "Active"
+  });
+  if (!updatedEmployee) throw new Error("ไม่สามารถแก้ไขพนักงานตามเวลาในฐานข้อมูลกลางได้");
   saveTimeEmployees(
-    employees.map((employee) => {
-      if (employee.id !== id) return employee;
-      return {
-        ...employee,
-        emp_code: empCode,
-        fullname: String(payload.fullname || "").trim(),
-        employee_type: typeOption.id,
-        daily_wage: typeOption.dailyWage,
-        updated_at: new Date().toISOString()
-      };
-    })
+    employees.map((employee) => (employee.id === id ? updatedEmployee : employee))
   );
 }
 
-function apiDeleteTimeEmployee(id) {
+async function apiDeleteTimeEmployee(id) {
   const employees = getTimeEmployees();
   const existing = employees.find((employee) => employee.id === id);
   if (!existing) {
     throw new Error("ไม่พบพนักงานตามเวลาที่ต้องการลบ");
   }
+  await deleteCloudTimeEmployee(id);
   saveTimeEmployees(employees.filter((employee) => employee.id !== id));
 }
 
@@ -2837,6 +2927,17 @@ function renderApp(user, route) {
       if (location.hash.replace("#/", "") === "wage-rates") render();
     }).catch((error) => {
       console.warn("Wage rate cloud bootstrap failed.", error);
+    });
+  }
+  if (!employeeCloudBootstrapped) {
+    employeeCloudBootstrapped = true;
+    hydrateAllEmployeesFromCloud().then(() => {
+      const currentRoute = location.hash.replace("#/", "");
+      if (["employees", "production-employees", "time-employees", "production", "time-report", "summary-person"].includes(currentRoute)) {
+        render();
+      }
+    }).catch((error) => {
+      console.warn("Employee cloud bootstrap failed.", error);
     });
   }
 
@@ -6717,10 +6818,18 @@ function renderEmployeeRow(employee, canManage, canDelete) {
 }
 
 function bindEmployeeEvents(user) {
-  document.querySelector("#employeeSearchForm")?.addEventListener("submit", (event) => {
+  document.querySelector("#employeeSearchForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     employeeSearch = String(form.get("employeeSearch") || "");
+    try {
+      const data = await cloudApiRequest(`/api/employees?search=${encodeURIComponent(employeeSearch)}`);
+      const cloudEmployees = Array.isArray(data.data) ? data.data.map(normalizeCloudEmployee) : [];
+      saveEmployees(cloudEmployees);
+    } catch (error) {
+      employeeMessage = error instanceof Error ? error.message : "โหลดพนักงานจากฐานกลางไม่สำเร็จ";
+      employeeMessageType = "error";
+    }
     render();
   });
 
@@ -6739,7 +6848,7 @@ function bindEmployeeEvents(user) {
     event.target.value = normalizeEmployeeCodeInput(event.target.value);
   });
 
-  document.querySelector("#employeeForm")?.addEventListener("submit", (event) => {
+  document.querySelector("#employeeForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
 
     if (!canManageEmployees(user)) {
@@ -6776,10 +6885,10 @@ function bindEmployeeEvents(user) {
 
     try {
       if (id) {
-        apiUpdateEmployee(id, payload);
+        await apiUpdateEmployee(id, payload);
         employeeMessage = `Updated employee ${payload.emp_code}.`;
       } else {
-        apiCreateEmployee(payload);
+        await apiCreateEmployee(payload);
         employeeMessage = `Added employee ${payload.emp_code}.`;
       }
       employeeMessageType = "success";
@@ -6793,7 +6902,7 @@ function bindEmployeeEvents(user) {
   });
 
   document.querySelectorAll("[data-edit-employee]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       if (!canManageEmployees(user)) return;
       editingEmployeeId = Number(button.dataset.editEmployee);
       employeeMessage = "";
@@ -6802,7 +6911,7 @@ function bindEmployeeEvents(user) {
   });
 
   document.querySelectorAll("[data-delete-employee]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       if (!canDeleteEmployees(user)) {
         window.alert("Only Admin can delete employees.");
         return;
@@ -6816,7 +6925,7 @@ function bindEmployeeEvents(user) {
 
       if (confirmed) {
         try {
-          apiDeleteEmployee(id);
+          await apiDeleteEmployee(id);
           if (editingEmployeeId === id) editingEmployeeId = null;
           employeeMessage = `Deleted employee ${employee?.emp_code || id}.`;
           employeeMessageType = "success";
@@ -6995,10 +7104,18 @@ function renderTimeEmployeeRow(employee, canManage, canDelete) {
 }
 
 function bindTimeEmployeeEvents(user) {
-  document.querySelector("#timeEmployeeSearchForm")?.addEventListener("submit", (event) => {
+  document.querySelector("#timeEmployeeSearchForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     timeEmployeeSearch = String(form.get("timeEmployeeSearch") || "");
+    try {
+      const data = await cloudApiRequest(`/api/time-employees?search=${encodeURIComponent(timeEmployeeSearch)}`);
+      const cloudEmployees = Array.isArray(data.data) ? data.data.map(normalizeCloudTimeEmployee) : [];
+      saveTimeEmployees(cloudEmployees);
+    } catch (error) {
+      timeEmployeeMessage = error instanceof Error ? error.message : "โหลดพนักงานตามเวลาจากฐานกลางไม่สำเร็จ";
+      timeEmployeeMessageType = "error";
+    }
     render();
   });
 
@@ -7017,7 +7134,7 @@ function bindTimeEmployeeEvents(user) {
     event.target.value = normalizeTimeEmployeeCodeInput(event.target.value);
   });
 
-  document.querySelector("#timeEmployeeForm")?.addEventListener("submit", (event) => {
+  document.querySelector("#timeEmployeeForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!canManageEmployees(user)) {
       window.alert("Your role cannot add or edit employees.");
@@ -7049,10 +7166,10 @@ function bindTimeEmployeeEvents(user) {
 
     try {
       if (id) {
-        apiUpdateTimeEmployee(id, payload);
+        await apiUpdateTimeEmployee(id, payload);
         timeEmployeeMessage = `Updated time employee ${payload.emp_code}.`;
       } else {
-        apiCreateTimeEmployee(payload);
+        await apiCreateTimeEmployee(payload);
         timeEmployeeMessage = `Added time employee ${payload.emp_code}.`;
       }
       timeEmployeeMessageType = "success";
@@ -7066,7 +7183,7 @@ function bindTimeEmployeeEvents(user) {
   });
 
   document.querySelectorAll("[data-edit-time-employee]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       if (!canManageEmployees(user)) return;
       editingTimeEmployeeId = Number(button.dataset.editTimeEmployee);
       timeEmployeeMessage = "";
@@ -7075,7 +7192,7 @@ function bindTimeEmployeeEvents(user) {
   });
 
   document.querySelectorAll("[data-delete-time-employee]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       if (!canDeleteEmployees(user)) {
         window.alert("Only Admin can delete employees.");
         return;
@@ -7086,7 +7203,7 @@ function bindTimeEmployeeEvents(user) {
       if (!confirmed) return;
 
       try {
-        apiDeleteTimeEmployee(id);
+        await apiDeleteTimeEmployee(id);
         if (editingTimeEmployeeId === id) editingTimeEmployeeId = null;
         timeEmployeeMessage = `Deleted time employee ${employee?.emp_code || id}.`;
         timeEmployeeMessageType = "success";
