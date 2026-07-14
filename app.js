@@ -305,6 +305,65 @@ modules.forEach((moduleItem) => {
   }
 });
 
+const levelRouteAccess = {
+  C1: ["production"],
+  C2: ["production", "summary-person"],
+  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report"],
+  C4: ["dashboard", "summary-all", "summary-main", "summary-person", "reports", "time-report", "settings", "employees"],
+  C5: [
+    "dashboard",
+    "production",
+    "summary-all",
+    "summary-main",
+    "summary-person",
+    "compare-data",
+    "reports",
+    "time-report",
+    "settings",
+    "employees",
+    "pile-management",
+    "wage-rates",
+    "audit-log"
+  ],
+  C6: [
+    "dashboard",
+    "production",
+    "summary-all",
+    "summary-main",
+    "summary-export",
+    "summary-time-overview",
+    "summary-person",
+    "compare-data",
+    "reports",
+    "time-report",
+    "settings",
+    "employees",
+    "pile-management",
+    "wage-rates",
+    "account-management",
+    "audit-log",
+    "backup"
+  ]
+};
+
+const defaultRouteByLevel = {
+  C1: "production",
+  C2: "production",
+  C3: "dashboard",
+  C4: "dashboard",
+  C5: "dashboard",
+  C6: "dashboard"
+};
+
+const builtInAccountLevels = {
+  admin: "C6",
+  hr: "C4",
+  operator: "C1",
+  supervisor: "C3",
+  leader: "C1",
+  Gxy: "C6"
+};
+
 const defaultEmployees = [
   {
     id: 1,
@@ -769,7 +828,16 @@ function getSession() {
   if (!raw) return null;
 
   try {
-    return JSON.parse(raw);
+    const session = JSON.parse(raw);
+    if (session?.user?.username && builtInAccountLevels[session.user.username]) {
+      const builtInLevel = builtInAccountLevels[session.user.username];
+      const currentIndex = accountLevelOptions.indexOf(String(session.user.level || "C1").toUpperCase());
+      const builtInIndex = accountLevelOptions.indexOf(builtInLevel);
+      if (currentIndex < builtInIndex) {
+        session.user.level = builtInLevel;
+      }
+    }
+    return session;
   } catch {
     sessionStorage.removeItem(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
@@ -808,22 +876,44 @@ function clearSession() {
   localStorage.removeItem(SESSION_KEY);
 }
 
+function getUserLevel(user) {
+  const level = String(user?.level || "C1").toUpperCase();
+  return accountLevelOptions.includes(level) ? level : "C1";
+}
+
+function getAllowedRoutesForUser(user) {
+  if (!user) return [];
+  if (user.role === "developer" || user.role_key === "developer" || user.is_system) {
+    return modules.map((item) => item.id);
+  }
+
+  return levelRouteAccess[getUserLevel(user)] || [];
+}
+
+function getDefaultRouteForUser(user) {
+  const preferredRoute = defaultRouteByLevel[getUserLevel(user)] || "dashboard";
+  if (canOpen(user, preferredRoute)) return preferredRoute;
+  return getAllowedRoutesForUser(user).find((route) => canOpen(user, route)) || "dashboard";
+}
+
 function canOpen(user, moduleId) {
   const moduleItem = modules.find((item) => item.id === moduleId);
-  return Boolean(moduleItem && moduleItem.roles.includes(user.role));
+  if (!moduleItem || !user) return false;
+  if (user.role === "developer" || user.role_key === "developer" || user.is_system) return true;
+  return getAllowedRoutesForUser(user).includes(moduleId);
 }
 
 function canManageEmployees(user) {
-  return ["admin", "hr"].includes(user.role);
+  return canOpen(user, "employees");
 }
 
 function canDeleteEmployees(user) {
-  return user.role === "admin";
+  return ["C5", "C6"].includes(getUserLevel(user)) || user.role === "developer";
 }
 
 function canExportFullDetails(user) {
   if (!user) return false;
-  if (["admin", "developer"].includes(user.role)) return true;
+  if (user.role === "developer" || user.role_key === "developer" || user.is_system) return true;
   const levelIndex = accountLevelOptions.indexOf(String(user.level || "").toUpperCase());
   return levelIndex >= accountLevelOptions.indexOf("C5");
 }
@@ -846,12 +936,14 @@ function accountRoleOptionForUser(user) {
 
 function normalizeAccountUser(user) {
   const roleOption = accountRoleOptionForUser(user);
+  const username = String(user.username || "").trim();
+  const defaultLevel = builtInAccountLevels[username] || "C1";
   const level = accountLevelOptions.includes(String(user.level || "").toUpperCase())
     ? String(user.level).toUpperCase()
-    : "C1";
+    : defaultLevel;
   return {
     id: Number(user.id),
-    username: String(user.username || "").trim(),
+    username,
     password: String(user.password || ""),
     fullname: String(user.fullname || "").trim(),
     phone: String(user.phone || "").trim(),
@@ -878,18 +970,31 @@ function ensureSystemDeveloperAccount(accountUsers) {
   return [normalizedSystemAccount, ...withoutSystemAccount];
 }
 
+function applyBuiltInAccountLevelDefaults(accountUsers) {
+  return accountUsers.map((accountUser) => {
+    const builtInLevel = builtInAccountLevels[accountUser.username];
+    if (!builtInLevel || accountUser.is_system) return accountUser;
+    const currentIndex = accountLevelOptions.indexOf(accountUser.level);
+    const builtInIndex = accountLevelOptions.indexOf(builtInLevel);
+    if (currentIndex >= builtInIndex) return accountUser;
+    return { ...accountUser, level: builtInLevel };
+  });
+}
+
 function getAccountUsers() {
   const raw = localStorage.getItem(ACCOUNT_USERS_KEY);
   if (!raw) {
-    const defaultAccounts = ensureSystemDeveloperAccount(users.map((user) =>
-      normalizeAccountUser({
-        ...user,
-        level: "C1",
-        phone: "",
-        created_at: "2026-07-03T08:00:00.000Z",
-        updated_at: "2026-07-03T08:00:00.000Z"
-      })
-    ));
+    const defaultAccounts = applyBuiltInAccountLevelDefaults(
+      ensureSystemDeveloperAccount(users.map((user) =>
+        normalizeAccountUser({
+          ...user,
+          level: builtInAccountLevels[user.username] || "C1",
+          phone: "",
+          created_at: "2026-07-03T08:00:00.000Z",
+          updated_at: "2026-07-03T08:00:00.000Z"
+        })
+      ))
+    );
     saveAccountUsers(defaultAccounts);
     return defaultAccounts;
   }
@@ -897,7 +1002,9 @@ function getAccountUsers() {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) throw new Error("Invalid account data.");
-    const normalizedAccounts = ensureSystemDeveloperAccount(parsed.map(normalizeAccountUser));
+    const normalizedAccounts = applyBuiltInAccountLevelDefaults(
+      ensureSystemDeveloperAccount(parsed.map(normalizeAccountUser))
+    );
     if (
       normalizedAccounts.length !== parsed.length ||
       normalizedAccounts.some((accountUser, index) => {
@@ -2131,7 +2238,7 @@ function render() {
   }
 
   if (session && route === "login") {
-    location.hash = "#/dashboard";
+    location.hash = `#/${getDefaultRouteForUser(session.user)}`;
     return;
   }
 
@@ -2255,42 +2362,51 @@ function handleLogin(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const username = String(form.get("username") || "").trim();
-  const password = String(form.get("password") || "");
+  const normalizedUsername = username.toLowerCase();
+  const password = String(form.get("password") || "").trim();
   const rememberSession = form.get("remember_session") === "on";
+  const accountUsers = getAccountUsers();
+  const registeredUser = accountUsers.find(
+    (accountUser) => accountUser.username.toLowerCase() === normalizedUsername
+  );
+  const demoUser = users.find((item) => item.username.toLowerCase() === normalizedUsername);
+  const matchedUser = registeredUser || demoUser || null;
   const user =
-    getAccountUsers().find(
-      (accountUser) =>
-        accountUser.username === username &&
-        accountUser.password === password &&
-        accountUser.isActive !== false
-    ) ||
-    users.find(
-      (item) =>
-        item.username === username &&
-        item.password === password &&
-        item.isActive !== false
-    );
+    matchedUser &&
+    matchedUser.password === password &&
+    matchedUser.isActive !== false
+      ? matchedUser
+      : null;
 
   if (!user) {
-    renderLogin("ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง");
+    if (matchedUser && matchedUser.isActive === false) {
+      renderLogin("บัญชีนี้ถูกปิดใช้งาน กรุณาติดต่อผู้ดูแลระบบ");
+      return;
+    }
+    if (matchedUser && matchedUser.password !== password) {
+      renderLogin("รหัสผ่านไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง");
+      return;
+    }
+    renderLogin("ไม่พบบัญชีนี้ในเครื่องนี้ หากสมัครจากเครื่องอื่นต้อง Import/Backup ข้อมูลบัญชีมาก่อน");
     return;
   }
 
   saveSession(user, rememberSession);
   sessionStorage.setItem("pismai_welcome_user", user.username);
-  if (location.hash === "#/dashboard") {
+  const nextRoute = getDefaultRouteForUser(user);
+  if (location.hash === `#/${nextRoute}`) {
     render();
   } else {
-    location.hash = "#/dashboard";
+    location.hash = `#/${nextRoute}`;
   }
 }
 
 function renderApp(user, route) {
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
   const visibleModules = modules.filter(
-    (item) => !item.hidden && item.roles.includes(user.role)
+    (item) => !item.hidden && canOpen(user, item.id)
   );
-  const navOrder = ["dashboard", "production", "time-report", "summary-person", "summary-all", "compare-data", "settings"];
+  const navOrder = ["dashboard", "production", "time-report", "summary-person", "summary-all", "compare-data", "reports", "settings"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
 
@@ -2417,7 +2533,7 @@ function renderModuleContent(user, moduleItem) {
     return renderPileManagement(moduleItem);
   }
   if (moduleItem.id === "settings") {
-    return renderFullSettingsModule();
+    return renderFullSettingsModule(user);
   }
   return renderSimpleModule(moduleItem);
 }
@@ -3095,12 +3211,21 @@ function renderSimpleModule(moduleItem) {
   `;
 }
 
-function renderFullSettingsModule() {
+function renderFullSettingsModule(user) {
   const employees = getEmployees();
   const activeEmployees = employees.filter((employee) => employee.status === "Active").length;
   const rates = getWageRates();
   const accounts = getAccountUsers();
   const logs = getAuditLogs();
+  const settingsTiles = [
+    ["employees", "จัดการพนักงาน", "เพิ่ม แก้ไข ค้นหา ลบ และตั้งค่าสถานะพนักงาน"],
+    ["wage-rates", "ตั้งค่าอัตราค่าจ้าง", "เพิ่มอัตราใหม่และดูประวัติค่าน้ำ/ค่าดอกย้อนหลัง"],
+    ["pile-management", "จัดการกอง", "ตรวจสอบกอง 1-5 จากข้อมูลผลิตจริง และ export CSV"],
+    ["account-management", "บัญชีเข้าใช้งาน", "Register และแก้ไข ID สำหรับเข้าเว็บ"],
+    ["reports", "รายงาน", "ส่งออก PDF และ Excel จากระบบรายงานเดิม"],
+    ["audit-log", "Audit Log", "ดูประวัติระบบ หลังกรอกรหัส 4 หลัก"],
+    ["backup", "สำรองข้อมูล", "Export และ Import ข้อมูลในเครื่อง พร้อมตรวจไฟล์ก่อนนำเข้า"]
+  ].filter(([route]) => canOpen(user, route));
 
   return `
     <section class="panel settings-home-panel">
@@ -3125,13 +3250,16 @@ function renderFullSettingsModule() {
         <p class="muted-text">เลือกงานที่ต้องการจัดการ</p>
       </div>
       <div class="settings-grid settings-grid-wide">
-        <button class="settings-tile" data-route="employees" type="button"><strong>จัดการพนักงาน</strong><span>เพิ่ม แก้ไข ค้นหา ลบ และตั้งค่าสถานะพนักงาน</span></button>
-        <button class="settings-tile" data-route="wage-rates" type="button"><strong>ตั้งค่าอัตราค่าจ้าง</strong><span>เพิ่มอัตราใหม่และดูประวัติค่าน้ำ/ค่าดอกย้อนหลัง</span></button>
-        <button class="settings-tile" data-route="pile-management" type="button"><strong>จัดการกอง</strong><span>ตรวจสอบกอง 1-5 จากข้อมูลผลิตจริง และ export CSV</span></button>
-        <button class="settings-tile" data-route="account-management" type="button"><strong>บัญชีเข้าใช้งาน</strong><span>Register และแก้ไข ID สำหรับเข้าเว็บ</span></button>
-        <button class="settings-tile" data-route="reports" type="button"><strong>รายงาน</strong><span>ส่งออก PDF และ Excel จากระบบรายงานเดิม</span></button>
-        <button class="settings-tile" data-route="audit-log" type="button"><strong>Audit Log</strong><span>ดูประวัติระบบ หลังกรอกรหัส 4 หลัก</span></button>
-        <button class="settings-tile" data-route="backup" type="button"><strong>สำรองข้อมูล</strong><span>Export และ Import ข้อมูลในเครื่อง พร้อมตรวจไฟล์ก่อนนำเข้า</span></button>
+        ${
+          settingsTiles.length
+            ? settingsTiles
+                .map(
+                  ([route, title, description]) =>
+                    `<button class="settings-tile" data-route="${route}" type="button"><strong>${title}</strong><span>${description}</span></button>`
+                )
+                .join("")
+            : `<div class="empty-state">ระดับ ${escapeHtml(getUserLevel(user))} ยังไม่มีเมนูตั้งค่าที่เปิดให้ใช้งาน</div>`
+        }
       </div>
     </section>
   `;
@@ -6194,7 +6322,7 @@ function renderAccessDenied(user, route) {
   `;
 
   document.querySelector("#backButton").addEventListener("click", () => {
-    location.hash = "#/summary-all";
+    location.hash = `#/${getDefaultRouteForUser(user)}`;
   });
 }
 
