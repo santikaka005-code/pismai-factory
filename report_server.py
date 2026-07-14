@@ -46,6 +46,22 @@ SYSTEM_NAME = "SystemPro by Pitsamai Frozen Fruits"
 BRAND_GREEN = "#0F7A3D"
 THAI_FONT = "Helvetica"
 THAI_FONT_BOLD = "Helvetica-Bold"
+TIME_SPECIAL_DAILY_WAGE = 365
+TIME_SPECIAL_WAGE_TABLE = {
+    2: 91,
+    2.5: 114,
+    3: 137,
+    3.5: 160,
+    4: 183,
+    4.5: 205,
+    5: 228,
+    5.5: 251,
+    6: 273,
+    6.5: 297,
+    7: 319,
+    7.5: 342,
+    8: 365,
+}
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 BACKUP_ACCESS_CODE = os.environ.get("BACKUP_ACCESS_CODE", "1150")
@@ -1348,7 +1364,13 @@ def time_receipt_groups(payload: dict) -> list[dict]:
         record_ot_rate = float(record.get("ot_hourly_rate") or ot_rate)
         # The factory wage table rounds each day's proportional normal wage
         # to the nearest whole baht (0.50 rounds up) before employee totals.
-        normal_amount = math.floor((normal_hours * record_normal_rate) + 0.5)
+        rounded_half_hour = round(normal_hours * 2) / 2
+        if int(record_daily_wage) == TIME_SPECIAL_DAILY_WAGE and rounded_half_hour in TIME_SPECIAL_WAGE_TABLE:
+            normal_amount = TIME_SPECIAL_WAGE_TABLE[rounded_half_hour]
+        elif normal_hours >= standard_hours:
+            normal_amount = record_daily_wage
+        else:
+            normal_amount = math.floor((normal_hours * record_normal_rate) + 0.5)
         ot_amount = ot_hours * record_ot_rate
         group["normal_hours"] += normal_hours
         group["ot_hours"] += ot_hours

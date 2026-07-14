@@ -11,7 +11,7 @@ const AUDIT_LOG_PASSWORD = "1150";
 const REPORT_API_BASE =
   location.protocol === "file:" ? "http://127.0.0.1:8787" : location.origin;
 const TIME_DAILY_WAGE = 347;
-const TIME_SPECIAL_DAILY_WAGE = 420;
+const TIME_SPECIAL_DAILY_WAGE = 365;
 const TIME_STANDARD_HOURS = 8;
 const TIME_NORMAL_HOURLY_RATE = TIME_DAILY_WAGE / TIME_STANDARD_HOURS;
 const TIME_OT_HOURLY_RATE = 50;
@@ -19,6 +19,21 @@ const timeEmployeeTypeOptions = [
   { id: "normal", label: "พนักงานปกติ", dailyWage: TIME_DAILY_WAGE },
   { id: "special", label: "พนักงานพิเศษ", dailyWage: TIME_SPECIAL_DAILY_WAGE }
 ];
+const TIME_SPECIAL_WAGE_TABLE = {
+  2: 91,
+  2.5: 114,
+  3: 137,
+  3.5: 160,
+  4: 183,
+  4.5: 205,
+  5: 228,
+  5.5: 251,
+  6: 273,
+  6.5: 297,
+  7: 319,
+  7.5: 342,
+  8: 365
+};
 
 const users = [
   {
@@ -825,6 +840,14 @@ function normalizeEmployeeCodeInput(value) {
     .slice(0, 5);
 }
 
+function normalizeTimeEmployeeCodeInput(value) {
+  const thaiDigits = "๐๑๒๓๔๕๖๗๘๙";
+  return String(value || "")
+    .replace(/[๐-๙]/g, (digit) => String(thaiDigits.indexOf(digit)))
+    .replace(/\D/g, "")
+    .slice(0, 8);
+}
+
 function getEmployeeLookupText(employee, empCode) {
   if (employee) return employee.fullname;
   return empCode.length === 5
@@ -1534,7 +1557,7 @@ function normalizeTimeEmployee(employee) {
   const typeOption = getTimeEmployeeTypeOption(employee?.employee_type);
   return {
     id: Number(employee?.id) || 0,
-    emp_code: normalizeEmployeeCodeInput(employee?.emp_code || ""),
+    emp_code: normalizeTimeEmployeeCodeInput(employee?.emp_code || ""),
     fullname: String(employee?.fullname || "").trim(),
     employee_type: typeOption.id,
     daily_wage: typeOption.dailyWage,
@@ -1583,7 +1606,7 @@ function apiGetTimeEmployees(search = "") {
 }
 
 function apiGetTimeEmployeeByCode(empCode) {
-  const normalizedCode = normalizeEmployeeCodeInput(empCode).toLowerCase();
+  const normalizedCode = normalizeTimeEmployeeCodeInput(empCode).toLowerCase();
   return (
     getTimeEmployees().find(
       (employee) =>
@@ -1595,7 +1618,10 @@ function apiGetTimeEmployeeByCode(empCode) {
 
 function apiCreateTimeEmployee(payload) {
   const employees = getTimeEmployees();
-  const empCode = normalizeEmployeeCodeInput(payload.emp_code);
+  const empCode = normalizeTimeEmployeeCodeInput(payload.emp_code);
+  if (empCode.length < 2) {
+    throw new Error("หมายเลขพนักงานต้องเป็นตัวเลขอย่างน้อย 2 หลัก");
+  }
   const duplicate = employees.some((employee) => employee.emp_code.toLowerCase() === empCode.toLowerCase());
   if (duplicate) {
     throw new Error("รหัสพนักงานตามเวลาต้องไม่ซ้ำกัน");
@@ -1621,7 +1647,10 @@ function apiCreateTimeEmployee(payload) {
 
 function apiUpdateTimeEmployee(id, payload) {
   const employees = getTimeEmployees();
-  const empCode = normalizeEmployeeCodeInput(payload.emp_code);
+  const empCode = normalizeTimeEmployeeCodeInput(payload.emp_code);
+  if (empCode.length < 2) {
+    throw new Error("หมายเลขพนักงานต้องเป็นตัวเลขอย่างน้อย 2 หลัก");
+  }
   const duplicate = employees.some((employee) => employee.id !== id && employee.emp_code.toLowerCase() === empCode.toLowerCase());
   if (duplicate) {
     throw new Error("รหัสพนักงานตามเวลาต้องไม่ซ้ำกัน");
@@ -2130,6 +2159,16 @@ function saveProductionRecords(records) {
   localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(records));
 }
 
+function normalizeTimeRecordWage(record) {
+  if (!record || record.employee_type !== "special") return record;
+  return {
+    ...record,
+    daily_wage: TIME_SPECIAL_DAILY_WAGE,
+    normal_hourly_rate: TIME_SPECIAL_DAILY_WAGE / TIME_STANDARD_HOURS,
+    ot_hourly_rate: Number(record.ot_hourly_rate) || TIME_OT_HOURLY_RATE
+  };
+}
+
 function getTimeRecords() {
   const raw = localStorage.getItem(TIME_RECORDS_KEY);
   if (!raw) return [];
@@ -2139,11 +2178,12 @@ function getTimeRecords() {
     if (!Array.isArray(parsed)) return [];
 
     return parsed.map((record) => {
-      if (!record?.clock_in || !record?.clock_out) return record;
+      const wageNormalizedRecord = normalizeTimeRecordWage(record);
+      if (!wageNormalizedRecord?.clock_in || !wageNormalizedRecord?.clock_out) return wageNormalizedRecord;
       try {
-        return { ...record, ...calculateWorkMinutes(record.clock_in, record.clock_out) };
+        return { ...wageNormalizedRecord, ...calculateWorkMinutes(wageNormalizedRecord.clock_in, wageNormalizedRecord.clock_out) };
       } catch {
-        return record;
+        return wageNormalizedRecord;
       }
     });
   } catch {
@@ -6014,7 +6054,7 @@ function renderTimeReport(user, moduleItem) {
             </label>
             <label class="field">
               <span>รหัสพนักงาน</span>
-              <input name="emp_code" list="timeEmployeeCodes" placeholder="10001" required />
+              <input name="emp_code" list="timeEmployeeCodes" inputmode="numeric" pattern="[0-9]{2,8}" placeholder="เช่น 12" required />
             </label>
             <label class="field">
               <span>เวลาเข้า</span>
@@ -6891,7 +6931,7 @@ function renderTimeEmployeeForm(employee) {
 
         <label class="field">
           <span>หมายเลขพนักงาน</span>
-          <input name="emp_code" inputmode="numeric" maxlength="5" pattern="[0-9]{5}" value="${employee ? escapeHtml(employee.emp_code) : ""}" required />
+          <input name="emp_code" inputmode="numeric" maxlength="8" pattern="[0-9]{2,8}" value="${employee ? escapeHtml(employee.emp_code) : ""}" required />
         </label>
 
         <label class="field">
@@ -6968,7 +7008,7 @@ function bindTimeEmployeeEvents(user) {
   });
 
   document.querySelector("#timeEmployeeForm input[name='emp_code']")?.addEventListener("input", (event) => {
-    event.target.value = normalizeEmployeeCodeInput(event.target.value);
+    event.target.value = normalizeTimeEmployeeCodeInput(event.target.value);
   });
 
   document.querySelector("#timeEmployeeForm")?.addEventListener("submit", (event) => {
@@ -6980,9 +7020,9 @@ function bindTimeEmployeeEvents(user) {
 
     const form = new FormData(event.currentTarget);
     const id = Number(form.get("id"));
-    const empCode = normalizeEmployeeCodeInput(form.get("emp_code"));
-    if (empCode.length !== 5) {
-      timeEmployeeMessage = "หมายเลขพนักงานต้องเป็นตัวเลข 5 หลัก";
+    const empCode = normalizeTimeEmployeeCodeInput(form.get("emp_code"));
+    if (empCode.length < 2) {
+      timeEmployeeMessage = "หมายเลขพนักงานต้องเป็นตัวเลขอย่างน้อย 2 หลัก";
       timeEmployeeMessageType = "error";
       render();
       return;
@@ -7800,15 +7840,30 @@ function formatBaht(value) {
   return `${money(value).replace("฿", "").trim()} บาท`;
 }
 
+function getTimeNormalHourlyRate(record) {
+  return Number(record.normal_hourly_rate) || ((Number(record.daily_wage) || TIME_DAILY_WAGE) / TIME_STANDARD_HOURS);
+}
+
+function calculateTimeNormalWageAmount(normalHours, record = {}) {
+  const dailyWage = Number(record.daily_wage) || TIME_DAILY_WAGE;
+  if (dailyWage === TIME_SPECIAL_DAILY_WAGE) {
+    const roundedHalfHour = Math.round(normalHours * 2) / 2;
+    if (Object.prototype.hasOwnProperty.call(TIME_SPECIAL_WAGE_TABLE, roundedHalfHour)) {
+      return TIME_SPECIAL_WAGE_TABLE[roundedHalfHour];
+    }
+  }
+  if (normalHours >= TIME_STANDARD_HOURS) return dailyWage;
+  return Math.round(normalHours * getTimeNormalHourlyRate(record));
+}
+
 function getTimeReceiptRow(record) {
   const netMinutes = Number(record.net_minutes) || 0;
   const normalMinutes = Math.min(netMinutes, TIME_STANDARD_HOURS * 60);
   const otMinutes = Math.max(0, netMinutes - normalMinutes);
   const normalHours = normalMinutes / 60;
   const otHours = otMinutes / 60;
-  const normalHourlyRate = Number(record.normal_hourly_rate) || ((Number(record.daily_wage) || TIME_DAILY_WAGE) / TIME_STANDARD_HOURS);
   const otHourlyRate = Number(record.ot_hourly_rate) || TIME_OT_HOURLY_RATE;
-  const normalAmount = Math.round(normalHours * normalHourlyRate);
+  const normalAmount = calculateTimeNormalWageAmount(normalHours, record);
   const otAmount = otHours * otHourlyRate;
 
   return {
