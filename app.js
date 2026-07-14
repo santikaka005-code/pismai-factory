@@ -2588,6 +2588,10 @@ function renderApp(user, route) {
   bindAppEvents(user, moduleItem);
 }
 function renderModuleContent(user, moduleItem) {
+  const settingsSubpageIds = new Set(["employees", "wage-rates", "account-management", "audit-log", "backup"]);
+  const wrapSettingsSubpage = (content) =>
+    settingsSubpageIds.has(moduleItem.id) ? `${renderSettingsBackBar()}${content}` : content;
+
   if (moduleItem.id === "dashboard") {
     return renderDashboard(user, moduleItem);
   }
@@ -2619,19 +2623,19 @@ function renderModuleContent(user, moduleItem) {
     return renderReports(moduleItem);
   }
   if (moduleItem.id === "employees") {
-    return renderEmployees(user, moduleItem);
+    return wrapSettingsSubpage(renderEmployees(user, moduleItem));
   }
   if (moduleItem.id === "wage-rates") {
-    return renderWageRateForm();
+    return wrapSettingsSubpage(renderWageRateForm());
   }
   if (moduleItem.id === "account-management") {
-    return renderAccountManagement(user, moduleItem);
+    return wrapSettingsSubpage(renderAccountManagement(user, moduleItem));
   }
   if (moduleItem.id === "audit-log") {
-    return renderAuditLog(moduleItem);
+    return wrapSettingsSubpage(renderAuditLog(moduleItem));
   }
   if (moduleItem.id === "backup") {
-    return renderBackupModule(moduleItem);
+    return wrapSettingsSubpage(renderBackupModule(moduleItem));
   }
   if (moduleItem.id === "pile-management") {
     return renderPileManagement(moduleItem);
@@ -3312,6 +3316,14 @@ function renderSimpleModule(moduleItem) {
   `;
 }
 
+function renderSettingsBackBar() {
+  return `
+    <section class="settings-back-bar">
+      <button class="btn btn-outline" type="button" data-route="settings">← กลับหน้าตั้งค่า</button>
+    </section>
+  `;
+}
+
 function renderFullSettingsModule(user) {
   const employees = getEmployees();
   const activeEmployees = employees.filter((employee) => employee.status === "Active").length;
@@ -3321,11 +3333,9 @@ function renderFullSettingsModule(user) {
   const settingsTiles = [
     ["employees", "จัดการพนักงาน", "เพิ่ม แก้ไข ค้นหา ลบ และตั้งค่าสถานะพนักงาน"],
     ["wage-rates", "ตั้งค่าอัตราค่าจ้าง", "เพิ่มอัตราใหม่และดูประวัติค่าน้ำ/ค่าดอกย้อนหลัง"],
-    ["pile-management", "จัดการกอง", "ตรวจสอบกอง 1-5 จากข้อมูลผลิตจริง และ export CSV"],
     ["account-management", "บัญชีเข้าใช้งาน", "Register และแก้ไข ID สำหรับเข้าเว็บ"],
-    ["reports", "รายงาน", "ส่งออก PDF และ Excel จากระบบรายงานเดิม"],
     ["audit-log", "Audit Log", "ดูประวัติระบบ หลังกรอกรหัส 4 หลัก"],
-    ["backup", "สำรองข้อมูล", "Export และ Import ข้อมูลในเครื่อง พร้อมตรวจไฟล์ก่อนนำเข้า"]
+    ["backup", "สำรองข้อมูล", "Export และ Import ฐานข้อมูล Supabase จริง"]
   ].filter(([route]) => canOpen(user, route));
 
   return `
@@ -3333,7 +3343,7 @@ function renderFullSettingsModule(user) {
       <div class="panel-head">
         <div>
           <h2>ตั้งค่า</h2>
-          <p>ศูนย์จัดการข้อมูลหลักสำหรับแอดมิน: พนักงาน กองงาน บัญชี ค่าจ้าง Audit Log และ Backup</p>
+          <p>ศูนย์จัดการข้อมูลหลักสำหรับแอดมิน: พนักงาน บัญชี ค่าจ้าง Audit Log และ Backup ฐานข้อมูล</p>
         </div>
         <span class="badge badge-success">Admin</span>
       </div>
@@ -3727,6 +3737,20 @@ function buildBackupData() {
   };
 }
 
+async function exportDatabaseBackup(accessCode) {
+  return cloudApiRequest("/api/backup", {
+    headers: { "X-Backup-Code": accessCode }
+  });
+}
+
+async function restoreDatabaseBackup(accessCode, backupPayload) {
+  return cloudApiRequest("/api/backup/restore", {
+    method: "POST",
+    headers: { "X-Backup-Code": accessCode },
+    body: JSON.stringify(backupPayload)
+  });
+}
+
 function setBackupMessage(message, type = "success") {
   backupMessage = message;
   backupMessageType = type;
@@ -3740,15 +3764,15 @@ function renderBackupModule(moduleItem) {
       <div class="panel-head">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>${escapeHtml(moduleItem.description)}</p>
+          <p>สำรองและกู้คืนข้อมูลจากฐานกลาง Supabase จริง ใช้สำหรับย้ายเครื่อง ตรวจสอบย้อนหลัง และลดความเสี่ยงข้อมูลหาย</p>
         </div>
+        <span class="badge badge-success">Supabase</span>
       </div>
       <div class="metrics-grid metrics-spaced">
-        <div class="metric-card"><span>Employees</span><strong>${counts.employees.length.toLocaleString("th-TH")}</strong></div>
-        <div class="metric-card"><span>Records</span><strong>${counts.production_records.length.toLocaleString("th-TH")}</strong></div>
-        <div class="metric-card"><span>Rates</span><strong>${counts.wage_rates.length.toLocaleString("th-TH")}</strong></div>
-        <div class="metric-card"><span>Accounts</span><strong>${counts.account_users.length.toLocaleString("th-TH")}</strong></div>
-        <div class="metric-card"><span>Audit Logs</span><strong>${counts.audit_logs.length.toLocaleString("th-TH")}</strong></div>
+        <div class="metric-card"><span>Local Employees</span><strong>${counts.employees.length.toLocaleString("th-TH")}</strong><small>ข้อมูลใน browser นี้</small></div>
+        <div class="metric-card"><span>Local Records</span><strong>${counts.production_records.length.toLocaleString("th-TH")}</strong><small>ใช้เทียบกับฐานกลาง</small></div>
+        <div class="metric-card"><span>Local Rates</span><strong>${counts.wage_rates.length.toLocaleString("th-TH")}</strong><small>รายการในเครื่อง</small></div>
+        <div class="metric-card"><span>Local Accounts</span><strong>${counts.account_users.length.toLocaleString("th-TH")}</strong><small>บัญชีที่ cache ไว้</small></div>
       </div>
     </section>
     ${
@@ -3758,11 +3782,20 @@ function renderBackupModule(moduleItem) {
     }
     <section class="panel">
       <div class="section-title-row">
-        <h3>Backup / Restore</h3>
+        <div>
+          <h3>Database Backup / Restore</h3>
+          <p class="muted-text">Export จะดึงข้อมูลจาก Supabase โดยตรง ส่วน Import จะเขียนกลับเข้าฐานกลางตามไฟล์ backup</p>
+        </div>
       </div>
-      <div class="panel-actions">
-        <button class="btn btn-primary" id="exportBackup" type="button">Export Backup</button>
-        <label class="btn btn-outline" for="importBackupFile">Import Backup</label>
+      <div class="settings-security-form settings-backup-form">
+        <label class="field">
+          <span>รหัสสำรองข้อมูล 4 หลัก</span>
+          <input id="backupAccessCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="กรอกรหัส" />
+        </label>
+        <div class="panel-actions">
+          <button class="btn btn-primary" id="exportBackup" type="button">Export Database</button>
+          <label class="btn btn-outline" for="importBackupFile">Import Database</label>
+        </div>
         <input id="importBackupFile" type="file" accept="application/json,.json" hidden />
       </div>
     </section>
@@ -3770,30 +3803,54 @@ function renderBackupModule(moduleItem) {
 }
 
 function bindBackupEvents(user) {
-  document.querySelector("#exportBackup")?.addEventListener("click", () => {
-    const content = JSON.stringify(buildBackupData(), null, 2);
-    const today = new Date().toISOString().slice(0, 10);
-    downloadTextFile(`pismai-backup-${today}.json`, content, "application/json;charset=utf-8");
-    addAuditLog(user, "EXPORT_BACKUP", "Exported local backup file");
-    setBackupMessage("Backup exported.");
-    render();
+  const codeInput = document.querySelector("#backupAccessCode");
+  codeInput?.addEventListener("input", () => {
+    codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 4);
+  });
+
+  document.querySelector("#exportBackup")?.addEventListener("click", async () => {
+    const accessCode = String(codeInput?.value || "");
+    if (accessCode.length !== 4) {
+      setBackupMessage("กรุณากรอกรหัสสำรองข้อมูล 4 หลัก", "error");
+      render();
+      return;
+    }
+
+    try {
+      const backup = await exportDatabaseBackup(accessCode);
+      const content = JSON.stringify(backup, null, 2);
+      const today = new Date().toISOString().slice(0, 10);
+      downloadTextFile(`pismai-database-backup-${today}.json`, content, "application/json;charset=utf-8");
+      addAuditLog(user, "EXPORT_DATABASE_BACKUP", "Exported Supabase database backup");
+      setBackupMessage("Export ฐานข้อมูลสำเร็จ");
+      render();
+    } catch (error) {
+      setBackupMessage(error instanceof Error ? error.message : "Export database failed.", "error");
+      render();
+    }
   });
 
   document.querySelector("#importBackupFile")?.addEventListener("change", (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    const accessCode = String(codeInput?.value || "");
+    if (accessCode.length !== 4) {
+      setBackupMessage("กรุณากรอกรหัสสำรองข้อมูล 4 หลักก่อน Import", "error");
+      render();
+      return;
+    }
 
     const reader = new FileReader();
-    reader.addEventListener("load", () => {
+    reader.addEventListener("load", async () => {
       try {
         const parsed = JSON.parse(String(reader.result || "{}"));
         const data = parsed.data || parsed;
         if (!data || typeof data !== "object") throw new Error("Invalid backup file.");
-        const knownKeys = ["employees", "wage_rates", "production_records", "production_sessions", "audit_logs", "account_users"];
+        const knownKeys = ["account_users", "employees", "wage_rates", "production_records", "production_sessions", "time_records", "audit_logs"];
         const hasKnownData = knownKeys.some((key) => Array.isArray(data[key]));
         if (!hasKnownData) throw new Error("Backup file does not contain supported data.");
         const confirmed = window.confirm(
-          "Import backup will replace matching local data in this browser. Continue?"
+          "Import จะเขียนข้อมูลในไฟล์กลับเข้าฐานกลาง Supabase จริง หาก id ซ้ำจะอัปเดตข้อมูลเดิม ต้องการดำเนินการต่อหรือไม่?"
         );
         if (!confirmed) {
           setBackupMessage("Import cancelled.", "error");
@@ -3801,18 +3858,12 @@ function bindBackupEvents(user) {
           return;
         }
 
-        if (Array.isArray(data.employees)) saveEmployees(data.employees);
-        if (Array.isArray(data.wage_rates)) saveWageRates(data.wage_rates);
-        if (Array.isArray(data.production_records)) saveProductionRecords(data.production_records);
-        if (Array.isArray(data.production_sessions)) saveProductionSessions(data.production_sessions);
-        if (Array.isArray(data.audit_logs)) localStorage.setItem(AUDIT_LOG_KEY, JSON.stringify(data.audit_logs));
-        if (Array.isArray(data.account_users)) saveAccountUsers(data.account_users);
-
-        addAuditLog(user, "IMPORT_BACKUP", `Imported backup ${file.name}`);
-        setBackupMessage("Backup imported.");
+        await restoreDatabaseBackup(accessCode, { data });
+        addAuditLog(user, "IMPORT_DATABASE_BACKUP", `Imported Supabase backup ${file.name}`);
+        setBackupMessage("Import ฐานข้อมูลสำเร็จ");
         render();
       } catch (error) {
-        setBackupMessage(error instanceof Error ? error.message : "Import failed.", "error");
+        setBackupMessage(error instanceof Error ? error.message : "Import database failed.", "error");
         render();
       }
     });

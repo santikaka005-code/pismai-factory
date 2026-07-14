@@ -48,6 +48,16 @@ THAI_FONT = "Helvetica"
 THAI_FONT_BOLD = "Helvetica-Bold"
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+BACKUP_ACCESS_CODE = os.environ.get("BACKUP_ACCESS_CODE", "1150")
+BACKUP_TABLES = [
+    "account_users",
+    "employees",
+    "wage_rates",
+    "production_sessions",
+    "production_records",
+    "time_records",
+    "audit_logs",
+]
 
 
 def register_thai_font() -> str:
@@ -203,6 +213,42 @@ def supabase_request(
         return error.code, body
     except Exception as error:
         return 500, {"error": str(error)}
+
+
+def backup_authorized(handler: BaseHTTPRequestHandler) -> bool:
+    provided = handler.headers.get("X-Backup-Code", "")
+    return bool(BACKUP_ACCESS_CODE and hmac.compare_digest(provided, BACKUP_ACCESS_CODE))
+
+
+def read_supabase_backup() -> tuple[int, dict]:
+    backup_data = {}
+    for table in BACKUP_TABLES:
+        status, body = supabase_request("GET", f"{table}?select=*")
+        if status >= 400:
+            return status, {"error": body, "table": table}
+        backup_data[table] = body if isinstance(body, list) else []
+    return 200, backup_data
+
+
+def restore_supabase_backup(data: dict) -> tuple[int, dict]:
+    restored = {}
+    for table in BACKUP_TABLES:
+        rows = data.get(table)
+        if not isinstance(rows, list):
+            continue
+        if not rows:
+            restored[table] = 0
+            continue
+        status, body = supabase_request(
+            "POST",
+            f"{table}?on_conflict=id",
+            rows,
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        if status >= 400:
+            return status, {"error": body, "table": table}
+        restored[table] = len(rows)
+    return 200, {"restored": restored}
 
 
 def find_employee(data: dict, employee_id: int) -> dict | None:
@@ -2422,7 +2468,7 @@ class ReportHandler(BaseHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Backup-Code")
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
@@ -2436,6 +2482,18 @@ class ReportHandler(BaseHTTPRequestHandler):
         if parsed.path == "/reports/sync":
             save_data(payload)
             self.send_json({"status": "ok"})
+            return
+
+        if parsed.path == "/api/backup/restore":
+            if not backup_authorized(self):
+                self.send_json({"error": "Backup code is required."}, 403)
+                return
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            if not isinstance(data, dict):
+                self.send_json({"error": "Invalid backup payload."}, 400)
+                return
+            status, body = restore_supabase_backup(data)
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
         if parsed.path == "/api/auth/login":
@@ -2745,6 +2803,24 @@ class ReportHandler(BaseHTTPRequestHandler):
             status, body = supabase_request("GET", f"account_users?{params}")
             data = [account_to_client(item) for item in body] if status < 400 and isinstance(body, list) else []
             self.send_json({"data": data, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/backup":
+            if not backup_authorized(self):
+                self.send_json({"error": "Backup code is required."}, 403)
+                return
+            status, body = read_supabase_backup()
+            self.send_json(
+                {
+                    "exported_at": datetime.utcnow().isoformat() + "Z",
+                    "app": "Pismai Factory Wage",
+                    "version": 2,
+                    "source": "supabase",
+                    "data": body if status < 400 else None,
+                    "error": body if status >= 400 else None,
+                },
+                status,
+            )
             return
 
         if parsed.path == "/reports/employee-daily-pdf":
