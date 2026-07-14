@@ -645,6 +645,7 @@ let productionMessage = "";
 let productionMessageType = "success";
 let auditLogUnlocked = false;
 let auditLogMessage = "";
+let accountCloudBootstrapped = false;
 let batchEntryText = "";
 let batchGridState = {
   emp_code: "",
@@ -1027,6 +1028,73 @@ function saveAccountUsers(accountUsers) {
   );
 }
 
+async function cloudApiRequest(path, options = {}) {
+  const response = await fetch(`${REPORT_API_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message =
+      typeof data.error === "string"
+        ? data.error
+        : data.error?.message || data.message || `Cloud API failed (${response.status})`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+function normalizeCloudAccountUser(accountUser) {
+  return normalizeAccountUser({
+    ...accountUser,
+    password: accountUser.password || "",
+    role_key: accountUser.role_key || accountUser.role || "general_staff",
+    level: accountUser.level || accountUser.user_level || "C1",
+    isActive: accountUser.isActive ?? accountUser.status !== "Inactive"
+  });
+}
+
+async function loginWithCloud(username, password) {
+  const data = await cloudApiRequest("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username, password })
+  });
+  return normalizeCloudAccountUser(data.user || {});
+}
+
+async function syncAccountsToCloud(accounts = getAccountUsers()) {
+  const syncableAccounts = accounts.filter((accountUser) => {
+    return accountUser.username && accountUser.password && !accountUser.is_system;
+  });
+  if (!syncableAccounts.length) return [];
+  const data = await cloudApiRequest("/api/accounts/sync", {
+    method: "POST",
+    body: JSON.stringify({ accounts: syncableAccounts })
+  });
+  return Array.isArray(data.data) ? data.data.map(normalizeCloudAccountUser) : [];
+}
+
+async function hydrateAccountsFromCloud() {
+  const data = await cloudApiRequest("/api/accounts");
+  const cloudAccounts = Array.isArray(data.data) ? data.data.map(normalizeCloudAccountUser) : [];
+  if (!cloudAccounts.length) return [];
+  const localAccounts = getAccountUsers();
+  const merged = new Map(localAccounts.map((accountUser) => [accountUser.username.toLowerCase(), accountUser]));
+  cloudAccounts.forEach((accountUser) => {
+    const key = accountUser.username.toLowerCase();
+    merged.set(key, {
+      ...(merged.get(key) || {}),
+      ...accountUser,
+      password: merged.get(key)?.password || accountUser.password || ""
+    });
+  });
+  saveAccountUsers([...merged.values()]);
+  return cloudAccounts;
+}
+
 function apiGetAccountUsers(search = "") {
   const keyword = search.trim().toLowerCase();
   const accountUsers = getAccountUsers().sort((a, b) => a.id - b.id);
@@ -1121,6 +1189,10 @@ function apiCreateAccountUser(payload, actor) {
   });
 
   saveAccountUsers([...accountUsers, accountUser]);
+  cloudApiRequest("/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ ...accountUser, created_by: actor?.username || "" })
+  }).catch((error) => console.warn("Cloud account create failed.", error));
   addAuditLog(actor, "REGISTER_ACCOUNT", `Registered ${accountUser.username} (${accountUser.role_label}, ${accountUser.level})`);
   return accountUser;
 }
@@ -2358,13 +2430,30 @@ function renderLogin(errorMessage = "") {
   document.querySelector("#loginForm")?.addEventListener("submit", handleLogin);
 }
 
-function handleLogin(event) {
+async function handleLogin(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const username = String(form.get("username") || "").trim();
   const normalizedUsername = username.toLowerCase();
   const password = String(form.get("password") || "").trim();
   const rememberSession = form.get("remember_session") === "on";
+
+  try {
+    const cloudUser = await loginWithCloud(username, password);
+    saveSession(cloudUser, rememberSession);
+    sessionStorage.setItem("pismai_welcome_user", cloudUser.username);
+    hydrateAccountsFromCloud().catch(() => {});
+    const nextRoute = getDefaultRouteForUser(cloudUser);
+    if (location.hash === `#/${nextRoute}`) {
+      render();
+    } else {
+      location.hash = `#/${nextRoute}`;
+    }
+    return;
+  } catch (cloudError) {
+    console.warn("Cloud login unavailable or rejected, falling back to local login.", cloudError);
+  }
+
   const accountUsers = getAccountUsers();
   const registeredUser = accountUsers.find(
     (accountUser) => accountUser.username.toLowerCase() === normalizedUsername
@@ -2392,6 +2481,7 @@ function handleLogin(event) {
   }
 
   saveSession(user, rememberSession);
+  syncAccountsToCloud().catch((error) => console.warn("Account cloud sync failed.", error));
   sessionStorage.setItem("pismai_welcome_user", user.username);
   const nextRoute = getDefaultRouteForUser(user);
   if (location.hash === `#/${nextRoute}`) {
@@ -2402,6 +2492,13 @@ function handleLogin(event) {
 }
 
 function renderApp(user, route) {
+  if (!accountCloudBootstrapped) {
+    accountCloudBootstrapped = true;
+    syncAccountsToCloud().then(() => hydrateAccountsFromCloud()).catch((error) => {
+      console.warn("Account cloud bootstrap failed.", error);
+    });
+  }
+
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
   const visibleModules = modules.filter(
     (item) => !item.hidden && canOpen(user, item.id)

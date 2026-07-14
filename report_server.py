@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import math
 import mimetypes
 import os
+import secrets
 import urllib.error
 import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as ExcelImage
@@ -100,6 +103,60 @@ def load_data() -> dict:
 
 def save_data(data: dict) -> None:
     DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000)
+    return f"pbkdf2_sha256$120000${salt}${digest.hex()}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    if not password_hash:
+        return False
+    parts = password_hash.split("$")
+    if len(parts) == 4 and parts[0] == "pbkdf2_sha256":
+        try:
+            iterations = int(parts[1])
+            salt = parts[2]
+            expected = parts[3]
+        except ValueError:
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations)
+        return hmac.compare_digest(digest.hex(), expected)
+    return hmac.compare_digest(password, password_hash)
+
+
+def account_from_payload(payload: dict, include_password: bool = True) -> dict:
+    status = "Active" if payload.get("isActive", payload.get("status", "Active")) not in [False, "false", "Inactive"] else "Inactive"
+    account = {
+        "username": str(payload.get("username", "")).strip(),
+        "fullname": str(payload.get("fullname", "")).strip(),
+        "role": str(payload.get("role_key") or payload.get("role") or "general_staff").strip(),
+        "user_level": str(payload.get("level") or payload.get("user_level") or "C1").strip().upper(),
+        "status": status,
+        "created_by": str(payload.get("created_by", "")).strip() or None,
+    }
+    if include_password:
+        password = str(payload.get("password", ""))
+        if password:
+            account["password_hash"] = hash_password(password)
+    return account
+
+
+def account_to_client(account: dict) -> dict:
+    role_key = account.get("role") or "general_staff"
+    return {
+        "id": account.get("id"),
+        "username": account.get("username", ""),
+        "fullname": account.get("fullname", ""),
+        "phone": "",
+        "role_key": role_key,
+        "level": account.get("user_level") or "C1",
+        "isActive": account.get("status", "Active") == "Active",
+        "created_at": account.get("created_at"),
+        "updated_at": account.get("updated_at") or account.get("created_at"),
+    }
 
 
 def supabase_configured() -> bool:
@@ -2381,6 +2438,77 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"status": "ok"})
             return
 
+        if parsed.path == "/api/auth/login":
+            username = str(payload.get("username", "")).strip()
+            password = str(payload.get("password", ""))
+            if not username or not password:
+                self.send_json({"error": "Username and password are required."}, 400)
+                return
+            status, body = supabase_request(
+                "GET",
+                f"account_users?username=eq.{quote(username)}&select=*&limit=1",
+            )
+            if status >= 400:
+                self.send_json({"error": body}, status)
+                return
+            account = body[0] if isinstance(body, list) and body else None
+            if not account:
+                self.send_json({"error": "ไม่พบบัญชีนี้ในฐานข้อมูลกลาง"}, 404)
+                return
+            if account.get("status") != "Active":
+                self.send_json({"error": "บัญชีนี้ถูกปิดใช้งาน กรุณาติดต่อผู้ดูแลระบบ"}, 403)
+                return
+            if not verify_password(password, str(account.get("password_hash", ""))):
+                self.send_json({"error": "รหัสผ่านไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง"}, 401)
+                return
+            supabase_request(
+                "PATCH",
+                f"account_users?id=eq.{account.get('id')}",
+                {"last_login_at": datetime.utcnow().isoformat() + "Z"},
+                prefer="return=minimal",
+            )
+            self.send_json({"user": account_to_client(account)})
+            return
+
+        if parsed.path == "/api/accounts/sync":
+            accounts = payload.get("accounts", [])
+            if not isinstance(accounts, list):
+                self.send_json({"error": "accounts must be a list"}, 400)
+                return
+            cloud_accounts = []
+            for account_payload in accounts:
+                if not isinstance(account_payload, dict):
+                    continue
+                account = account_from_payload(account_payload)
+                if account["username"] and account["fullname"] and account.get("password_hash"):
+                    cloud_accounts.append(account)
+            if not cloud_accounts:
+                self.send_json({"data": []})
+                return
+            status, body = supabase_request(
+                "POST",
+                "account_users?on_conflict=username",
+                cloud_accounts,
+                prefer="resolution=merge-duplicates,return=representation",
+            )
+            self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/accounts":
+            account = account_from_payload(payload)
+            if not account["username"] or not account["fullname"] or not account.get("password_hash"):
+                self.send_json({"error": "Username, fullname, and password are required."}, 400)
+                return
+            status, body = supabase_request(
+                "POST",
+                "account_users",
+                account,
+                prefer="return=representation",
+            )
+            data = [account_to_client(item) for item in body] if status < 400 and isinstance(body, list) else None
+            self.send_json({"data": data, "error": body if status >= 400 else None}, status)
+            return
+
         if parsed.path == "/api/employees":
             employee = {
                 "emp_code": str(payload.get("emp_code", "")).strip(),
@@ -2599,6 +2727,24 @@ class ReportHandler(BaseHTTPRequestHandler):
                 )
             status, body = supabase_request("GET", f"employees?{params}")
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/accounts":
+            search = query.get("search", [""])[0].strip()
+            params = "select=*&order=id.asc"
+            if search:
+                escaped = quote(search.replace("*", "").replace(",", " "))
+                params += (
+                    "&or=("
+                    f"username.ilike.*{escaped}*,"
+                    f"fullname.ilike.*{escaped}*,"
+                    f"role.ilike.*{escaped}*,"
+                    f"user_level.ilike.*{escaped}*"
+                    ")"
+                )
+            status, body = supabase_request("GET", f"account_users?{params}")
+            data = [account_to_client(item) for item in body] if status < 400 and isinstance(body, list) else []
+            self.send_json({"data": data, "error": body if status >= 400 else None}, status)
             return
 
         if parsed.path == "/reports/employee-daily-pdf":
