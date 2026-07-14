@@ -1273,6 +1273,48 @@ async function hydrateAllEmployeesFromCloud() {
   return { weightEmployees, timeEmployees };
 }
 
+async function syncEmployeesToCloud(employees = getEmployees()) {
+  const syncableEmployees = employees.filter((employee) => (
+    employee.emp_code &&
+    employee.fullname &&
+    employee.department &&
+    employee.pay_group
+  ));
+  if (!syncableEmployees.length) return [];
+  const data = await cloudApiRequest("/api/employees/sync", {
+    method: "POST",
+    body: JSON.stringify({ employees: syncableEmployees })
+  });
+  const synced = Array.isArray(data.data) ? data.data.map(normalizeCloudEmployee) : [];
+  if (synced.length) saveEmployees(synced);
+  return synced;
+}
+
+async function syncTimeEmployeesToCloud(employees = getTimeEmployees()) {
+  const syncableEmployees = employees.filter((employee) => employee.emp_code && employee.fullname);
+  if (!syncableEmployees.length) return [];
+  const data = await cloudApiRequest("/api/time-employees/sync", {
+    method: "POST",
+    body: JSON.stringify({ employees: syncableEmployees })
+  });
+  const synced = Array.isArray(data.data) ? data.data.map(normalizeCloudTimeEmployee) : [];
+  if (synced.length) saveTimeEmployees(synced);
+  return synced;
+}
+
+async function syncLocalEmployeesToCloud() {
+  const [weightEmployees, timeEmployees] = await Promise.all([
+    syncEmployeesToCloud(),
+    syncTimeEmployeesToCloud()
+  ]);
+  return { weightEmployees, timeEmployees };
+}
+
+async function bootstrapEmployeesWithCloud() {
+  await syncLocalEmployeesToCloud();
+  return hydrateAllEmployeesFromCloud();
+}
+
 async function createCloudEmployee(payload) {
   const data = await cloudApiRequest("/api/employees", {
     method: "POST",
@@ -1670,9 +1712,8 @@ function normalizeTimeEmployee(employee) {
 function getTimeEmployees() {
   const raw = localStorage.getItem(TIME_EMPLOYEES_KEY);
   if (!raw) {
-    const defaults = defaultTimeEmployeesFromWeightEmployees();
-    localStorage.setItem(TIME_EMPLOYEES_KEY, JSON.stringify(defaults));
-    return defaults;
+    localStorage.setItem(TIME_EMPLOYEES_KEY, JSON.stringify([]));
+    return [];
   }
 
   try {
@@ -2931,7 +2972,7 @@ function renderApp(user, route) {
   }
   if (!employeeCloudBootstrapped) {
     employeeCloudBootstrapped = true;
-    hydrateAllEmployeesFromCloud().then(() => {
+    bootstrapEmployeesWithCloud().then(() => {
       const currentRoute = location.hash.replace("#/", "");
       if (["employees", "production-employees", "time-employees", "production", "time-report", "summary-person"].includes(currentRoute)) {
         render();

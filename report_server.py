@@ -187,7 +187,7 @@ def account_to_client(account: dict) -> dict:
 
 
 def employee_from_payload(payload: dict) -> dict:
-    return {
+    employee = {
         "emp_code": str(payload.get("emp_code", "")).strip(),
         "fullname": str(payload.get("fullname", "")).strip(),
         "department": str(payload.get("department", "")).strip(),
@@ -197,12 +197,15 @@ def employee_from_payload(payload: dict) -> dict:
         "note": str(payload.get("note", "")).strip() or None,
         "created_by": str(payload.get("created_by", "")).strip() or None,
     }
+    if payload.get("id") not in [None, ""]:
+        employee["id"] = payload.get("id")
+    return employee
 
 
 def time_employee_from_payload(payload: dict) -> dict:
     employee_type = str(payload.get("employee_type", "normal")).strip() or "normal"
     daily_wage = payload.get("daily_wage", 365 if employee_type == "special" else 347)
-    return {
+    employee = {
         "emp_code": str(payload.get("emp_code", "")).strip(),
         "fullname": str(payload.get("fullname", "")).strip(),
         "employee_type": employee_type,
@@ -211,6 +214,60 @@ def time_employee_from_payload(payload: dict) -> dict:
         "note": str(payload.get("note", "")).strip() or None,
         "created_by": str(payload.get("created_by", "")).strip() or None,
     }
+    if payload.get("id") not in [None, ""]:
+        employee["id"] = payload.get("id")
+    return employee
+
+
+def next_table_id(table: str) -> int:
+    status, body = supabase_request("GET", f"{table}?select=id&order=id.desc&limit=1")
+    if status < 400 and isinstance(body, list) and body:
+        try:
+            return int(body[0].get("id") or 0) + 1
+        except (TypeError, ValueError):
+            return 1
+    return 1
+
+
+def ensure_row_id(table: str, row: dict) -> dict:
+    if row.get("id") in [None, ""]:
+        return {**row, "id": next_table_id(table)}
+    return row
+
+
+def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
+    synced = []
+    next_id = None
+    for row in rows:
+        clean_row = dict(row)
+        if clean_row.get("id") in [None, ""]:
+            if next_id is None:
+                next_id = next_table_id(table)
+            clean_row["id"] = next_id
+            next_id += 1
+        row_id = clean_row.get("id")
+        status, existing = supabase_request("GET", f"{table}?id=eq.{quote(str(row_id))}&select=id&limit=1")
+        if status >= 400:
+            return status, {"error": existing, "table": table}
+        if isinstance(existing, list) and existing:
+            status, body = supabase_request(
+                "PATCH",
+                f"{table}?id=eq.{quote(str(row_id))}",
+                clean_row,
+                prefer="return=representation",
+            )
+        else:
+            status, body = supabase_request(
+                "POST",
+                table,
+                clean_row,
+                prefer="return=representation",
+            )
+        if status >= 400:
+            return status, {"error": body, "table": table, "row": clean_row}
+        if isinstance(body, list):
+            synced.extend(body)
+    return 200, {"synced": synced}
 
 
 def supabase_configured() -> bool:
@@ -2620,8 +2677,50 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": data, "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path == "/api/employees/sync":
+            employees_payload = payload.get("employees", [])
+            if not isinstance(employees_payload, list):
+                self.send_json({"error": "employees must be a list"}, 400)
+                return
+            employees = []
+            for employee_payload in employees_payload:
+                if not isinstance(employee_payload, dict):
+                    continue
+                employee = employee_from_payload(employee_payload)
+                required = ["emp_code", "fullname", "department", "pay_group"]
+                if all(employee.get(key) not in [None, ""] for key in required):
+                    employees.append(employee)
+            if not employees:
+                self.send_json({"data": []})
+                return
+            status, body = sync_rows_by_id("employees", employees)
+            synced = body.get("synced", []) if status < 400 and isinstance(body, dict) else []
+            self.send_json({"data": synced, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/time-employees/sync":
+            employees_payload = payload.get("employees", [])
+            if not isinstance(employees_payload, list):
+                self.send_json({"error": "employees must be a list"}, 400)
+                return
+            employees = []
+            for employee_payload in employees_payload:
+                if not isinstance(employee_payload, dict):
+                    continue
+                employee = time_employee_from_payload(employee_payload)
+                required = ["emp_code", "fullname", "employee_type", "daily_wage"]
+                if all(employee.get(key) not in [None, ""] for key in required):
+                    employees.append(employee)
+            if not employees:
+                self.send_json({"data": []})
+                return
+            status, body = sync_rows_by_id("time_employees", employees)
+            synced = body.get("synced", []) if status < 400 and isinstance(body, dict) else []
+            self.send_json({"data": synced, "error": body if status >= 400 else None}, status)
+            return
+
         if parsed.path == "/api/employees":
-            employee = employee_from_payload(payload)
+            employee = ensure_row_id("employees", employee_from_payload(payload))
             required = ["emp_code", "fullname", "department", "pay_group"]
             missing = [key for key in required if not employee[key]]
             if missing:
@@ -2637,7 +2736,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/time-employees":
-            employee = time_employee_from_payload(payload)
+            employee = ensure_row_id("time_employees", time_employee_from_payload(payload))
             required = ["emp_code", "fullname", "employee_type", "daily_wage"]
             missing = [key for key in required if employee.get(key) in [None, ""]]
             if missing:
