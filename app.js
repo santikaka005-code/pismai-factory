@@ -1153,7 +1153,9 @@ async function cloudApiRequest(path, options = {}) {
       typeof data.error === "string"
         ? data.error
         : data.error?.message || data.message || `Cloud API failed (${response.status})`;
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -1191,18 +1193,7 @@ async function syncAccountsToCloud(accounts = getAccountUsers()) {
 async function hydrateAccountsFromCloud() {
   const data = await cloudApiRequest("/api/accounts");
   const cloudAccounts = Array.isArray(data.data) ? data.data.map(normalizeCloudAccountUser) : [];
-  if (!cloudAccounts.length) return [];
-  const localAccounts = getAccountUsers();
-  const merged = new Map(localAccounts.map((accountUser) => [accountUser.username.toLowerCase(), accountUser]));
-  cloudAccounts.forEach((accountUser) => {
-    const key = accountUser.username.toLowerCase();
-    merged.set(key, {
-      ...(merged.get(key) || {}),
-      ...accountUser,
-      password: merged.get(key)?.password || accountUser.password || ""
-    });
-  });
-  saveAccountUsers([...merged.values()]);
+  saveAccountUsers(cloudAccounts);
   return cloudAccounts;
 }
 
@@ -1220,10 +1211,7 @@ function normalizeCloudWageRate(wageRate) {
 async function hydrateWageRatesFromCloud() {
   const data = await cloudApiRequest("/api/wage-rates");
   const cloudRates = Array.isArray(data.data) ? data.data.map(normalizeCloudWageRate) : [];
-  if (!cloudRates.length) return [];
-  const merged = new Map(getWageRates().map((rate) => [String(rate.id), rate]));
-  cloudRates.forEach((rate) => merged.set(String(rate.id), rate));
-  saveWageRates([...merged.values()]);
+  saveWageRates(cloudRates);
   return cloudRates;
 }
 
@@ -1272,8 +1260,6 @@ function normalizeCloudTimeEmployee(employee) {
 async function hydrateEmployeesFromCloud() {
   const data = await cloudApiRequest("/api/employees");
   const cloudEmployees = Array.isArray(data.data) ? data.data.map(normalizeCloudEmployee) : [];
-  const localEmployees = getEmployees();
-  if (!cloudEmployees.length && localEmployees.length) return localEmployees;
   saveEmployees(cloudEmployees);
   return cloudEmployees;
 }
@@ -1281,8 +1267,6 @@ async function hydrateEmployeesFromCloud() {
 async function hydrateTimeEmployeesFromCloud() {
   const data = await cloudApiRequest("/api/time-employees");
   const cloudEmployees = Array.isArray(data.data) ? data.data.map(normalizeCloudTimeEmployee) : [];
-  const localEmployees = getTimeEmployees();
-  if (!cloudEmployees.length && localEmployees.length) return localEmployees;
   saveTimeEmployees(cloudEmployees);
   return cloudEmployees;
 }
@@ -1334,7 +1318,6 @@ async function syncLocalEmployeesToCloud() {
 }
 
 async function bootstrapEmployeesWithCloud() {
-  await syncLocalEmployeesToCloud();
   return hydrateAllEmployeesFromCloud();
 }
 
@@ -3022,6 +3005,10 @@ async function handleLogin(event) {
     }
     return;
   } catch (cloudError) {
+    if (cloudError?.status && [401, 403, 404].includes(cloudError.status)) {
+      renderLogin(cloudError.message || "ไม่พบบัญชีนี้ในฐานข้อมูลกลาง");
+      return;
+    }
     console.warn("Cloud login unavailable or rejected, falling back to local login.", cloudError);
   }
 
@@ -3052,7 +3039,6 @@ async function handleLogin(event) {
   }
 
   saveSession(user, rememberSession);
-  syncAccountsToCloud().catch((error) => console.warn("Account cloud sync failed.", error));
   sessionStorage.setItem("pismai_welcome_user", user.username);
   const nextRoute = getDefaultRouteForUser(user);
   if (location.hash === `#/${nextRoute}`) {
@@ -3065,7 +3051,7 @@ async function handleLogin(event) {
 function renderApp(user, route) {
   if (!accountCloudBootstrapped) {
     accountCloudBootstrapped = true;
-    syncAccountsToCloud().then(() => hydrateAccountsFromCloud()).catch((error) => {
+    hydrateAccountsFromCloud().catch((error) => {
       console.warn("Account cloud bootstrap failed.", error);
     });
   }
@@ -3081,7 +3067,7 @@ function renderApp(user, route) {
     employeeCloudBootstrapped = true;
     bootstrapEmployeesWithCloud().then(() => {
       const currentRoute = location.hash.replace("#/", "");
-      if (["employees", "production-employees", "time-employees", "production", "time-report", "summary-person"].includes(currentRoute)) {
+      if (["dashboard", "employees", "production-employees", "time-employees", "production", "time-report", "summary-person", "summary-all", "summary-main", "settings"].includes(currentRoute)) {
         render();
       }
     }).catch((error) => {
