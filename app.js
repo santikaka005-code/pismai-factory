@@ -88,6 +88,7 @@ const accountRoleOptions = [
 
 const developerRoleOption = { key: "developer", role: "developer", label: "ผู้พัฒนา" };
 const accountLevelOptions = ["C1", "C2", "C3", "C4", "C5", "C6"];
+const supportedAccountLevels = [...accountLevelOptions, "C7"];
 const systemDeveloperAccount = {
   id: 0,
   username: "Gxy",
@@ -102,6 +103,20 @@ const systemDeveloperAccount = {
   is_system: true,
   created_at: "2026-07-05T00:00:00.000Z",
   updated_at: "2026-07-05T00:00:00.000Z"
+};
+const protectedSystemAccountProfiles = {
+  gxy: systemDeveloperAccount,
+  santi: {
+    username: "Santi",
+    fullname: "Santi Khl.",
+    phone: "0943913997",
+    role_key: "developer",
+    role: "developer",
+    role_label: "ผู้พัฒนาระบบ",
+    level: "C7",
+    isActive: true,
+    is_system: true
+  }
 };
 
 const modules = [
@@ -403,7 +418,8 @@ const levelRouteAccess = {
     "account-management",
     "audit-log",
     "backup"
-  ]
+  ],
+  C7: modules.map((item) => item.id)
 };
 
 const defaultRouteByLevel = {
@@ -412,7 +428,8 @@ const defaultRouteByLevel = {
   C3: "dashboard",
   C4: "dashboard",
   C5: "dashboard",
-  C6: "dashboard"
+  C6: "dashboard",
+  C7: "dashboard"
 };
 
 const builtInAccountLevels = {
@@ -421,6 +438,7 @@ const builtInAccountLevels = {
   operator: "C1",
   supervisor: "C3",
   leader: "C1",
+  Santi: "C7",
   Gxy: "C6"
 };
 
@@ -935,8 +953,8 @@ function getSession() {
     const session = JSON.parse(raw);
     if (session?.user?.username && builtInAccountLevels[session.user.username]) {
       const builtInLevel = builtInAccountLevels[session.user.username];
-      const currentIndex = accountLevelOptions.indexOf(String(session.user.level || "C1").toUpperCase());
-      const builtInIndex = accountLevelOptions.indexOf(builtInLevel);
+      const currentIndex = supportedAccountLevels.indexOf(String(session.user.level || "C1").toUpperCase());
+      const builtInIndex = supportedAccountLevels.indexOf(builtInLevel);
       if (currentIndex < builtInIndex) {
         session.user.level = builtInLevel;
       }
@@ -982,7 +1000,7 @@ function clearSession() {
 
 function getUserLevel(user) {
   const level = String(user?.level || "C1").toUpperCase();
-  return accountLevelOptions.includes(level) ? level : "C1";
+  return supportedAccountLevels.includes(level) ? level : "C1";
 }
 
 function getAllowedRoutesForUser(user) {
@@ -1020,14 +1038,14 @@ function canManageEmployees(user) {
 }
 
 function canDeleteEmployees(user) {
-  return ["C5", "C6"].includes(getUserLevel(user)) || user.role === "developer";
+  return ["C5", "C6", "C7"].includes(getUserLevel(user)) || user.role === "developer";
 }
 
 function canExportFullDetails(user) {
   if (!user) return false;
   if (user.role === "developer" || user.role_key === "developer" || user.is_system) return true;
-  const levelIndex = accountLevelOptions.indexOf(String(user.level || "").toUpperCase());
-  return levelIndex >= accountLevelOptions.indexOf("C5");
+  const levelIndex = supportedAccountLevels.indexOf(String(user.level || "").toUpperCase());
+  return levelIndex >= supportedAccountLevels.indexOf("C5");
 }
 
 function accountRoleOptionByKey(roleKey) {
@@ -1049,25 +1067,30 @@ function accountRoleOptionForUser(user) {
 function normalizeAccountUser(user) {
   const roleOption = accountRoleOptionForUser(user);
   const username = String(user.username || "").trim();
+  const protectedProfile = protectedSystemAccountProfiles[username.toLowerCase()];
   const defaultLevel = builtInAccountLevels[username] || "C1";
-  const level = accountLevelOptions.includes(String(user.level || "").toUpperCase())
+  const level = supportedAccountLevels.includes(String(user.level || "").toUpperCase())
     ? String(user.level).toUpperCase()
     : defaultLevel;
   return {
     id: Number(user.id),
     username,
     password: String(user.password || ""),
-    fullname: String(user.fullname || "").trim(),
-    phone: String(user.phone || "").trim(),
-    role_key: roleOption.key,
-    role: roleOption.role,
-    role_label: roleOption.label,
-    level,
+    fullname: protectedProfile?.fullname || String(user.fullname || "").trim(),
+    phone: protectedProfile?.phone || String(user.phone || "").trim(),
+    role_key: protectedProfile?.role_key || roleOption.key,
+    role: protectedProfile?.role || roleOption.role,
+    role_label: protectedProfile?.role_label || roleOption.label,
+    level: protectedProfile?.level || level,
     isActive: user.isActive !== false,
-    is_system: Boolean(user.is_system),
+    is_system: Boolean(user.is_system || protectedProfile?.is_system),
     created_at: user.created_at || new Date().toISOString(),
     updated_at: user.updated_at || user.created_at || new Date().toISOString()
   };
+}
+
+function isProtectedSystemAccount(accountUser) {
+  return Boolean(accountUser?.is_system || protectedSystemAccountProfiles[String(accountUser?.username || "").toLowerCase()]);
 }
 
 function ensureSystemDeveloperAccount(accountUsers) {
@@ -1086,8 +1109,8 @@ function applyBuiltInAccountLevelDefaults(accountUsers) {
   return accountUsers.map((accountUser) => {
     const builtInLevel = builtInAccountLevels[accountUser.username];
     if (!builtInLevel || accountUser.is_system) return accountUser;
-    const currentIndex = accountLevelOptions.indexOf(accountUser.level);
-    const builtInIndex = accountLevelOptions.indexOf(builtInLevel);
+    const currentIndex = supportedAccountLevels.indexOf(accountUser.level);
+    const builtInIndex = supportedAccountLevels.indexOf(builtInLevel);
     if (currentIndex >= builtInIndex) return accountUser;
     return { ...accountUser, level: builtInLevel };
   });
@@ -1491,7 +1514,7 @@ function apiUpdateAccountUser(id, payload, actor) {
     throw new Error("ไม่พบข้อมูลบัญชีนี้");
   }
 
-  if (existing.is_system) {
+  if (isProtectedSystemAccount(existing)) {
     throw new Error("บัญชีระบบนี้ไม่สามารถแก้ไขจากหน้าเว็บได้");
   }
 
@@ -1527,7 +1550,7 @@ async function apiDeleteAccountUser(id, actor) {
     throw new Error("ไม่พบข้อมูลบัญชีนี้");
   }
 
-  if (existing.is_system) {
+  if (isProtectedSystemAccount(existing)) {
     throw new Error("บัญชีระบบนี้ไม่สามารถลบจากหน้าเว็บได้");
   }
 
@@ -4075,7 +4098,7 @@ function renderAccountForm(accountUser) {
 
 function renderAccountRow(accountUser, currentUser) {
   const statusClass = accountUser.isActive ? "badge-success" : "badge-danger";
-  const locked = accountUser.is_system;
+  const locked = isProtectedSystemAccount(accountUser);
   return `
     <tr>
       <td>${accountUser.id}</td>

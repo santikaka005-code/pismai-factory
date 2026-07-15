@@ -75,6 +75,18 @@ BACKUP_TABLES = [
     "time_records",
     "audit_logs",
 ]
+SYSTEM_ACCOUNT_PROFILES = {
+    "Santi": {
+        "username": "Santi",
+        "password": os.environ.get("SYSTEM_C7_PASSWORD", ""),
+        "fullname": "Santi Khl.",
+        "role": "developer",
+        "user_level": "C7",
+        "status": "Active",
+        "created_by": "system",
+    }
+}
+SYSTEM_ACCOUNT_USERNAMES = {username.lower() for username in SYSTEM_ACCOUNT_PROFILES}
 
 
 def register_thai_font() -> str:
@@ -173,17 +185,58 @@ def account_from_payload(payload: dict, include_password: bool = True) -> dict:
 
 def account_to_client(account: dict) -> dict:
     role_key = account.get("role") or "general_staff"
+    username = str(account.get("username", ""))
+    is_system_account = username.lower() in SYSTEM_ACCOUNT_USERNAMES
     return {
         "id": account.get("id"),
-        "username": account.get("username", ""),
+        "username": username,
         "fullname": account.get("fullname", ""),
-        "phone": "",
+        "phone": "0943913997" if username.lower() == "santi" else "",
         "role_key": role_key,
         "level": account.get("user_level") or "C1",
         "isActive": account.get("status", "Active") == "Active",
+        "is_system": is_system_account,
         "created_at": account.get("created_at"),
         "updated_at": account.get("updated_at") or account.get("created_at"),
     }
+
+
+def ensure_system_accounts() -> None:
+    if not supabase_configured():
+        return
+    for profile in SYSTEM_ACCOUNT_PROFILES.values():
+        if not profile.get("password"):
+            continue
+        username = profile["username"]
+        account = {
+            "username": username,
+            "password_hash": hash_password(profile["password"]),
+            "fullname": profile["fullname"],
+            "role": profile["role"],
+            "user_level": profile["user_level"],
+            "status": profile["status"],
+            "created_by": profile["created_by"],
+        }
+        status, existing = supabase_request(
+            "GET",
+            f"account_users?username=eq.{quote(username)}&select=id&limit=1",
+        )
+        if status >= 400:
+            continue
+        if isinstance(existing, list) and existing:
+            supabase_request(
+                "PATCH",
+                f"account_users?username=eq.{quote(username)}",
+                account,
+                prefer="return=minimal",
+            )
+        else:
+            supabase_request(
+                "POST",
+                "account_users",
+                account,
+                prefer="return=minimal",
+            )
 
 
 def employee_from_payload(payload: dict) -> dict:
@@ -2607,6 +2660,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/auth/login":
+            ensure_system_accounts()
             username = str(payload.get("username", "")).strip()
             password = str(payload.get("password", ""))
             if not username or not password:
@@ -2975,12 +3029,24 @@ class ReportHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/accounts":
             account_id = payload.get("id")
             username = str(payload.get("username", "")).strip()
+            protected_username = username.lower()
             if account_id not in [None, ""]:
+                status, existing = supabase_request(
+                    "GET",
+                    f"account_users?id=eq.{quote(str(account_id))}&select=username&limit=1",
+                )
+                if status >= 400:
+                    self.send_json({"error": existing}, status)
+                    return
+                protected_username = str(existing[0].get("username", "")).lower() if isinstance(existing, list) and existing else ""
                 filter_path = f"account_users?id=eq.{quote(str(account_id))}"
             elif username:
                 filter_path = f"account_users?username=eq.{quote(username)}"
             else:
                 self.send_json({"error": "id or username is required."}, 400)
+                return
+            if protected_username in SYSTEM_ACCOUNT_USERNAMES:
+                self.send_json({"error": "System account cannot be deleted."}, 403)
                 return
             status, body = supabase_request("DELETE", filter_path, prefer="return=minimal")
             self.send_json({"data": {"deleted": True} if status < 400 else None, "error": body if status >= 400 else None}, status)
@@ -3070,6 +3136,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/accounts":
+            ensure_system_accounts()
             search = query.get("search", [""])[0].strip()
             params = "select=*&order=id.asc"
             if search:
