@@ -5,6 +5,7 @@ const WAGE_RATES_KEY = "pismai_factory_wage_rates";
 const PRODUCTION_RECORDS_KEY = "pismai_factory_production_records";
 const PRODUCTION_SESSIONS_KEY = "pismai_factory_production_sessions";
 const TIME_RECORDS_KEY = "pismai_factory_time_records";
+const DEDUCTION_RECORDS_KEY = "pismai_factory_deduction_records";
 const AUDIT_LOG_KEY = "pismai_factory_audit_log";
 const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
 const AUDIT_LOG_PASSWORD = "1150";
@@ -36,6 +37,15 @@ const TIME_SPECIAL_WAGE_TABLE = {
   7.5: 342,
   8: 365
 };
+const deductionTypeOptions = [
+  { id: "card", label: "ค่าบัตร" },
+  { id: "equipment", label: "ค่าอุปกรณ์" },
+  { id: "utilities", label: "ค่าน้ำค่าไฟ (ผู้เช่าห้องแถว)" },
+  { id: "advance", label: "ค่าเบิกเงินล่วงหน้า" },
+  { id: "social_security", label: "ค่าประกันสังคม" },
+  { id: "tax", label: "ค่าภาษี" },
+  { id: "room", label: "ค่าห้องพัก" }
+];
 
 const users = [
   {
@@ -254,10 +264,10 @@ modules.splice(
   },
   {
     id: "compare-data",
-    label: "เปรียบเทียบข้อมูล",
+    label: "ลงบันทึกหักเงิน",
     roles: ["admin", "hr"],
-    description: "เปรียบเทียบข้อมูลผลผลิตตามกองและช่วงเวลา",
-    icon: "≋"
+    description: "บันทึกรายการหักเงินรายรอบสำหรับพนักงานเหมาน้ำหนักและพนักงานเหมาเวลา",
+    icon: "−"
   },
   {
     id: "employees",
@@ -742,6 +752,13 @@ let timeEntryEmployeeCode = "";
 let weeklyTimeEmployeeCode = "";
 let weeklyTimeDraft = Array.from({ length: 7 }, () => ({ clock_in: "", clock_out: "" }));
 let editingTimeRecordId = null;
+let deductionActiveTab = "production";
+let deductionStartDate = new Date().toISOString().slice(0, 10);
+let deductionEndDate = new Date().toISOString().slice(0, 10);
+let deductionEmployeeId = "";
+let deductionMessage = "";
+let deductionMessageType = "success";
+let editingDeductionId = null;
 let productionView = "fast-entry";
 let selectedProductionFruit = "";
 let productionMessage = "";
@@ -751,6 +768,7 @@ let auditLogMessage = "";
 let accountCloudBootstrapped = false;
 let wageRateCloudBootstrapped = false;
 let employeeCloudBootstrapped = false;
+let deductionCloudBootstrapped = false;
 let lastRenderedRoute = "";
 let batchEntryText = "";
 let batchGridState = {
@@ -1040,7 +1058,7 @@ function getDefaultRouteForUser(user) {
 }
 
 function visibleNavModulesForUser(user) {
-  const navRouteIds = ["dashboard", "production", "time-report", "summary-person", "summary-all", "compare-data", "reports", "settings"];
+  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings"];
   return navRouteIds
     .map((routeId) => modules.find((item) => item.id === routeId))
     .filter((item) => item && !item.hidden)
@@ -1414,6 +1432,223 @@ async function deleteCloudTimeEmployee(id) {
     method: "DELETE",
     body: JSON.stringify({ id })
   });
+}
+
+function getDeductionTypeLabel(typeId) {
+  return deductionTypeOptions.find((item) => item.id === typeId)?.label || typeId || "-";
+}
+
+function normalizeDeductionKind(value) {
+  return value === "time" ? "time" : "production";
+}
+
+function normalizeDeductionRecord(record) {
+  const now = new Date().toISOString();
+  const startDate = String(record?.start_date || record?.deduction_date || new Date().toISOString().slice(0, 10));
+  const endDate = String(record?.end_date || startDate);
+  const amount = Number(record?.amount || 0);
+  return {
+    id: Number(record?.id) || 0,
+    employee_kind: normalizeDeductionKind(record?.employee_kind),
+    employee_id: Number(record?.employee_id) || 0,
+    emp_code: String(record?.emp_code || "").trim(),
+    employee_name: String(record?.employee_name || record?.fullname || "").trim(),
+    start_date: startDate,
+    end_date: endDate < startDate ? startDate : endDate,
+    deduction_type: String(record?.deduction_type || "advance").trim(),
+    deduction_label: String(record?.deduction_label || getDeductionTypeLabel(record?.deduction_type || "advance")).trim(),
+    amount: Number.isFinite(amount) && amount > 0 ? amount : 0,
+    note: String(record?.note || "").trim(),
+    status: record?.status || "Active",
+    created_by: String(record?.created_by || "").trim(),
+    updated_by: String(record?.updated_by || "").trim(),
+    created_at: record?.created_at || now,
+    updated_at: record?.updated_at || record?.created_at || now
+  };
+}
+
+function getDeductionRecords() {
+  const raw = localStorage.getItem(DEDUCTION_RECORDS_KEY);
+  if (!raw) {
+    localStorage.setItem(DEDUCTION_RECORDS_KEY, JSON.stringify([]));
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const migrated = parsed.map(normalizeDeductionRecord).filter((record) => record.emp_code && record.amount > 0);
+    if (JSON.stringify(migrated) !== JSON.stringify(parsed)) {
+      localStorage.setItem(DEDUCTION_RECORDS_KEY, JSON.stringify(migrated));
+    }
+    return migrated;
+  } catch {
+    localStorage.setItem(DEDUCTION_RECORDS_KEY, JSON.stringify([]));
+    return [];
+  }
+}
+
+function saveDeductionRecords(records) {
+  localStorage.setItem(DEDUCTION_RECORDS_KEY, JSON.stringify(records.map(normalizeDeductionRecord)));
+}
+
+function normalizeCloudDeduction(record) {
+  return normalizeDeductionRecord(record);
+}
+
+async function hydrateDeductionsFromCloud(options = {}) {
+  const params = new URLSearchParams();
+  if (options.employee_kind) params.set("employee_kind", normalizeDeductionKind(options.employee_kind));
+  if (options.start_date) params.set("start_date", options.start_date);
+  if (options.end_date) params.set("end_date", options.end_date);
+  const query = params.toString();
+  const data = await cloudApiRequest(`/api/deductions${query ? `?${query}` : ""}`);
+  const cloudRecords = Array.isArray(data.data) ? data.data.map(normalizeCloudDeduction) : [];
+  if (!options.employee_kind && !options.start_date && !options.end_date) {
+    saveDeductionRecords(cloudRecords);
+  } else {
+    const incomingKeys = new Set(cloudRecords.map((record) => String(record.id)));
+    const keptRecords = getDeductionRecords().filter((record) => {
+      if (incomingKeys.has(String(record.id))) return false;
+      if (options.employee_kind && record.employee_kind !== normalizeDeductionKind(options.employee_kind)) return true;
+      if (options.start_date && options.end_date && deductionRangesOverlap(record, options.start_date, options.end_date)) return false;
+      return true;
+    });
+    saveDeductionRecords([...keptRecords, ...cloudRecords]);
+  }
+  return cloudRecords;
+}
+
+async function createCloudDeduction(payload) {
+  const data = await cloudApiRequest("/api/deductions", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+  const created = Array.isArray(data.data) ? data.data.map(normalizeCloudDeduction) : [];
+  return created[0] || null;
+}
+
+async function updateCloudDeduction(id, payload) {
+  const data = await cloudApiRequest("/api/deductions", {
+    method: "PUT",
+    body: JSON.stringify({ id, ...payload })
+  });
+  const updated = Array.isArray(data.data) ? data.data.map(normalizeCloudDeduction) : [];
+  return updated[0] || null;
+}
+
+async function deleteCloudDeduction(id) {
+  await cloudApiRequest("/api/deductions", {
+    method: "DELETE",
+    body: JSON.stringify({ id })
+  });
+}
+
+function deductionRangesOverlap(record, startDate, endDate) {
+  const recordStart = record.start_date || "";
+  const recordEnd = record.end_date || recordStart;
+  return recordStart <= endDate && recordEnd >= startDate;
+}
+
+function getDeductionsForRange(kind, startDate, endDate, employee = null) {
+  const normalizedKind = normalizeDeductionKind(kind);
+  const employeeId = employee?.id ? String(employee.id) : "";
+  const empCode = employee?.emp_code ? String(employee.emp_code) : "";
+  return getDeductionRecords().filter((record) => {
+    if (record.status !== "Active") return false;
+    if (record.employee_kind !== normalizedKind) return false;
+    if (!deductionRangesOverlap(record, startDate, endDate)) return false;
+    if (!employee) return true;
+    return (
+      (employeeId && String(record.employee_id) === employeeId) ||
+      (empCode && String(record.emp_code) === empCode)
+    );
+  });
+}
+
+function sumDeductions(records) {
+  return records.reduce((sum, record) => sum + Number(record.amount || 0), 0);
+}
+
+function getDeductionTotalForEmployee(kind, employee, startDate, endDate) {
+  return sumDeductions(getDeductionsForRange(kind, startDate, endDate, employee));
+}
+
+function getDeductionEmployeeOptions(kind = deductionActiveTab) {
+  const employees = normalizeDeductionKind(kind) === "time" ? getTimeEmployees() : getEmployees();
+  return employees
+    .filter((employee) => employee.status === "Active")
+    .sort((a, b) => String(a.emp_code || "").localeCompare(String(b.emp_code || ""), "th", { numeric: true }));
+}
+
+function findDeductionEmployee(kind, employeeId) {
+  return getDeductionEmployeeOptions(kind).find((employee) => Number(employee.id) === Number(employeeId)) || null;
+}
+
+async function apiCreateDeduction(payload, actor) {
+  const kind = normalizeDeductionKind(payload.employee_kind);
+  const employee = findDeductionEmployee(kind, payload.employee_id);
+  const amount = Number(payload.amount || 0);
+  if (!employee) throw new Error("กรุณาเลือกพนักงาน");
+  if (!payload.start_date || !payload.end_date) throw new Error("กรุณาเลือกช่วงวันที่");
+  if (amount <= 0) throw new Error("กรุณากรอกจำนวนเงินที่ต้องหักมากกว่า 0");
+  const baseRecord = normalizeDeductionRecord({
+    employee_kind: kind,
+    employee_id: employee.id,
+    emp_code: employee.emp_code,
+    employee_name: employee.fullname,
+    start_date: payload.start_date,
+    end_date: payload.end_date,
+    deduction_type: payload.deduction_type,
+    deduction_label: getDeductionTypeLabel(payload.deduction_type),
+    amount,
+    note: payload.note,
+    created_by: actor?.fullname || ""
+  });
+  const created = await createCloudDeduction(baseRecord);
+  if (!created) throw new Error("ไม่สามารถบันทึกรายการหักเงินลงฐานข้อมูลกลางได้");
+  saveDeductionRecords([...getDeductionRecords(), created]);
+  addAuditLog(actor, "CREATE_DEDUCTION", `Added deduction ${created.emp_code} ${created.deduction_label} ${created.amount}`);
+  return created;
+}
+
+async function apiUpdateDeduction(id, payload, actor) {
+  const records = getDeductionRecords();
+  const existing = records.find((record) => Number(record.id) === Number(id));
+  if (!existing) throw new Error("ไม่พบรายการหักเงินนี้");
+  const kind = normalizeDeductionKind(payload.employee_kind);
+  const employee = findDeductionEmployee(kind, payload.employee_id);
+  const amount = Number(payload.amount || 0);
+  if (!employee) throw new Error("กรุณาเลือกพนักงาน");
+  if (amount <= 0) throw new Error("กรุณากรอกจำนวนเงินที่ต้องหักมากกว่า 0");
+  const nextRecord = normalizeDeductionRecord({
+    ...existing,
+    employee_kind: kind,
+    employee_id: employee.id,
+    emp_code: employee.emp_code,
+    employee_name: employee.fullname,
+    start_date: payload.start_date,
+    end_date: payload.end_date,
+    deduction_type: payload.deduction_type,
+    deduction_label: getDeductionTypeLabel(payload.deduction_type),
+    amount,
+    note: payload.note,
+    updated_by: actor?.fullname || "",
+    updated_at: new Date().toISOString()
+  });
+  const updated = await updateCloudDeduction(id, nextRecord);
+  if (!updated) throw new Error("ไม่สามารถแก้ไขรายการหักเงินในฐานข้อมูลกลางได้");
+  const finalRecord = updated;
+  saveDeductionRecords(records.map((record) => (Number(record.id) === Number(id) ? finalRecord : record)));
+  addAuditLog(actor, "UPDATE_DEDUCTION", `Updated deduction ${finalRecord.emp_code} ${finalRecord.deduction_label} ${finalRecord.amount}`);
+}
+
+async function apiDeleteDeduction(id, actor) {
+  const records = getDeductionRecords();
+  const existing = records.find((record) => Number(record.id) === Number(id));
+  if (!existing) throw new Error("ไม่พบรายการหักเงินนี้");
+  await deleteCloudDeduction(id);
+  saveDeductionRecords(records.filter((record) => Number(record.id) !== Number(id)));
+  addAuditLog(actor, "DELETE_DEDUCTION", `Deleted deduction ${existing.emp_code} ${existing.deduction_label} ${existing.amount}`);
 }
 
 async function deleteCloudAccountUser(accountUser) {
@@ -2958,7 +3193,8 @@ function buildReportPayload(date = reportDate, employeeIds = selectedReportEmplo
     date,
     employee_ids: employeeIds.map(Number),
     employees: getEmployees(),
-    production_records: getProductionRecords()
+    production_records: getProductionRecords(),
+    deduction_records: getDeductionRecords()
   };
 }
 
@@ -2980,7 +3216,8 @@ function buildFullExportPayload(user, rangeOverride = null, departmentOverride =
     printed_by_position: getExportPositionLabel(user),
     employees: getEmployees(),
     production_records: getProductionRecords(),
-    time_records: getTimeRecords()
+    time_records: getTimeRecords(),
+    deduction_records: getDeductionRecords()
   };
 }
 
@@ -3247,17 +3484,28 @@ function renderApp(user, route) {
     employeeCloudBootstrapped = true;
     bootstrapEmployeesWithCloud().then(() => {
       const currentRoute = location.hash.replace("#/", "");
-      if (["dashboard", "employees", "production-employees", "time-employees", "production", "time-report", "summary-person", "summary-all", "summary-main", "settings"].includes(currentRoute)) {
+      if (["dashboard", "employees", "production-employees", "time-employees", "production", "time-report", "compare-data", "summary-person", "summary-all", "summary-main", "settings"].includes(currentRoute)) {
         render();
       }
     }).catch((error) => {
       console.warn("Employee cloud bootstrap failed.", error);
     });
   }
+  if (!deductionCloudBootstrapped) {
+    deductionCloudBootstrapped = true;
+    hydrateDeductionsFromCloud().then(() => {
+      const currentRoute = location.hash.replace("#/", "");
+      if (["compare-data", "summary-person", "summary-all", "summary-main", "summary-group-report", "summary-time-overview"].includes(currentRoute)) {
+        render();
+      }
+    }).catch((error) => {
+      console.warn("Deduction cloud bootstrap failed.", error);
+    });
+  }
 
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
   const visibleModules = visibleNavModulesForUser(user);
-  const navOrder = ["dashboard", "production", "time-report", "summary-person", "summary-all", "compare-data", "reports", "settings"];
+  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
 
@@ -3367,6 +3615,9 @@ function renderModuleContent(user, moduleItem) {
   if (moduleItem.id === "time-report") {
     return renderTimeReport(user, moduleItem);
   }
+  if (moduleItem.id === "compare-data") {
+    return renderDeductionEntry(user, moduleItem);
+  }
   if (moduleItem.id === "reports") {
     return renderReports(moduleItem);
   }
@@ -3433,6 +3684,7 @@ function bindAppEvents(user, moduleItem) {
   if (moduleItem.id === "reports") bindReportEvents();
   if (moduleItem.id === "summary-person") bindPersonalReportEvents();
   if (moduleItem.id === "time-report") bindTimeReportEvents(user);
+  if (moduleItem.id === "compare-data") bindDeductionEvents(user);
   if (moduleItem.id === "production-employees") bindEmployeeEvents(user);
   if (moduleItem.id === "time-employees") bindTimeEmployeeEvents(user);
   if (moduleItem.id === "wage-rates") bindWageRateEvents(user);
@@ -4056,6 +4308,277 @@ function bindSummaryExportEvents(user) {
     exportSummaryByPile(user, "excel");
   });
 }
+
+function setDeductionMessage(message, type = "success") {
+  deductionMessage = message;
+  deductionMessageType = type;
+}
+
+function getCurrentDeductionContext() {
+  const range = normalizeDateRange(deductionStartDate, deductionEndDate);
+  deductionStartDate = range.startDate;
+  deductionEndDate = range.endDate;
+  const employees = getDeductionEmployeeOptions(deductionActiveTab);
+  const selectedEmployeeId = employees.some((employee) => String(employee.id) === String(deductionEmployeeId))
+    ? deductionEmployeeId
+    : employees[0]?.id || "";
+  deductionEmployeeId = selectedEmployeeId ? String(selectedEmployeeId) : "";
+  const selectedEmployee = employees.find((employee) => String(employee.id) === String(selectedEmployeeId)) || null;
+  const records = getDeductionsForRange(deductionActiveTab, range.startDate, range.endDate)
+    .sort((a, b) => `${a.start_date} ${a.emp_code} ${a.deduction_label}`.localeCompare(`${b.start_date} ${b.emp_code} ${b.deduction_label}`, "th", { numeric: true }));
+  const editingRecord = records.find((record) => Number(record.id) === Number(editingDeductionId)) || null;
+  return { range, employees, selectedEmployee, records, editingRecord };
+}
+
+function renderDeductionTypeOptions(selectedType = "advance") {
+  return deductionTypeOptions
+    .map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === selectedType ? "selected" : ""}>${escapeHtml(item.label)}</option>`)
+    .join("");
+}
+
+function renderDeductionEmployeeOptions(employees, selectedId) {
+  if (!employees.length) return `<option value="">ยังไม่มีพนักงาน Active</option>`;
+  return employees
+    .map((employee) => `<option value="${employee.id}" ${String(employee.id) === String(selectedId) ? "selected" : ""}>${escapeHtml(employee.emp_code)} - ${escapeHtml(employee.fullname)}</option>`)
+    .join("");
+}
+
+function renderDeductionRow(record) {
+  return `
+    <tr>
+      <td>${escapeHtml(record.start_date)}${record.end_date !== record.start_date ? ` ถึง ${escapeHtml(record.end_date)}` : ""}</td>
+      <td><strong>${escapeHtml(record.emp_code)}</strong></td>
+      <td>${escapeHtml(record.employee_name)}</td>
+      <td>${escapeHtml(record.deduction_label)}</td>
+      <td><strong>${money(record.amount)}</strong></td>
+      <td>${escapeHtml(record.note || "-")}</td>
+      <td>${escapeHtml(record.created_by || "-")}</td>
+      <td>
+        <div class="table-actions">
+          <button class="btn btn-small btn-outline" type="button" data-edit-deduction="${record.id}">แก้ไข</button>
+          <button class="btn btn-small btn-danger" type="button" data-delete-deduction="${record.id}">ลบ</button>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function renderDeductionEntry(user, moduleItem) {
+  const context = getCurrentDeductionContext();
+  const editing = context.editingRecord;
+  const formEmployeeId = editing?.employee_id || context.selectedEmployee?.id || "";
+  const formStartDate = editing?.start_date || context.range.startDate;
+  const formEndDate = editing?.end_date || context.range.endDate;
+  const totalDeduction = sumDeductions(context.records);
+  const employeeCount = new Set(context.records.map((record) => record.employee_id || record.emp_code)).size;
+
+  return `
+    <section class="summary-page deduction-page">
+      <div class="summary-header">
+        <div>
+          <h2>${escapeHtml(moduleItem.label)}</h2>
+          <p>บันทึกรายการหักเงินลงฐานข้อมูลกลาง Supabase เพื่อให้ทุกเครื่องเห็นข้อมูลชุดเดียวกัน และนำไปหักในรายงาน/ใบเสร็จตามช่วงวันที่ Export</p>
+        </div>
+        <span class="badge badge-success">Supabase Only</span>
+      </div>
+
+      <div class="module-tabs deduction-tabs">
+        <button class="module-tab ${deductionActiveTab === "production" ? "active" : ""}" type="button" data-deduction-tab="production">พนักงานเหมาน้ำหนัก</button>
+        <button class="module-tab ${deductionActiveTab === "time" ? "active" : ""}" type="button" data-deduction-tab="time">พนักงานเหมาเวลา</button>
+      </div>
+
+      ${
+        deductionMessage
+          ? `<div class="alert ${deductionMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(deductionMessage)}</div>`
+          : ""
+      }
+
+      <section class="panel deduction-control-panel">
+        <form class="time-summary-form" id="deductionFilterForm">
+          <label class="field">
+            <span>จากวันที่</span>
+            <input name="start_date" type="date" value="${escapeHtml(context.range.startDate)}" required />
+          </label>
+          <label class="field">
+            <span>ถึงวันที่</span>
+            <input name="end_date" type="date" value="${escapeHtml(context.range.endDate)}" required />
+          </label>
+          <button class="btn btn-outline" type="submit">โหลดจากฐานกลาง</button>
+        </form>
+      </section>
+
+      <div class="summary-metrics">
+        <div class="metric-card metric-blue"><span>รายการหัก</span><strong>${context.records.length.toLocaleString("th-TH")} รายการ</strong><small>${escapeHtml(context.range.startDate)} ถึง ${escapeHtml(context.range.endDate)}</small></div>
+        <div class="metric-card metric-green"><span>จำนวนพนักงาน</span><strong>${employeeCount.toLocaleString("th-TH")} คน</strong><small>${deductionActiveTab === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก"}</small></div>
+        <div class="metric-card metric-orange"><span>ยอดหักรวม</span><strong>${money(totalDeduction)}</strong><small>ยอดนี้จะถูกหักใน Export ที่อยู่ช่วงเดียวกัน</small></div>
+      </div>
+
+      <section class="panel deduction-form-panel">
+        <div class="section-title-row">
+          <div>
+            <h3>${editing ? "แก้ไขรายการหักเงิน" : "เพิ่มรายการหักเงิน"}</h3>
+            <p class="muted-text">จำนวนเงินแต่ละรายการปล่อยว่างไม่ได้ เพราะระบบจะใช้ยอดนี้หักเงินจริงในรายงาน</p>
+          </div>
+          ${editing ? `<button class="btn btn-outline" id="cancelDeductionEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
+        </div>
+        <form class="summary-export-form deduction-form" id="deductionForm">
+          <input type="hidden" name="id" value="${editing?.id || ""}" />
+          <label class="field">
+            <span>พนักงาน</span>
+            <select name="employee_id" required ${context.employees.length ? "" : "disabled"}>
+              ${renderDeductionEmployeeOptions(context.employees, formEmployeeId)}
+            </select>
+          </label>
+          <label class="field">
+            <span>จากวันที่</span>
+            <input name="start_date" type="date" value="${escapeHtml(formStartDate)}" required />
+          </label>
+          <label class="field">
+            <span>ถึงวันที่</span>
+            <input name="end_date" type="date" value="${escapeHtml(formEndDate)}" required />
+          </label>
+          <label class="field">
+            <span>รายการหัก</span>
+            <select name="deduction_type" required>
+              ${renderDeductionTypeOptions(editing?.deduction_type || "advance")}
+            </select>
+          </label>
+          <label class="field">
+            <span>จำนวนเงิน</span>
+            <input name="amount" type="number" min="0" step="1" value="${editing ? Number(editing.amount || 0) : ""}" placeholder="0" required />
+          </label>
+          <label class="field">
+            <span>หมายเหตุ</span>
+            <input name="note" value="${escapeHtml(editing?.note || "")}" placeholder="รายละเอียดเพิ่มเติมถ้ามี" />
+          </label>
+          <button class="btn btn-primary" type="submit" ${context.employees.length ? "" : "disabled"}>${editing ? "บันทึกการแก้ไข" : "บันทึกรายการหัก"}</button>
+        </form>
+      </section>
+
+      <section class="table-card">
+        <div class="table-heading">รายการหักเงินในช่วงวันที่เลือก</div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>ช่วงวันที่</th>
+                <th>รหัส</th>
+                <th>ชื่อพนักงาน</th>
+                <th>รายการหัก</th>
+                <th>จำนวนเงิน</th>
+                <th>หมายเหตุ</th>
+                <th>ผู้บันทึก</th>
+                <th>จัดการ</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${context.records.length ? context.records.map(renderDeductionRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีรายการหักเงินในช่วงวันที่นี้</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  `;
+}
+
+function bindDeductionEvents(user) {
+  document.querySelectorAll("[data-deduction-tab]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      deductionActiveTab = normalizeDeductionKind(button.dataset.deductionTab);
+      deductionEmployeeId = "";
+      editingDeductionId = null;
+      setDeductionMessage("กำลังโหลดรายการหักเงินจากฐานกลาง...");
+      render();
+      try {
+        await hydrateDeductionsFromCloud({ employee_kind: deductionActiveTab, start_date: deductionStartDate, end_date: deductionEndDate });
+        setDeductionMessage("");
+      } catch (error) {
+        setDeductionMessage(`${error instanceof Error ? error.message : "โหลดรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบว่ามีตาราง deduction_records ใน Supabase แล้ว`, "error");
+      }
+      render();
+    });
+  });
+
+  document.querySelector("#deductionFilterForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    deductionStartDate = String(form.get("start_date") || deductionStartDate);
+    deductionEndDate = String(form.get("end_date") || deductionStartDate);
+    editingDeductionId = null;
+    setDeductionMessage("กำลังโหลดรายการหักเงินจากฐานกลาง...");
+    render();
+    try {
+      await hydrateDeductionsFromCloud({ employee_kind: deductionActiveTab, start_date: deductionStartDate, end_date: deductionEndDate });
+      setDeductionMessage("โหลดรายการหักเงินจากฐานกลางเรียบร้อยแล้ว");
+    } catch (error) {
+      setDeductionMessage(`${error instanceof Error ? error.message : "โหลดรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
+    }
+    render();
+  });
+
+  document.querySelector("#deductionForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const id = Number(form.get("id") || 0);
+    const payload = {
+      employee_kind: deductionActiveTab,
+      employee_id: Number(form.get("employee_id") || 0),
+      start_date: String(form.get("start_date") || deductionStartDate),
+      end_date: String(form.get("end_date") || deductionEndDate),
+      deduction_type: String(form.get("deduction_type") || "advance"),
+      amount: Number(form.get("amount") || 0),
+      note: String(form.get("note") || "")
+    };
+    try {
+      if (id) {
+        await apiUpdateDeduction(id, payload, user);
+        setDeductionMessage("แก้ไขรายการหักเงินในฐานกลางเรียบร้อยแล้ว");
+      } else {
+        await apiCreateDeduction(payload, user);
+        setDeductionMessage("บันทึกรายการหักเงินลงฐานกลางเรียบร้อยแล้ว");
+      }
+      deductionStartDate = payload.start_date;
+      deductionEndDate = payload.end_date;
+      deductionEmployeeId = String(payload.employee_id);
+      editingDeductionId = null;
+      await hydrateDeductionsFromCloud({ employee_kind: deductionActiveTab, start_date: deductionStartDate, end_date: deductionEndDate });
+    } catch (error) {
+      setDeductionMessage(`${error instanceof Error ? error.message : "บันทึกรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
+    }
+    render();
+  });
+
+  document.querySelector("#cancelDeductionEdit")?.addEventListener("click", () => {
+    editingDeductionId = null;
+    setDeductionMessage("");
+    render();
+  });
+
+  document.querySelectorAll("[data-edit-deduction]").forEach((button) => {
+    button.addEventListener("click", () => {
+      editingDeductionId = Number(button.dataset.editDeduction);
+      setDeductionMessage("");
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-delete-deduction]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = Number(button.dataset.deleteDeduction);
+      if (!window.confirm("ยืนยันลบรายการหักเงินนี้จากฐานกลาง Supabase?")) return;
+      try {
+        await apiDeleteDeduction(id, user);
+        editingDeductionId = null;
+        await hydrateDeductionsFromCloud({ employee_kind: deductionActiveTab, start_date: deductionStartDate, end_date: deductionEndDate });
+        setDeductionMessage("ลบรายการหักเงินจากฐานกลางเรียบร้อยแล้ว");
+      } catch (error) {
+        setDeductionMessage(`${error instanceof Error ? error.message : "ลบรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
+      }
+      render();
+    });
+  });
+}
+
 function renderSimpleModule(moduleItem) {
   return `
     <section class="panel">
@@ -4488,6 +5011,7 @@ function buildBackupData() {
       production_records: getProductionRecords(),
       production_sessions: getProductionSessions(),
       time_records: getTimeRecords(),
+      deduction_records: getDeductionRecords(),
       audit_logs: getAuditLogs(),
       account_users: getAccountUsers()
     }
@@ -4604,7 +5128,7 @@ function bindBackupEvents(user) {
         const parsed = JSON.parse(String(reader.result || "{}"));
         const data = parsed.data || parsed;
         if (!data || typeof data !== "object") throw new Error("Invalid backup file.");
-        const knownKeys = ["account_users", "employees", "time_employees", "wage_rates", "production_records", "production_sessions", "time_records", "audit_logs"];
+        const knownKeys = ["account_users", "employees", "time_employees", "wage_rates", "production_records", "production_sessions", "time_records", "deduction_records", "audit_logs"];
         const hasKnownData = knownKeys.some((key) => Array.isArray(data[key]));
         if (!hasKnownData) throw new Error("Backup file does not contain supported data.");
         const confirmed = window.confirm(
@@ -6177,7 +6701,8 @@ function buildPersonalReportPayload() {
     start_date: range.startDate,
     end_date: range.endDate,
     employees: getEmployees(),
-    production_records: getProductionRecords()
+    production_records: getProductionRecords(),
+    deduction_records: getDeductionsForRange("production", range.startDate, range.endDate)
   };
 }
 
@@ -9854,6 +10379,7 @@ function getSummaryExportPayload(user, format) {
     printed_by_position: getExportPositionLabel(user),
     employees: getEmployees(),
     production_records: getProductionRecords(),
+    deduction_records: getDeductionRecords(),
     export_sections: { ...summaryExportOptions },
     export_fields: JSON.parse(JSON.stringify(summaryExportFields)),
     export_format: format
@@ -10278,6 +10804,7 @@ function getGroupReportRecords() {
 }
 
 function summarizeGroupReportRows(records, mode = "group") {
+  const range = normalizeGroupReportRange();
   const summaries = new Map();
   records.forEach((record) => {
     const water = Number(record.water_weight || record.water || 0);
@@ -10296,25 +10823,44 @@ function summarizeGroupReportRows(records, mode = "group") {
         water: 0,
         flower: 0,
         total: 0,
-        amount: 0
+        amount: 0,
+        deduction_amount: 0,
+        net_amount: 0,
+        deductedEmployees: new Set()
       });
     }
 
     const summary = summaries.get(key);
-    summary.employees.add(record.employee_id || record.emp_code || record.employee_name || "");
+    const employeeKey = record.employee_id || record.emp_code || record.employee_name || "";
+    summary.employees.add(employeeKey);
     summary.records += 1;
     summary.water += water;
     summary.flower += flower;
     summary.total += water + flower;
     summary.amount += amount;
+    if (mode === "group" && !summary.deductedEmployees.has(employeeKey)) {
+      summary.deductedEmployees.add(employeeKey);
+      summary.deduction_amount += getDeductionTotalForEmployee(
+        "production",
+        record.employee || { id: record.employee_id, emp_code: record.emp_code },
+        range.startDate,
+        range.endDate
+      );
+    }
   });
 
-  return Array.from(summaries.values()).sort((a, b) =>
-    `${a.pay_group} ${a.fruit_label}`.localeCompare(`${b.pay_group} ${b.fruit_label}`, "th")
-  );
+  return Array.from(summaries.values())
+    .map((summary) => ({
+      ...summary,
+      net_amount: Math.max(0, Number(summary.amount || 0) - Number(summary.deduction_amount || 0))
+    }))
+    .sort((a, b) =>
+      `${a.pay_group} ${a.fruit_label}`.localeCompare(`${b.pay_group} ${b.fruit_label}`, "th")
+    );
 }
 
 function getGroupReportEmployeeRows(records) {
+  const range = normalizeGroupReportRange();
   const rows = new Map();
   records.forEach((record) => {
     const key = record.employee_id || record.emp_code || record.employee_name || "";
@@ -10330,7 +10876,14 @@ function getGroupReportEmployeeRows(records) {
         water: 0,
         flower: 0,
         total: 0,
-        amount: 0
+        amount: 0,
+        deduction_amount: getDeductionTotalForEmployee(
+          "production",
+          record.employee || { id: record.employee_id, emp_code: record.emp_code },
+          range.startDate,
+          range.endDate
+        ),
+        net_amount: 0
       });
     }
     const row = rows.get(key);
@@ -10339,6 +10892,7 @@ function getGroupReportEmployeeRows(records) {
     row.flower += flower;
     row.total += water + flower;
     row.amount += amount;
+    row.net_amount = Math.max(0, Number(row.amount || 0) - Number(row.deduction_amount || 0));
   });
   return Array.from(rows.values()).sort((a, b) =>
     `${a.pay_group} ${a.emp_code}`.localeCompare(`${b.pay_group} ${b.emp_code}`, "th")
@@ -10354,9 +10908,11 @@ function getGroupReportTotals(groupRows) {
       totals.flower += row.flower;
       totals.total += row.total;
       totals.amount += row.amount;
+      totals.deduction_amount += Number(row.deduction_amount || 0);
+      totals.net_amount += Number(row.net_amount ?? row.amount ?? 0);
       return totals;
     },
-    { employees: new Set(), records: 0, water: 0, flower: 0, total: 0, amount: 0 }
+    { employees: new Set(), records: 0, water: 0, flower: 0, total: 0, amount: 0, deduction_amount: 0, net_amount: 0 }
   );
 }
 
@@ -10416,6 +10972,7 @@ function getTimeGroupReportRecords() {
 }
 
 function summarizeTimeGroupReportRows(records) {
+  const range = normalizeGroupReportRange();
   const summaries = new Map();
   records.forEach((record) => {
     const key = record.employee_type_label;
@@ -10430,11 +10987,15 @@ function summarizeTimeGroupReportRows(records) {
         ot_hours: 0,
         normal_amount: 0,
         ot_amount: 0,
-        amount: 0
+        amount: 0,
+        deduction_amount: 0,
+        net_amount: 0,
+        deductedEmployees: new Set()
       });
     }
     const summary = summaries.get(key);
-    summary.employees.add(record.employee_id || record.emp_code || record.fullname || "");
+    const employeeKey = record.employee_id || record.emp_code || record.fullname || "";
+    summary.employees.add(employeeKey);
     summary.records += 1;
     summary.net_minutes += Number(record.net_minutes) || 0;
     summary.normal_hours += Number(record.normal_hours) || 0;
@@ -10442,11 +11003,26 @@ function summarizeTimeGroupReportRows(records) {
     summary.normal_amount += Number(record.normal_amount) || 0;
     summary.ot_amount += Number(record.ot_amount) || 0;
     summary.amount += Number(record.total_amount) || 0;
+    if (!summary.deductedEmployees.has(employeeKey)) {
+      summary.deductedEmployees.add(employeeKey);
+      summary.deduction_amount += getDeductionTotalForEmployee(
+        "time",
+        record.employee || { id: record.employee_id, emp_code: record.emp_code },
+        range.startDate,
+        range.endDate
+      );
+    }
   });
-  return Array.from(summaries.values()).sort((a, b) => a.pay_group.localeCompare(b.pay_group, "th"));
+  return Array.from(summaries.values())
+    .map((summary) => ({
+      ...summary,
+      net_amount: Math.max(0, Number(summary.amount || 0) - Number(summary.deduction_amount || 0))
+    }))
+    .sort((a, b) => a.pay_group.localeCompare(b.pay_group, "th"));
 }
 
 function getTimeGroupReportEmployeeRows(records) {
+  const range = normalizeGroupReportRange();
   const rows = new Map();
   records.forEach((record) => {
     const key = record.employee_id || record.emp_code || record.fullname || "";
@@ -10459,7 +11035,14 @@ function getTimeGroupReportEmployeeRows(records) {
         net_minutes: 0,
         normal_hours: 0,
         ot_hours: 0,
-        amount: 0
+        amount: 0,
+        deduction_amount: getDeductionTotalForEmployee(
+          "time",
+          record.employee || { id: record.employee_id, emp_code: record.emp_code },
+          range.startDate,
+          range.endDate
+        ),
+        net_amount: 0
       });
     }
     const row = rows.get(key);
@@ -10468,6 +11051,7 @@ function getTimeGroupReportEmployeeRows(records) {
     row.normal_hours += Number(record.normal_hours) || 0;
     row.ot_hours += Number(record.ot_hours) || 0;
     row.amount += Number(record.total_amount) || 0;
+    row.net_amount = Math.max(0, Number(row.amount || 0) - Number(row.deduction_amount || 0));
   });
   return Array.from(rows.values()).sort((a, b) =>
     `${a.pay_group} ${a.emp_code}`.localeCompare(`${b.pay_group} ${b.emp_code}`, "th")
@@ -10483,9 +11067,11 @@ function getTimeGroupReportTotals(groupRows) {
       totals.normal_hours += row.normal_hours;
       totals.ot_hours += row.ot_hours;
       totals.amount += row.amount;
+      totals.deduction_amount += Number(row.deduction_amount || 0);
+      totals.net_amount += Number(row.net_amount ?? row.amount ?? 0);
       return totals;
     },
-    { employees: new Set(), records: 0, net_minutes: 0, normal_hours: 0, ot_hours: 0, amount: 0 }
+    { employees: new Set(), records: 0, net_minutes: 0, normal_hours: 0, ot_hours: 0, amount: 0, deduction_amount: 0, net_amount: 0 }
   );
 }
 
@@ -10500,6 +11086,8 @@ function renderGroupReportSummaryRow(row, showFruit = false) {
       <td>${compactNumberText(row.flower)}</td>
       <td><strong>${compactNumberText(row.total)}</strong></td>
       <td><strong>${money(row.amount)}</strong></td>
+      <td>${money(row.deduction_amount || 0)}</td>
+      <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
   `;
 }
@@ -10515,6 +11103,8 @@ function renderGroupReportEmployeeRow(row) {
       <td>${numberText(row.flower)}</td>
       <td><strong>${numberText(row.total)}</strong></td>
       <td><strong>${money(row.amount)}</strong></td>
+      <td>${money(row.deduction_amount || 0)}</td>
+      <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
   `;
 }
@@ -10545,6 +11135,8 @@ function renderTimeGroupReportSummaryRow(row) {
       <td>${numberText(row.normal_hours)}</td>
       <td>${numberText(row.ot_hours)}</td>
       <td><strong>${money(row.amount)}</strong></td>
+      <td>${money(row.deduction_amount || 0)}</td>
+      <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
   `;
 }
@@ -10560,6 +11152,8 @@ function renderTimeGroupReportEmployeeRow(row) {
       <td>${numberText(row.normal_hours)}</td>
       <td>${numberText(row.ot_hours)}</td>
       <td><strong>${money(row.amount)}</strong></td>
+      <td>${money(row.deduction_amount || 0)}</td>
+      <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
   `;
 }
@@ -10605,17 +11199,17 @@ function renderTimeGroupReportContent(records, groupRows, employeeRows, totals) 
   return `
     <div class="summary-metrics">
       <div class="metric-card metric-green"><span>เวลาสุทธิรวม</span><strong>${escapeHtml(formatMinutesToHourText(totals.net_minutes))}</strong><small>${formatDecimalHours(totals.net_minutes)} ชั่วโมง</small></div>
-      <div class="metric-card metric-blue"><span>ยอดเงินรวม</span><strong>${money(totals.amount)}</strong><small>รวมเงินปกติและ OT</small></div>
+      <div class="metric-card metric-blue"><span>ยอดเงินรวม</span><strong>${money(totals.amount)}</strong><small>ก่อนหัก</small></div>
       <div class="metric-card metric-purple"><span>จำนวนกลุ่ม</span><strong>${groupRows.length.toLocaleString("th-TH")}</strong><small>${groupReportGroup === "all" ? "ทุกกลุ่ม" : groupReportGroup}</small></div>
-      <div class="metric-card metric-orange"><span>จำนวนคน</span><strong>${totals.employees.size.toLocaleString("th-TH")} คน</strong><small>${records.length.toLocaleString("th-TH")} รายการ</small></div>
+      <div class="metric-card metric-orange"><span>หัก / สุทธิ</span><strong>${money(totals.deduction_amount || 0)}</strong><small>สุทธิ ${money(totals.net_amount ?? totals.amount)}</small></div>
     </div>
 
     <section class="table-card">
       <div class="table-heading">สรุปตามกลุ่มเวลา</div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th></tr></thead>
-          <tbody>${groupRows.length ? groupRows.map(renderTimeGroupReportSummaryRow).join("") : `<tr><td colspan="7" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+          <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+          <tbody>${groupRows.length ? groupRows.map(renderTimeGroupReportSummaryRow).join("") : `<tr><td colspan="9" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
         </table>
       </div>
     </section>
@@ -10624,8 +11218,8 @@ function renderTimeGroupReportContent(records, groupRows, employeeRows, totals) 
       <div class="table-heading">รายละเอียดพนักงานตามกลุ่มเวลา</div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>วัน</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th></tr></thead>
-          <tbody>${employeeRows.length ? employeeRows.map(renderTimeGroupReportEmployeeRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+          <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>วัน</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+          <tbody>${employeeRows.length ? employeeRows.map(renderTimeGroupReportEmployeeRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
         </table>
       </div>
     </section>
@@ -10746,9 +11340,9 @@ function renderSummaryGroupReport(moduleItem) {
       ${isTimeReport ? renderTimeGroupReportContent(records, groupRows, employeeRows, totals) : `
         <div class="summary-metrics">
         <div class="metric-card metric-green"><span>น้ำหนักรวม</span><strong>${numberText(totals.total)} กก.</strong><small>น้ำ ${numberText(totals.water)} | ดอก ${numberText(totals.flower)}</small></div>
-        <div class="metric-card metric-blue"><span>ยอดเงินรวม</span><strong>${money(totals.amount)}</strong><small>ตามช่วงวันที่และตัวกรอง</small></div>
+        <div class="metric-card metric-blue"><span>ยอดเงินรวม</span><strong>${money(totals.amount)}</strong><small>ก่อนหัก</small></div>
         <div class="metric-card metric-purple"><span>จำนวนกลุ่ม</span><strong>${groupRows.length.toLocaleString("th-TH")}</strong><small>${groupReportGroup === "all" ? "ทุกกลุ่ม" : groupReportGroup}</small></div>
-        <div class="metric-card metric-orange"><span>จำนวนคน</span><strong>${totals.employees.size.toLocaleString("th-TH")} คน</strong><small>${records.length.toLocaleString("th-TH")} รายการ</small></div>
+        <div class="metric-card metric-orange"><span>หัก / สุทธิ</span><strong>${money(totals.deduction_amount || 0)}</strong><small>สุทธิ ${money(totals.net_amount ?? totals.amount)}</small></div>
       </div>
 
       <section class="summary-grid group-report-top-grid">
@@ -10764,8 +11358,8 @@ function renderSummaryGroupReport(moduleItem) {
           <div class="table-heading">สรุปตามกลุ่ม</div>
           <div class="table-scroll">
             <table class="group-report-compact-table">
-              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>น้ำ</th><th>ดอก</th><th>รวม</th><th>เงิน</th></tr></thead>
-              <tbody>${groupRows.length ? groupRows.map((row) => renderGroupReportSummaryRow(row)).join("") : `<tr><td colspan="7" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>น้ำ</th><th>ดอก</th><th>รวม</th><th>เงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+              <tbody>${groupRows.length ? groupRows.map((row) => renderGroupReportSummaryRow(row)).join("") : `<tr><td colspan="9" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
             </table>
           </div>
         </section>
@@ -10775,8 +11369,8 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">สรุปตามกลุ่มและผลไม้</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>รวม</th><th>รวมเงิน</th></tr></thead>
-            <tbody>${fruitRows.length ? fruitRows.map((row) => renderGroupReportSummaryRow(row, true)).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>รวม</th><th>รวมเงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+            <tbody>${fruitRows.length ? fruitRows.map((row) => renderGroupReportSummaryRow(row, true)).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -10785,8 +11379,8 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">รายละเอียดพนักงานในกลุ่ม</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>รวม</th><th>รวมเงิน</th></tr></thead>
-            <tbody>${employeeRows.length ? employeeRows.map(renderGroupReportEmployeeRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>รวม</th><th>รวมเงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+            <tbody>${employeeRows.length ? employeeRows.map(renderGroupReportEmployeeRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -10827,6 +11421,7 @@ function getGroupReportPayload(user, format) {
     printed_by_position: getExportPositionLabel(user),
     employees,
     production_records: records,
+    deduction_records: getDeductionsForRange("production", range.startDate, range.endDate),
     export_format: format
   };
 }
@@ -10843,9 +11438,15 @@ function getTimeGroupReportPayload(user, format) {
     ot_hours: row.ot_hours,
     normal_amount: row.normal_amount,
     ot_amount: row.ot_amount,
-    amount: row.amount
+    amount: row.amount,
+    deduction_amount: row.deduction_amount || 0,
+    net_amount: row.net_amount ?? row.amount
   }));
-  const employeeRows = getTimeGroupReportEmployeeRows(records);
+  const employeeRows = getTimeGroupReportEmployeeRows(records).map((row) => ({
+    ...row,
+    deduction_amount: row.deduction_amount || 0,
+    net_amount: row.net_amount ?? row.amount
+  }));
   return {
     start_date: range.startDate,
     end_date: range.endDate,
@@ -10856,6 +11457,7 @@ function getTimeGroupReportPayload(user, format) {
     time_group_rows: groupRows,
     time_employee_rows: employeeRows,
     time_group_records: records,
+    deduction_records: getDeductionsForRange("time", range.startDate, range.endDate),
     export_format: format
   };
 }
