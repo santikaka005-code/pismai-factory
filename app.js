@@ -16,8 +16,8 @@ const TIME_STANDARD_HOURS = 8;
 const TIME_NORMAL_HOURLY_RATE = TIME_DAILY_WAGE / TIME_STANDARD_HOURS;
 const TIME_OT_HOURLY_RATE = 50;
 const timeEmployeeTypeOptions = [
-  { id: "normal", label: "พนักงานปกติ", dailyWage: TIME_DAILY_WAGE },
-  { id: "special", label: "พนักงานพิเศษ", dailyWage: TIME_SPECIAL_DAILY_WAGE }
+  { id: "normal", label: "กลุ่มทั่วไป", dailyWage: TIME_DAILY_WAGE },
+  { id: "special", label: "กลุ่มพิเศษ", dailyWage: TIME_SPECIAL_DAILY_WAGE }
 ];
 const TIME_SPECIAL_WAGE_TABLE = {
   2: 91,
@@ -1275,6 +1275,7 @@ function normalizeCloudTimeEmployee(employee) {
     fullname: employee.fullname,
     employee_type: employee.employee_type,
     daily_wage: employee.daily_wage,
+    ot_hourly_rate: employee.ot_hourly_rate,
     status: employee.status || "Active",
     created_at: employee.created_at,
     updated_at: employee.updated_at || employee.created_at
@@ -1719,6 +1720,7 @@ function defaultTimeEmployeesFromWeightEmployees() {
     fullname: employee.fullname,
     employee_type: "normal",
     daily_wage: TIME_DAILY_WAGE,
+    ot_hourly_rate: TIME_OT_HOURLY_RATE,
     status: employee.status || "Active",
     created_at: employee.created_at || new Date().toISOString(),
     updated_at: employee.updated_at || employee.created_at || new Date().toISOString()
@@ -1727,12 +1729,14 @@ function defaultTimeEmployeesFromWeightEmployees() {
 
 function normalizeTimeEmployee(employee) {
   const typeOption = getTimeEmployeeTypeOption(employee?.employee_type);
+  const otHourlyRate = Number(employee?.ot_hourly_rate);
   return {
     id: Number(employee?.id) || 0,
     emp_code: normalizeTimeEmployeeCodeInput(employee?.emp_code || ""),
     fullname: String(employee?.fullname || "").trim(),
     employee_type: typeOption.id,
     daily_wage: typeOption.dailyWage,
+    ot_hourly_rate: Number.isFinite(otHourlyRate) && otHourlyRate > 0 ? otHourlyRate : TIME_OT_HOURLY_RATE,
     status: employee?.status || "Active",
     created_at: employee?.created_at || new Date().toISOString(),
     updated_at: employee?.updated_at || employee?.created_at || new Date().toISOString()
@@ -1799,11 +1803,13 @@ async function apiCreateTimeEmployee(payload) {
   }
 
   const typeOption = getTimeEmployeeTypeOption(payload.employee_type);
+  const otHourlyRate = Number(payload.ot_hourly_rate) || TIME_OT_HOURLY_RATE;
   const localEmployee = {
     emp_code: empCode,
     fullname: String(payload.fullname || "").trim(),
     employee_type: typeOption.id,
     daily_wage: typeOption.dailyWage,
+    ot_hourly_rate: otHourlyRate,
     status: "Active"
   };
 
@@ -1824,11 +1830,13 @@ async function apiUpdateTimeEmployee(id, payload) {
     throw new Error("รหัสพนักงานตามเวลาต้องไม่ซ้ำกัน");
   }
   const typeOption = getTimeEmployeeTypeOption(payload.employee_type);
+  const otHourlyRate = Number(payload.ot_hourly_rate) || TIME_OT_HOURLY_RATE;
   const updatedEmployee = await updateCloudTimeEmployee(id, {
     emp_code: empCode,
     fullname: String(payload.fullname || "").trim(),
     employee_type: typeOption.id,
     daily_wage: typeOption.dailyWage,
+    ot_hourly_rate: otHourlyRate,
     status: "Active"
   });
   if (!updatedEmployee) throw new Error("ไม่สามารถแก้ไขพนักงานตามเวลาในฐานข้อมูลกลางได้");
@@ -2424,6 +2432,7 @@ function restoreTimeEmployeesFromRecordsIfEmpty() {
       fullname: record.fullname || record.employee_name || `พนักงาน ${empCode}`,
       employee_type: typeOption.id,
       daily_wage: record.daily_wage || typeOption.dailyWage,
+      ot_hourly_rate: record.ot_hourly_rate || TIME_OT_HOURLY_RATE,
       status: "Active",
       created_at: record.created_at || new Date().toISOString(),
       updated_at: record.updated_at || record.created_at || new Date().toISOString()
@@ -2556,7 +2565,7 @@ function buildTimeRecord(payload, user) {
     employee_type_label: getTimeEmployeeTypeOption(employee.employee_type).label,
     daily_wage: employee.daily_wage || TIME_DAILY_WAGE,
     normal_hourly_rate: (employee.daily_wage || TIME_DAILY_WAGE) / TIME_STANDARD_HOURS,
-    ot_hourly_rate: TIME_OT_HOURLY_RATE,
+    ot_hourly_rate: Number(employee.ot_hourly_rate) || TIME_OT_HOURLY_RATE,
     clock_in: clockIn,
     clock_out: clockOut,
     ...calculation,
@@ -6422,8 +6431,8 @@ function renderTimeReport(user, moduleItem) {
             <div><span>ตัวอย่างมาตรฐาน</span><strong>08:00-17:00 = 8:00 ชั่วโมง</strong></div>
             <div><span>เริ่มงานช่วงบ่าย</span><strong>ไม่หักเวลาพัก</strong></div>
             <div><span>ค่าแรงไม่ครบ 8 ชั่วโมง</span><strong>ปัดเป็นบาท: ชั่วโมงสุทธิ × ฐานรายวันของพนักงาน ÷ 8</strong></div>
-            <div><span>ฐานรายวัน</span><strong>ปกติ ${TIME_DAILY_WAGE} บาท · พิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
-            <div><span>ค่าล่วงเวลา</span><strong>ส่วนที่เกิน 8 ชั่วโมง × 50 บาท/ชั่วโมง</strong></div>
+            <div><span>ฐานรายวัน</span><strong>กลุ่มทั่วไป ${TIME_DAILY_WAGE} บาท · กลุ่มพิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
+            <div><span>ค่าล่วงเวลา</span><strong>ส่วนที่เกิน 8 ชั่วโมง × ค่า OT ที่ตั้งไว้รายคน</strong></div>
             <div><span>กันกรอกซ้ำ</span><strong>พนักงาน 1 คนบันทึกได้ 1 รายการต่อวัน หากผิดให้กดแก้ไขรายการเดิม</strong></div>
             <div><span>ประวัติการแก้ไข</span><strong>แก้ภายใน 2 นาทีไม่ลง Log · เกิน 2 นาทีหรือข้ามวันจะลง Audit Log</strong></div>
           </div>
@@ -6571,8 +6580,8 @@ function renderWeeklyTimeEntry(user) {
             <div><span>พักกลางวัน</span><strong>12:00-13:00</strong></div>
             <div><span>เริ่มเที่ยงหรือบ่าย</span><strong>ไม่หักพัก</strong></div>
             <div><span>ค่าแรงปกติ</span><strong>ฐานรายวันของพนักงาน ÷ 8 × ชั่วโมงสุทธิ แล้วปัดเป็นบาท</strong></div>
-            <div><span>ฐานครบ 8 ชั่วโมง</span><strong>ปกติ ${TIME_DAILY_WAGE} บาท · พิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
-            <div><span>เกิน 8 ชั่วโมง</span><strong>OT 50 บาท/ชั่วโมง</strong></div>
+            <div><span>ฐานครบ 8 ชั่วโมง</span><strong>กลุ่มทั่วไป ${TIME_DAILY_WAGE} บาท · กลุ่มพิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
+            <div><span>เกิน 8 ชั่วโมง</span><strong>คิด OT ตามค่าที่ตั้งไว้ในพนักงานแต่ละคน</strong></div>
             <div><span>กันกรอกซ้ำ</span><strong>วันไหนมีรายการแล้ว ระบบจะให้แก้รายการเดิมแทนการบันทึกซ้ำ</strong></div>
           </div>
           <div class="weekly-actions">
@@ -6921,7 +6930,7 @@ function renderEmployeeManagementHub(user, moduleItem) {
         </button>
         <button class="settings-tile" data-route="time-employees" type="button">
           <strong>พนักงานตามเวลา</strong>
-          <span>สร้าง แก้ไข ลบพนักงานที่ใช้กับหน้าเวลา พร้อมแยกพนักงานปกติ/พิเศษ</span>
+          <span>สร้าง แก้ไข ลบพนักงานที่ใช้กับหน้าเวลา พร้อมแยกกลุ่มทั่วไป/พิเศษและค่า OT รายคน</span>
         </button>
       </div>
     </section>
@@ -7272,7 +7281,7 @@ function renderTimeEmployees(user, moduleItem) {
       <div class="metrics-grid metrics-spaced">
         <div class="metric-card"><span>พนักงานตามเวลาทั้งหมด</span><strong>${allEmployees.length.toLocaleString("th-TH")}</strong><small>ฐานแยกจากพนักงานน้ำหนัก</small></div>
         <div class="metric-card"><span>ใช้งานอยู่</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>พร้อมเลือกในหน้าบันทึกเวลา</small></div>
-        <div class="metric-card"><span>พนักงานพิเศษ</span><strong>${specialEmployees.toLocaleString("th-TH")}</strong><small>${TIME_SPECIAL_DAILY_WAGE.toLocaleString("th-TH")} บาท/วัน</small></div>
+        <div class="metric-card"><span>กลุ่มพิเศษ</span><strong>${specialEmployees.toLocaleString("th-TH")}</strong><small>${TIME_SPECIAL_DAILY_WAGE.toLocaleString("th-TH")} บาท/วัน</small></div>
         <div class="metric-card"><span>ผลค้นหา</span><strong>${employees.length.toLocaleString("th-TH")}</strong><small>${timeEmployeeSearch ? escapeHtml(timeEmployeeSearch) : "ทั้งหมด"}</small></div>
       </div>
 
@@ -7317,6 +7326,7 @@ function renderTimeEmployees(user, moduleItem) {
               <th>ชื่อพนักงาน</th>
               <th>ประเภท</th>
               <th>ฐานรายวัน</th>
+              <th>OT</th>
               <th>Created</th>
               <th>Updated</th>
               <th>Actions</th>
@@ -7326,7 +7336,7 @@ function renderTimeEmployees(user, moduleItem) {
             ${
               employees.length
                 ? employees.map((employee) => renderTimeEmployeeRow(employee, canManage, canDelete)).join("")
-                : `<tr><td colspan="8" class="empty-cell">ยังไม่มีพนักงานตามเวลา</td></tr>`
+                : `<tr><td colspan="9" class="empty-cell">ยังไม่มีพนักงานตามเวลา</td></tr>`
             }
           </tbody>
         </table>
@@ -7362,7 +7372,7 @@ function renderTimeEmployeeForm(employee) {
         </label>
 
         <label class="field">
-          <span>ประเภทพนักงาน</span>
+          <span>กลุ่มพนักงาน</span>
           <select name="employee_type" required>
             ${timeEmployeeTypeOptions
               .map(
@@ -7371,6 +7381,11 @@ function renderTimeEmployeeForm(employee) {
               )
               .join("")}
           </select>
+        </label>
+
+        <label class="field">
+          <span>OT บาท/ชม.</span>
+          <input name="ot_hourly_rate" type="number" min="0" step="1" value="${employee ? escapeHtml(String(employee.ot_hourly_rate || TIME_OT_HOURLY_RATE)) : TIME_OT_HOURLY_RATE}" required />
         </label>
 
         <button class="btn btn-primary form-submit" type="submit">
@@ -7390,6 +7405,7 @@ function renderTimeEmployeeRow(employee, canManage, canDelete) {
       <td>${escapeHtml(employee.fullname)}</td>
       <td><span class="badge ${employee.employee_type === "special" ? "badge-warning" : "badge-success"}">${escapeHtml(typeOption.label)}</span></td>
       <td>${typeOption.dailyWage.toLocaleString("th-TH")} บาท</td>
+      <td>${(Number(employee.ot_hourly_rate) || TIME_OT_HOURLY_RATE).toLocaleString("th-TH")} บาท/ชม.</td>
       <td>${formatDate(employee.created_at)}</td>
       <td>${formatDate(employee.updated_at)}</td>
       <td>
@@ -7461,7 +7477,8 @@ function bindTimeEmployeeEvents(user) {
     const payload = {
       emp_code: empCode,
       fullname: String(form.get("fullname") || ""),
-      employee_type: String(form.get("employee_type") || "normal")
+      employee_type: String(form.get("employee_type") || "normal"),
+      ot_hourly_rate: Number(form.get("ot_hourly_rate")) || TIME_OT_HOURLY_RATE
     };
 
     if (!payload.fullname.trim()) {

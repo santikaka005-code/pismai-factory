@@ -29,6 +29,21 @@ create table if not exists public.employees (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.time_employees (
+  id bigserial primary key,
+  emp_code text not null unique,
+  fullname text not null,
+  employee_type text not null default 'normal',
+  daily_wage numeric(12,2) not null default 347,
+  ot_hourly_rate numeric(12,2) not null default 50,
+  status text not null default 'Active',
+  note text,
+  created_by text,
+  updated_by text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.wage_rates (
   id bigserial primary key,
   item_type text not null,
@@ -105,6 +120,8 @@ create table if not exists public.audit_logs (
 
 create index if not exists idx_employees_emp_code on public.employees(emp_code);
 create index if not exists idx_employees_pay_group on public.employees(pay_group);
+create index if not exists idx_time_employees_emp_code on public.time_employees(emp_code);
+create index if not exists idx_time_employees_employee_type on public.time_employees(employee_type);
 create index if not exists idx_production_records_date on public.production_records(record_date);
 create index if not exists idx_production_records_employee on public.production_records(employee_id);
 create index if not exists idx_production_records_pay_group on public.production_records(pay_group);
@@ -130,6 +147,11 @@ create trigger trg_employees_updated_at
 before update on public.employees
 for each row execute function public.set_updated_at();
 
+drop trigger if exists trg_time_employees_updated_at on public.time_employees;
+create trigger trg_time_employees_updated_at
+before update on public.time_employees
+for each row execute function public.set_updated_at();
+
 drop trigger if exists trg_production_records_updated_at on public.production_records;
 create trigger trg_production_records_updated_at
 before update on public.production_records
@@ -142,6 +164,7 @@ for each row execute function public.set_updated_at();
 
 alter table public.account_users enable row level security;
 alter table public.employees enable row level security;
+alter table public.time_employees enable row level security;
 alter table public.wage_rates enable row level security;
 alter table public.production_sessions enable row level security;
 alter table public.production_records enable row level security;
