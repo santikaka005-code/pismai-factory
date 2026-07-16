@@ -257,7 +257,18 @@ def employee_from_payload(payload: dict) -> dict:
 
 def time_employee_from_payload(payload: dict) -> dict:
     employee_type = str(payload.get("employee_type", "normal")).strip() or "normal"
-    daily_wage = payload.get("daily_wage", 365 if employee_type == "special" else 347)
+    employee_type_aliases = {
+        "normal": "normal_347",
+        "special": "special_365",
+    }
+    employee_type = employee_type_aliases.get(employee_type, employee_type)
+    type_daily_wages = {
+        "normal_347": 347,
+        "special_365": 365,
+        "special_347": 347,
+        "special_500": 500,
+    }
+    daily_wage = payload.get("daily_wage", type_daily_wages.get(employee_type, 347))
     ot_hourly_rate = payload.get("ot_hourly_rate", 50)
     employee = {
         "emp_code": str(payload.get("emp_code", "")).strip(),

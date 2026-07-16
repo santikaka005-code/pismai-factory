@@ -33,7 +33,7 @@ create table if not exists public.time_employees (
   id bigserial primary key,
   emp_code text not null unique,
   fullname text not null,
-  employee_type text not null default 'normal',
+  employee_type text not null default 'normal_347',
   daily_wage numeric(12,2) not null default 347,
   ot_hourly_rate numeric(12,2) not null default 50,
   status text not null default 'Active',

@@ -16,8 +16,10 @@ const TIME_STANDARD_HOURS = 8;
 const TIME_NORMAL_HOURLY_RATE = TIME_DAILY_WAGE / TIME_STANDARD_HOURS;
 const TIME_OT_HOURLY_RATE = 50;
 const timeEmployeeTypeOptions = [
-  { id: "normal", label: "กลุ่มทั่วไป", dailyWage: TIME_DAILY_WAGE },
-  { id: "special", label: "กลุ่มพิเศษ", dailyWage: TIME_SPECIAL_DAILY_WAGE }
+  { id: "normal_347", label: "กลุ่มปกติ - 347 บาท/วัน", shortLabel: "กลุ่มปกติ-347", category: "normal", dailyWage: 347 },
+  { id: "special_365", label: "กลุ่มพิเศษ - 365 บาท/วัน", shortLabel: "กลุ่มพิเศษ-365", category: "special", dailyWage: 365 },
+  { id: "special_347", label: "กลุ่มพิเศษ - 347 บาท/วัน", shortLabel: "กลุ่มพิเศษ-347", category: "special", dailyWage: 347 },
+  { id: "special_500", label: "กลุ่มพิเศษ - 500 บาท/วัน", shortLabel: "กลุ่มพิเศษ-500", category: "special", dailyWage: 500 }
 ];
 const TIME_SPECIAL_WAGE_TABLE = {
   2: 91,
@@ -686,6 +688,7 @@ let summaryReportExportMessage = "";
 let summaryReportExportMessageType = "success";
 let groupReportStartDate = new Date().toISOString().slice(0, 10);
 let groupReportEndDate = new Date().toISOString().slice(0, 10);
+let groupReportMode = "production";
 let groupReportGroup = "all";
 let groupReportFruit = "all";
 let groupReportView = "group";
@@ -1705,7 +1708,9 @@ async function apiDeleteEmployee(id) {
 
 function normalizeTimeEmployeeType(value) {
   const type = String(value || "").trim();
-  return timeEmployeeTypeOptions.some((option) => option.id === type) ? type : "normal";
+  if (type === "normal") return "normal_347";
+  if (type === "special") return "special_365";
+  return timeEmployeeTypeOptions.some((option) => option.id === type) ? type : "normal_347";
 }
 
 function getTimeEmployeeTypeOption(value) {
@@ -1713,12 +1718,16 @@ function getTimeEmployeeTypeOption(value) {
   return timeEmployeeTypeOptions.find((option) => option.id === type) || timeEmployeeTypeOptions[0];
 }
 
+function isSpecialTimeEmployeeType(value) {
+  return getTimeEmployeeTypeOption(value).category === "special";
+}
+
 function defaultTimeEmployeesFromWeightEmployees() {
   return getEmployees().map((employee) => ({
     id: employee.id,
     emp_code: employee.emp_code,
     fullname: employee.fullname,
-    employee_type: "normal",
+    employee_type: "normal_347",
     daily_wage: TIME_DAILY_WAGE,
     ot_hourly_rate: TIME_OT_HOURLY_RATE,
     status: employee.status || "Active",
@@ -2335,7 +2344,7 @@ function saveProductionRecords(records) {
 }
 
 function normalizeTimeRecordWage(record) {
-  if (!record || record.employee_type !== "special") return record;
+  if (!record || Number(record.daily_wage) !== TIME_SPECIAL_DAILY_WAGE) return record;
   return {
     ...record,
     daily_wage: TIME_SPECIAL_DAILY_WAGE,
@@ -6431,7 +6440,7 @@ function renderTimeReport(user, moduleItem) {
             <div><span>ตัวอย่างมาตรฐาน</span><strong>08:00-17:00 = 8:00 ชั่วโมง</strong></div>
             <div><span>เริ่มงานช่วงบ่าย</span><strong>ไม่หักเวลาพัก</strong></div>
             <div><span>ค่าแรงไม่ครบ 8 ชั่วโมง</span><strong>ปัดเป็นบาท: ชั่วโมงสุทธิ × ฐานรายวันของพนักงาน ÷ 8</strong></div>
-            <div><span>ฐานรายวัน</span><strong>กลุ่มทั่วไป ${TIME_DAILY_WAGE} บาท · กลุ่มพิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
+            <div><span>ฐานรายวัน</span><strong>กลุ่มปกติ ${TIME_DAILY_WAGE} บาท · กลุ่มพิเศษเลือกได้ 347 / 365 / 500 บาท</strong></div>
             <div><span>ค่าล่วงเวลา</span><strong>ส่วนที่เกิน 8 ชั่วโมง × ค่า OT ที่ตั้งไว้รายคน</strong></div>
             <div><span>กันกรอกซ้ำ</span><strong>พนักงาน 1 คนบันทึกได้ 1 รายการต่อวัน หากผิดให้กดแก้ไขรายการเดิม</strong></div>
             <div><span>ประวัติการแก้ไข</span><strong>แก้ภายใน 2 นาทีไม่ลง Log · เกิน 2 นาทีหรือข้ามวันจะลง Audit Log</strong></div>
@@ -6580,7 +6589,7 @@ function renderWeeklyTimeEntry(user) {
             <div><span>พักกลางวัน</span><strong>12:00-13:00</strong></div>
             <div><span>เริ่มเที่ยงหรือบ่าย</span><strong>ไม่หักพัก</strong></div>
             <div><span>ค่าแรงปกติ</span><strong>ฐานรายวันของพนักงาน ÷ 8 × ชั่วโมงสุทธิ แล้วปัดเป็นบาท</strong></div>
-            <div><span>ฐานครบ 8 ชั่วโมง</span><strong>กลุ่มทั่วไป ${TIME_DAILY_WAGE} บาท · กลุ่มพิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
+            <div><span>ฐานครบ 8 ชั่วโมง</span><strong>กลุ่มปกติ ${TIME_DAILY_WAGE} บาท · กลุ่มพิเศษเลือกได้ 347 / 365 / 500 บาท</strong></div>
             <div><span>เกิน 8 ชั่วโมง</span><strong>คิด OT ตามค่าที่ตั้งไว้ในพนักงานแต่ละคน</strong></div>
             <div><span>กันกรอกซ้ำ</span><strong>วันไหนมีรายการแล้ว ระบบจะให้แก้รายการเดิมแทนการบันทึกซ้ำ</strong></div>
           </div>
@@ -6930,7 +6939,7 @@ function renderEmployeeManagementHub(user, moduleItem) {
         </button>
         <button class="settings-tile" data-route="time-employees" type="button">
           <strong>พนักงานตามเวลา</strong>
-          <span>สร้าง แก้ไข ลบพนักงานที่ใช้กับหน้าเวลา พร้อมแยกกลุ่มทั่วไป/พิเศษและค่า OT รายคน</span>
+          <span>สร้าง แก้ไข ลบพนักงานที่ใช้กับหน้าเวลา พร้อมแยกกลุ่มปกติ/พิเศษและค่า OT รายคน</span>
         </button>
       </div>
     </section>
@@ -7260,7 +7269,7 @@ function renderTimeEmployees(user, moduleItem) {
   const employees = apiGetTimeEmployees(timeEmployeeSearch);
   const allEmployees = getTimeEmployees();
   const activeEmployees = allEmployees.filter((employee) => employee.status === "Active").length;
-  const specialEmployees = allEmployees.filter((employee) => employee.employee_type === "special").length;
+  const specialEmployees = allEmployees.filter((employee) => isSpecialTimeEmployeeType(employee.employee_type)).length;
   const canManage = canManageEmployees(user);
   const canDelete = canDeleteEmployees(user);
   const editingEmployee = editingTimeEmployeeId
@@ -7281,7 +7290,7 @@ function renderTimeEmployees(user, moduleItem) {
       <div class="metrics-grid metrics-spaced">
         <div class="metric-card"><span>พนักงานตามเวลาทั้งหมด</span><strong>${allEmployees.length.toLocaleString("th-TH")}</strong><small>ฐานแยกจากพนักงานน้ำหนัก</small></div>
         <div class="metric-card"><span>ใช้งานอยู่</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>พร้อมเลือกในหน้าบันทึกเวลา</small></div>
-        <div class="metric-card"><span>กลุ่มพิเศษ</span><strong>${specialEmployees.toLocaleString("th-TH")}</strong><small>${TIME_SPECIAL_DAILY_WAGE.toLocaleString("th-TH")} บาท/วัน</small></div>
+        <div class="metric-card"><span>กลุ่มพิเศษ</span><strong>${specialEmployees.toLocaleString("th-TH")}</strong><small>รองรับฐาน 347 / 365 / 500</small></div>
         <div class="metric-card"><span>ผลค้นหา</span><strong>${employees.length.toLocaleString("th-TH")}</strong><small>${timeEmployeeSearch ? escapeHtml(timeEmployeeSearch) : "ทั้งหมด"}</small></div>
       </div>
 
@@ -7377,7 +7386,7 @@ function renderTimeEmployeeForm(employee) {
             ${timeEmployeeTypeOptions
               .map(
                 (option) =>
-                  `<option value="${option.id}" ${selectedType === option.id ? "selected" : ""}>${escapeHtml(option.label)} - ${option.dailyWage.toLocaleString("th-TH")} บาท/วัน</option>`
+                  `<option value="${option.id}" ${selectedType === option.id ? "selected" : ""}>${escapeHtml(option.label)}</option>`
               )
               .join("")}
           </select>
@@ -7403,7 +7412,7 @@ function renderTimeEmployeeRow(employee, canManage, canDelete) {
       <td>${employee.id}</td>
       <td><strong>${escapeHtml(employee.emp_code)}</strong></td>
       <td>${escapeHtml(employee.fullname)}</td>
-      <td><span class="badge ${employee.employee_type === "special" ? "badge-warning" : "badge-success"}">${escapeHtml(typeOption.label)}</span></td>
+      <td><span class="badge ${typeOption.category === "special" ? "badge-warning" : "badge-success"}">${escapeHtml(typeOption.shortLabel || typeOption.label)}</span></td>
       <td>${typeOption.dailyWage.toLocaleString("th-TH")} บาท</td>
       <td>${(Number(employee.ot_hourly_rate) || TIME_OT_HOURLY_RATE).toLocaleString("th-TH")} บาท/ชม.</td>
       <td>${formatDate(employee.created_at)}</td>
@@ -10239,6 +10248,134 @@ function getGroupReportTotals(groupRows) {
   );
 }
 
+function getTimeGroupReportGroups() {
+  const existingGroups = new Set(
+    getTimeEmployees().map((employee) => getTimeEmployeeTypeOption(employee.employee_type).shortLabel)
+  );
+  timeEmployeeTypeOptions.forEach((option) => existingGroups.add(option.shortLabel));
+  return Array.from(existingGroups).filter(Boolean);
+}
+
+function getTimeGroupReportRecords() {
+  const range = normalizeGroupReportRange();
+  const employees = getTimeEmployees();
+  const employeeMap = new Map(employees.map((employee) => [String(employee.id), employee]));
+  const employeeCodeMap = new Map(employees.map((employee) => [String(employee.emp_code), employee]));
+  const records = getTimeRecords().filter((record) => {
+    const recordDate = record.record_date || "";
+    return recordDate >= range.startDate && recordDate <= range.endDate;
+  });
+
+  return combineTimeRecordsByEmployeeDate(records)
+    .map((record) => {
+      const employee =
+        employeeMap.get(String(record.employee_id || "")) ||
+        employeeCodeMap.get(String(record.emp_code || ""));
+      const typeOption = getTimeEmployeeTypeOption(record.employee_type || employee?.employee_type);
+      const enrichedRecord = {
+        ...record,
+        employee,
+        employee_type: typeOption.id,
+        employee_type_label: typeOption.shortLabel,
+        daily_wage: Number(record.daily_wage || employee?.daily_wage || typeOption.dailyWage),
+        ot_hourly_rate: Number(record.ot_hourly_rate || employee?.ot_hourly_rate || TIME_OT_HOURLY_RATE),
+        fullname: record.fullname || employee?.fullname || "-",
+        emp_code: record.emp_code || employee?.emp_code || "-",
+        department: record.department || employee?.department || "-"
+      };
+      const receiptRow = getTimeReceiptRow(enrichedRecord);
+      return {
+        ...enrichedRecord,
+        normal_hours: receiptRow.normalHours,
+        ot_hours: receiptRow.otHours,
+        normal_amount: receiptRow.normalAmount,
+        ot_amount: receiptRow.otAmount,
+        total_amount: receiptRow.totalAmount
+      };
+    })
+    .filter((record) => groupReportGroup === "all" || record.employee_type_label === groupReportGroup)
+    .sort((a, b) =>
+      `${a.employee_type_label} ${a.record_date || ""} ${a.emp_code || ""}`.localeCompare(
+        `${b.employee_type_label} ${b.record_date || ""} ${b.emp_code || ""}`,
+        "th"
+      )
+    );
+}
+
+function summarizeTimeGroupReportRows(records) {
+  const summaries = new Map();
+  records.forEach((record) => {
+    const key = record.employee_type_label;
+    if (!summaries.has(key)) {
+      summaries.set(key, {
+        key,
+        pay_group: key,
+        employees: new Set(),
+        records: 0,
+        net_minutes: 0,
+        normal_hours: 0,
+        ot_hours: 0,
+        normal_amount: 0,
+        ot_amount: 0,
+        amount: 0
+      });
+    }
+    const summary = summaries.get(key);
+    summary.employees.add(record.employee_id || record.emp_code || record.fullname || "");
+    summary.records += 1;
+    summary.net_minutes += Number(record.net_minutes) || 0;
+    summary.normal_hours += Number(record.normal_hours) || 0;
+    summary.ot_hours += Number(record.ot_hours) || 0;
+    summary.normal_amount += Number(record.normal_amount) || 0;
+    summary.ot_amount += Number(record.ot_amount) || 0;
+    summary.amount += Number(record.total_amount) || 0;
+  });
+  return Array.from(summaries.values()).sort((a, b) => a.pay_group.localeCompare(b.pay_group, "th"));
+}
+
+function getTimeGroupReportEmployeeRows(records) {
+  const rows = new Map();
+  records.forEach((record) => {
+    const key = record.employee_id || record.emp_code || record.fullname || "";
+    if (!rows.has(key)) {
+      rows.set(key, {
+        pay_group: record.employee_type_label,
+        emp_code: record.emp_code || "-",
+        fullname: record.fullname || "-",
+        records: 0,
+        net_minutes: 0,
+        normal_hours: 0,
+        ot_hours: 0,
+        amount: 0
+      });
+    }
+    const row = rows.get(key);
+    row.records += 1;
+    row.net_minutes += Number(record.net_minutes) || 0;
+    row.normal_hours += Number(record.normal_hours) || 0;
+    row.ot_hours += Number(record.ot_hours) || 0;
+    row.amount += Number(record.total_amount) || 0;
+  });
+  return Array.from(rows.values()).sort((a, b) =>
+    `${a.pay_group} ${a.emp_code}`.localeCompare(`${b.pay_group} ${b.emp_code}`, "th")
+  );
+}
+
+function getTimeGroupReportTotals(groupRows) {
+  return groupRows.reduce(
+    (totals, row) => {
+      row.employees.forEach((employee) => totals.employees.add(employee));
+      totals.records += row.records;
+      totals.net_minutes += row.net_minutes;
+      totals.normal_hours += row.normal_hours;
+      totals.ot_hours += row.ot_hours;
+      totals.amount += row.amount;
+      return totals;
+    },
+    { employees: new Set(), records: 0, net_minutes: 0, normal_hours: 0, ot_hours: 0, amount: 0 }
+  );
+}
+
 function renderGroupReportSummaryRow(row, showFruit = false) {
   return `
     <tr>
@@ -10285,6 +10422,51 @@ function renderGroupReportDetailRow(record) {
   `;
 }
 
+function renderTimeGroupReportSummaryRow(row) {
+  return `
+    <tr>
+      <td><strong>${escapeHtml(row.pay_group)}</strong></td>
+      <td>${row.employees.size.toLocaleString("th-TH")}</td>
+      <td>${row.records.toLocaleString("th-TH")}</td>
+      <td>${escapeHtml(formatMinutesToHourText(row.net_minutes))}</td>
+      <td>${numberText(row.normal_hours)}</td>
+      <td>${numberText(row.ot_hours)}</td>
+      <td><strong>${money(row.amount)}</strong></td>
+    </tr>
+  `;
+}
+
+function renderTimeGroupReportEmployeeRow(row) {
+  return `
+    <tr>
+      <td>${escapeHtml(row.pay_group)}</td>
+      <td><strong>${escapeHtml(row.emp_code)}</strong></td>
+      <td>${escapeHtml(row.fullname)}</td>
+      <td>${row.records.toLocaleString("th-TH")}</td>
+      <td>${escapeHtml(formatMinutesToHourText(row.net_minutes))}</td>
+      <td>${numberText(row.normal_hours)}</td>
+      <td>${numberText(row.ot_hours)}</td>
+      <td><strong>${money(row.amount)}</strong></td>
+    </tr>
+  `;
+}
+
+function renderTimeGroupReportDetailRow(record) {
+  return `
+    <tr>
+      <td>${escapeHtml(record.record_date || "-")}</td>
+      <td>${escapeHtml(record.employee_type_label || "-")}</td>
+      <td><strong>${escapeHtml(record.emp_code || "-")}</strong></td>
+      <td>${escapeHtml(record.fullname || "-")}</td>
+      <td>${escapeHtml(record.clock_in || "-")}</td>
+      <td>${escapeHtml(record.clock_out || "-")}</td>
+      <td>${escapeHtml(formatMinutesToHourText(record.net_minutes))}</td>
+      <td>${numberText(record.ot_hourly_rate || TIME_OT_HOURLY_RATE)}</td>
+      <td><strong>${money(record.total_amount || 0)}</strong></td>
+    </tr>
+  `;
+}
+
 function renderGroupReportBarChart(rows) {
   const maxValue = Math.max(1, ...rows.map((row) => row.total));
   return `
@@ -10306,14 +10488,56 @@ function renderGroupReportBarChart(rows) {
   `;
 }
 
+function renderTimeGroupReportContent(records, groupRows, employeeRows, totals) {
+  return `
+    <div class="summary-metrics">
+      <div class="metric-card metric-green"><span>เวลาสุทธิรวม</span><strong>${escapeHtml(formatMinutesToHourText(totals.net_minutes))}</strong><small>${formatDecimalHours(totals.net_minutes)} ชั่วโมง</small></div>
+      <div class="metric-card metric-blue"><span>ยอดเงินรวม</span><strong>${money(totals.amount)}</strong><small>รวมเงินปกติและ OT</small></div>
+      <div class="metric-card metric-purple"><span>จำนวนกลุ่ม</span><strong>${groupRows.length.toLocaleString("th-TH")}</strong><small>${groupReportGroup === "all" ? "ทุกกลุ่ม" : groupReportGroup}</small></div>
+      <div class="metric-card metric-orange"><span>จำนวนคน</span><strong>${totals.employees.size.toLocaleString("th-TH")} คน</strong><small>${records.length.toLocaleString("th-TH")} รายการ</small></div>
+    </div>
+
+    <section class="table-card">
+      <div class="table-heading">สรุปตามกลุ่มเวลา</div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th></tr></thead>
+          <tbody>${groupRows.length ? groupRows.map(renderTimeGroupReportSummaryRow).join("") : `<tr><td colspan="7" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="table-card">
+      <div class="table-heading">รายละเอียดพนักงานตามกลุ่มเวลา</div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>วัน</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th></tr></thead>
+          <tbody>${employeeRows.length ? employeeRows.map(renderTimeGroupReportEmployeeRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="table-card">
+      <div class="table-heading">รายละเอียดรายการเวลา</div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>วันที่</th><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>เข้า</th><th>ออก</th><th>สุทธิ</th><th>OT/ชม.</th><th>รวมเงิน</th></tr></thead>
+          <tbody>${records.length ? records.slice(0, 200).map(renderTimeGroupReportDetailRow).join("") : `<tr><td colspan="9" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
 function renderSummaryGroupReport(moduleItem) {
   const range = normalizeGroupReportRange();
-  const records = getGroupReportRecords();
-  const groupRows = summarizeGroupReportRows(records, "group");
-  const fruitRows = summarizeGroupReportRows(records, "fruit");
-  const employeeRows = getGroupReportEmployeeRows(records);
-  const totals = getGroupReportTotals(groupRows);
-  const groupOptions = ["all", ...getGroupReportPayGroups()];
+  const isTimeReport = groupReportMode === "time";
+  const records = isTimeReport ? getTimeGroupReportRecords() : getGroupReportRecords();
+  const groupRows = isTimeReport ? summarizeTimeGroupReportRows(records) : summarizeGroupReportRows(records, "group");
+  const fruitRows = isTimeReport ? [] : summarizeGroupReportRows(records, "fruit");
+  const employeeRows = isTimeReport ? getTimeGroupReportEmployeeRows(records) : getGroupReportEmployeeRows(records);
+  const totals = isTimeReport ? getTimeGroupReportTotals(groupRows) : getGroupReportTotals(groupRows);
+  const groupOptions = ["all", ...(isTimeReport ? getTimeGroupReportGroups() : getGroupReportPayGroups())];
   const fruitOptions = [{ id: "all", label: "ทั้งหมด" }, ...productionFruitOptions.map((item) => ({ id: item.id, label: item.label }))];
 
   return `
@@ -10321,7 +10545,7 @@ function renderSummaryGroupReport(moduleItem) {
       <div class="summary-header">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>ดูรายละเอียดตามกลุ่มรับเงิน เลือกผลไม้และส่วนรายงานก่อน Export ได้</p>
+          <p>ดูรายละเอียดตามกลุ่มของงานน้ำหนักหรือกลุ่มของพนักงานเวลา</p>
         </div>
         <button class="btn btn-outline" type="button" data-route="summary-all">กลับไปสรุปผลทั้งหมด</button>
       </div>
@@ -10331,6 +10555,15 @@ function renderSummaryGroupReport(moduleItem) {
           ? `<div class="alert ${groupReportMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(groupReportMessage)}</div>`
           : ""
       }
+
+      <div class="module-tabs">
+        <button class="module-tab ${groupReportMode === "production" ? "active" : ""}" type="button" data-group-report-mode="production">
+          รายงานแบบกลุ่มตามน้ำหนัก
+        </button>
+        <button class="module-tab ${groupReportMode === "time" ? "active" : ""}" type="button" data-group-report-mode="time">
+          รายงานแบบกลุ่มตามเวลา
+        </button>
+      </div>
 
       <section class="panel group-report-controls">
         <form class="group-report-form" id="groupReportForm">
@@ -10348,24 +10581,26 @@ function renderSummaryGroupReport(moduleItem) {
               ${groupOptions.map((group) => `<option value="${escapeHtml(group)}" ${groupReportGroup === group ? "selected" : ""}>${escapeHtml(group === "all" ? "ทุกกลุ่ม" : group)}</option>`).join("")}
             </select>
           </label>
-          <label class="field">
-            <span>ผลไม้</span>
-            <select name="fruit_type">
-              ${fruitOptions.map((fruit) => `<option value="${escapeHtml(fruit.id)}" ${groupReportFruit === fruit.id ? "selected" : ""}>${escapeHtml(fruit.label)}</option>`).join("")}
-            </select>
-          </label>
-          <label class="field">
-            <span>มุมมอง</span>
-            <select name="view_mode">
-              <option value="group" ${groupReportView === "group" ? "selected" : ""}>ตามกลุ่ม</option>
-              <option value="fruit" ${groupReportView === "fruit" ? "selected" : ""}>ตามกลุ่ม + ผลไม้</option>
-            </select>
-          </label>
+          ${isTimeReport ? "" : `
+            <label class="field">
+              <span>ผลไม้</span>
+              <select name="fruit_type">
+                ${fruitOptions.map((fruit) => `<option value="${escapeHtml(fruit.id)}" ${groupReportFruit === fruit.id ? "selected" : ""}>${escapeHtml(fruit.label)}</option>`).join("")}
+              </select>
+            </label>
+            <label class="field">
+              <span>มุมมอง</span>
+              <select name="view_mode">
+                <option value="group" ${groupReportView === "group" ? "selected" : ""}>ตามกลุ่ม</option>
+                <option value="fruit" ${groupReportView === "fruit" ? "selected" : ""}>ตามกลุ่ม + ผลไม้</option>
+              </select>
+            </label>
+          `}
           <button class="btn btn-primary" type="submit">แสดงข้อมูล</button>
         </form>
       </section>
 
-      <section class="summary-export-panel group-report-export-panel">
+      ${isTimeReport ? "" : `<section class="summary-export-panel group-report-export-panel">
         <div>
           <strong>Export / Print รายงานแบบกลุ่ม</strong>
           <span>เลือกก่อนพิมพ์ว่าจะส่งออกส่วนไหนบ้าง</span>
@@ -10393,9 +10628,10 @@ function renderSummaryGroupReport(moduleItem) {
             `
             : ""
         }
-      </section>
+      </section>`}
 
-      <div class="summary-metrics">
+      ${isTimeReport ? renderTimeGroupReportContent(records, groupRows, employeeRows, totals) : `
+        <div class="summary-metrics">
         <div class="metric-card metric-green"><span>น้ำหนักรวม</span><strong>${numberText(totals.total)} กก.</strong><small>น้ำ ${numberText(totals.water)} | ดอก ${numberText(totals.flower)}</small></div>
         <div class="metric-card metric-blue"><span>ยอดเงินรวม</span><strong>${money(totals.amount)}</strong><small>ตามช่วงวันที่และตัวกรอง</small></div>
         <div class="metric-card metric-purple"><span>จำนวนกลุ่ม</span><strong>${groupRows.length.toLocaleString("th-TH")}</strong><small>${groupReportGroup === "all" ? "ทุกกลุ่ม" : groupReportGroup}</small></div>
@@ -10451,6 +10687,7 @@ function renderSummaryGroupReport(moduleItem) {
           </table>
         </div>
       </section>
+      `}
     </section>
   `;
 }
@@ -10517,13 +10754,25 @@ async function exportGroupReport(user, format) {
 }
 
 function bindSummaryGroupReportEvents(user) {
+  document.querySelectorAll("[data-group-report-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      groupReportMode = button.dataset.groupReportMode || "production";
+      groupReportGroup = "all";
+      groupReportFruit = "all";
+      groupReportView = "group";
+      groupReportMessage = "";
+      groupReportExportMenuOpen = false;
+      render();
+    });
+  });
+
   document.querySelector("#groupReportForm")?.addEventListener("change", (event) => {
     const form = new FormData(event.currentTarget);
     groupReportStartDate = form.get("start_date") || new Date().toISOString().slice(0, 10);
     groupReportEndDate = form.get("end_date") || groupReportStartDate;
     groupReportGroup = form.get("pay_group") || "all";
-    groupReportFruit = form.get("fruit_type") || "all";
-    groupReportView = form.get("view_mode") || "group";
+    groupReportFruit = groupReportMode === "time" ? "all" : form.get("fruit_type") || "all";
+    groupReportView = groupReportMode === "time" ? "group" : form.get("view_mode") || "group";
     groupReportMessage = "";
     groupReportExportMenuOpen = false;
     render();
