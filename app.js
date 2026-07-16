@@ -264,7 +264,7 @@ modules.splice(
   },
   {
     id: "compare-data",
-    label: "ลงบันทึกหักเงิน",
+    label: "บันทึกหักเงิน",
     roles: ["admin", "hr"],
     description: "บันทึกรายการหักเงินรายรอบสำหรับพนักงานเหมาน้ำหนักและพนักงานเหมาเวลา",
     icon: "−"
@@ -1589,7 +1589,7 @@ async function apiCreateDeduction(payload, actor) {
   const employee = findDeductionEmployee(kind, payload.employee_id);
   const amount = Number(payload.amount || 0);
   if (!employee) throw new Error("กรุณาเลือกพนักงาน");
-  if (!payload.start_date || !payload.end_date) throw new Error("กรุณาเลือกช่วงวันที่");
+  if (!payload.start_date) throw new Error("กรุณาเลือกวันที่หักเงิน");
   if (amount <= 0) throw new Error("กรุณากรอกจำนวนเงินที่ต้องหักมากกว่า 0");
   const baseRecord = normalizeDeductionRecord({
     employee_kind: kind,
@@ -4315,9 +4315,10 @@ function setDeductionMessage(message, type = "success") {
 }
 
 function getCurrentDeductionContext() {
-  const range = normalizeDateRange(deductionStartDate, deductionEndDate);
-  deductionStartDate = range.startDate;
-  deductionEndDate = range.endDate;
+  const selectedDate = deductionStartDate || new Date().toISOString().slice(0, 10);
+  const range = { startDate: selectedDate, endDate: selectedDate };
+  deductionStartDate = selectedDate;
+  deductionEndDate = selectedDate;
   const employees = getDeductionEmployeeOptions(deductionActiveTab);
   const selectedEmployeeId = employees.some((employee) => String(employee.id) === String(deductionEmployeeId))
     ? deductionEmployeeId
@@ -4346,7 +4347,7 @@ function renderDeductionEmployeeOptions(employees, selectedId) {
 function renderDeductionRow(record) {
   return `
     <tr>
-      <td>${escapeHtml(record.start_date)}${record.end_date !== record.start_date ? ` ถึง ${escapeHtml(record.end_date)}` : ""}</td>
+      <td><span class="deduction-date-cell">${escapeHtml(record.start_date)}</span></td>
       <td><strong>${escapeHtml(record.emp_code)}</strong></td>
       <td>${escapeHtml(record.employee_name)}</td>
       <td>${escapeHtml(record.deduction_label)}</td>
@@ -4368,7 +4369,6 @@ function renderDeductionEntry(user, moduleItem) {
   const editing = context.editingRecord;
   const formEmployeeId = editing?.employee_id || context.selectedEmployee?.id || "";
   const formStartDate = editing?.start_date || context.range.startDate;
-  const formEndDate = editing?.end_date || context.range.endDate;
   const totalDeduction = sumDeductions(context.records);
   const employeeCount = new Set(context.records.map((record) => record.employee_id || record.emp_code)).size;
 
@@ -4377,9 +4377,9 @@ function renderDeductionEntry(user, moduleItem) {
       <div class="summary-header">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>บันทึกรายการหักเงินลงฐานข้อมูลกลาง Supabase เพื่อให้ทุกเครื่องเห็นข้อมูลชุดเดียวกัน และนำไปหักในรายงาน/ใบเสร็จตามช่วงวันที่ Export</p>
+          <p>บันทึกรายการหักรายวันลงฐานข้อมูลกลาง และนำยอดไปคำนวณอัตโนมัติในรายงานและใบเสร็จ</p>
         </div>
-        <span class="badge badge-success">Supabase Only</span>
+        <span class="badge badge-success deduction-cloud-badge">ฐานข้อมูลกลางพร้อมใช้งาน</span>
       </div>
 
       <div class="module-tabs deduction-tabs">
@@ -4394,23 +4394,31 @@ function renderDeductionEntry(user, moduleItem) {
       }
 
       <section class="panel deduction-control-panel">
-        <form class="time-summary-form" id="deductionFilterForm">
+        <div class="deduction-control-copy">
+          <strong>ดูรายการตามวันที่</strong>
+          <span>เลือกวันที่ที่ต้องการตรวจสอบหรือเพิ่มรายการหักเงิน</span>
+        </div>
+        <form class="deduction-filter-form" id="deductionFilterForm">
           <label class="field">
-            <span>จากวันที่</span>
+            <span>วันที่หักเงิน</span>
             <input name="start_date" type="date" value="${escapeHtml(context.range.startDate)}" required />
           </label>
-          <label class="field">
-            <span>ถึงวันที่</span>
-            <input name="end_date" type="date" value="${escapeHtml(context.range.endDate)}" required />
-          </label>
-          <button class="btn btn-outline" type="submit">โหลดจากฐานกลาง</button>
+          <button class="btn btn-outline deduction-load-button" type="submit">แสดงรายการ</button>
         </form>
       </section>
 
-      <div class="summary-metrics">
-        <div class="metric-card metric-blue"><span>รายการหัก</span><strong>${context.records.length.toLocaleString("th-TH")} รายการ</strong><small>${escapeHtml(context.range.startDate)} ถึง ${escapeHtml(context.range.endDate)}</small></div>
+      <div class="deduction-export-note">
+        <span class="deduction-export-note-mark">฿</span>
+        <div>
+          <strong>ระบบจะหักยอดให้อัตโนมัติ</strong>
+          <span>เมื่อช่วงวันที่ Export ครอบคลุมวันที่ ${escapeHtml(context.range.startDate)} รายการของวันนี้จะถูกรวมไปคำนวณทันที</span>
+        </div>
+      </div>
+
+      <div class="summary-metrics deduction-metrics">
+        <div class="metric-card metric-blue"><span>รายการหัก</span><strong>${context.records.length.toLocaleString("th-TH")} รายการ</strong><small>ประจำวันที่ ${escapeHtml(context.range.startDate)}</small></div>
         <div class="metric-card metric-green"><span>จำนวนพนักงาน</span><strong>${employeeCount.toLocaleString("th-TH")} คน</strong><small>${deductionActiveTab === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก"}</small></div>
-        <div class="metric-card metric-orange"><span>ยอดหักรวม</span><strong>${money(totalDeduction)}</strong><small>ยอดนี้จะถูกหักใน Export ที่อยู่ช่วงเดียวกัน</small></div>
+        <div class="metric-card metric-orange"><span>ยอดหักรวมวันนี้</span><strong>${money(totalDeduction)}</strong><small>ยอดสุทธิหลังรวมทุกรายการ</small></div>
       </div>
 
       <section class="panel deduction-form-panel">
@@ -4430,12 +4438,8 @@ function renderDeductionEntry(user, moduleItem) {
             </select>
           </label>
           <label class="field">
-            <span>จากวันที่</span>
+            <span>วันที่หักเงิน</span>
             <input name="start_date" type="date" value="${escapeHtml(formStartDate)}" required />
-          </label>
-          <label class="field">
-            <span>ถึงวันที่</span>
-            <input name="end_date" type="date" value="${escapeHtml(formEndDate)}" required />
           </label>
           <label class="field">
             <span>รายการหัก</span>
@@ -4451,17 +4455,23 @@ function renderDeductionEntry(user, moduleItem) {
             <span>หมายเหตุ</span>
             <input name="note" value="${escapeHtml(editing?.note || "")}" placeholder="รายละเอียดเพิ่มเติมถ้ามี" />
           </label>
-          <button class="btn btn-primary" type="submit" ${context.employees.length ? "" : "disabled"}>${editing ? "บันทึกการแก้ไข" : "บันทึกรายการหัก"}</button>
+          <button class="btn btn-primary deduction-submit-button" type="submit" ${context.employees.length ? "" : "disabled"}>${editing ? "บันทึกการแก้ไข" : "บันทึกรายการหัก"}</button>
         </form>
       </section>
 
       <section class="table-card">
-        <div class="table-heading">รายการหักเงินในช่วงวันที่เลือก</div>
+        <div class="table-heading deduction-table-heading">
+          <div>
+            <strong>รายการหักประจำวันที่ ${escapeHtml(context.range.startDate)}</strong>
+            <span>${deductionActiveTab === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก"}</span>
+          </div>
+          <span class="deduction-table-total">รวม ${money(totalDeduction)}</span>
+        </div>
         <div class="table-scroll">
           <table>
             <thead>
               <tr>
-                <th>ช่วงวันที่</th>
+                <th>วันที่</th>
                 <th>รหัส</th>
                 <th>ชื่อพนักงาน</th>
                 <th>รายการหัก</th>
@@ -4472,7 +4482,7 @@ function renderDeductionEntry(user, moduleItem) {
               </tr>
             </thead>
             <tbody>
-              ${context.records.length ? context.records.map(renderDeductionRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีรายการหักเงินในช่วงวันที่นี้</td></tr>`}
+              ${context.records.length ? context.records.map(renderDeductionRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีรายการหักเงินในวันนี้</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -4503,7 +4513,7 @@ function bindDeductionEvents(user) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     deductionStartDate = String(form.get("start_date") || deductionStartDate);
-    deductionEndDate = String(form.get("end_date") || deductionStartDate);
+    deductionEndDate = deductionStartDate;
     editingDeductionId = null;
     setDeductionMessage("กำลังโหลดรายการหักเงินจากฐานกลาง...");
     render();
@@ -4524,7 +4534,7 @@ function bindDeductionEvents(user) {
       employee_kind: deductionActiveTab,
       employee_id: Number(form.get("employee_id") || 0),
       start_date: String(form.get("start_date") || deductionStartDate),
-      end_date: String(form.get("end_date") || deductionEndDate),
+      end_date: String(form.get("start_date") || deductionStartDate),
       deduction_type: String(form.get("deduction_type") || "advance"),
       amount: Number(form.get("amount") || 0),
       note: String(form.get("note") || "")

@@ -763,7 +763,7 @@ input:disabled {
 .content {
   display: grid;
   width: min(1280px, 100%);
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 260px minmax(0, 1fr);
   gap: 20px;
   margin: 0 auto;
   padding: 24px 20px;
@@ -1615,6 +1615,51 @@ input:disabled {
 .badge-danger {
   color: var(--danger);
   background: var(--danger-soft);
+}
+
+.pay-group-pill {
+  display: inline-flex;
+  min-width: 96px;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
+}
+
+.pay-group-select {
+  border-width: 2px;
+  font-weight: 800;
+}
+
+.pay-group-factory {
+  border-color: #7dd3fc;
+  color: #075985;
+  background: #e0f2fe;
+}
+
+.pay-group-non {
+  border-color: #fcd34d;
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.pay-group-pui {
+  border-color: #86efac;
+  color: #166534;
+  background: #dcfce7;
+}
+
+.pay-group-custom {
+  border-color: #c4b5fd;
+  color: #5b21b6;
+  background: #ede9fe;
 }
 
 .table-card {
@@ -3355,5 +3400,239 @@ tr:last-child td {
   th,
   td {
     padding: 12px 10px;
+  }
+}
+
+/* Deduction entry */
+.deduction-page {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+}
+
+.deduction-page .summary-header {
+  align-items: flex-start;
+}
+
+.deduction-page .summary-header p {
+  max-width: 760px;
+  margin-bottom: 0;
+}
+
+.deduction-cloud-badge {
+  white-space: nowrap;
+}
+
+.deduction-tabs {
+  width: fit-content;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 4px;
+  background: #ffffff;
+}
+
+.deduction-tabs .module-tab {
+  min-height: 42px;
+  border: 0;
+  padding-inline: 18px;
+}
+
+.deduction-tabs .module-tab.active {
+  color: #ffffff;
+  background: var(--primary);
+}
+
+.deduction-control-panel {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  border-top: 4px solid var(--primary);
+  padding-block: 18px;
+}
+
+.deduction-control-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.deduction-control-copy strong {
+  color: #101828;
+  font-size: 16px;
+}
+
+.deduction-control-copy span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.deduction-filter-form {
+  display: grid;
+  grid-template-columns: minmax(190px, 230px) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.deduction-filter-form .field {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.deduction-filter-form input {
+  height: 42px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 0 12px;
+  color: #111827;
+  background: #ffffff;
+}
+
+.deduction-load-button,
+.deduction-submit-button {
+  min-height: 42px;
+  white-space: nowrap;
+}
+
+.deduction-export-note {
+  display: flex;
+  min-height: 68px;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid #a7d8d2;
+  border-radius: 8px;
+  padding: 13px 16px;
+  color: #134e4a;
+  background: #f0fdfa;
+}
+
+.deduction-export-note-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  place-items: center;
+  border-radius: 50%;
+  color: #ffffff;
+  background: var(--primary);
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.deduction-export-note div {
+  display: grid;
+  gap: 3px;
+}
+
+.deduction-export-note strong {
+  font-size: 14px;
+}
+
+.deduction-export-note div span {
+  color: #376b67;
+  font-size: 13px;
+}
+
+.deduction-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.deduction-form-panel {
+  border-top: 4px solid #2563eb;
+}
+
+.deduction-form {
+  grid-template-columns: minmax(210px, 1.35fr) minmax(160px, 0.85fr) minmax(190px, 1fr);
+  align-items: end;
+}
+
+.deduction-form .field {
+  min-width: 0;
+  margin: 0;
+}
+
+.deduction-form input,
+.deduction-form select {
+  width: 100%;
+}
+
+.deduction-submit-button {
+  width: 100%;
+  min-width: 156px;
+}
+
+.deduction-table-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.deduction-table-heading div {
+  display: grid;
+  gap: 3px;
+}
+
+.deduction-table-heading div > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.deduction-table-total {
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: #9a3412;
+  background: #fff7ed;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.deduction-date-cell {
+  color: #344054;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+@media (max-width: 920px) {
+  .deduction-control-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .deduction-filter-form,
+  .deduction-form,
+  .deduction-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .deduction-load-button,
+  .deduction-submit-button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 560px) {
+  .deduction-tabs {
+    width: 100%;
+  }
+
+  .deduction-tabs .module-tab {
+    flex: 1 1 0;
+    padding-inline: 10px;
+  }
+
+  .deduction-cloud-badge {
+    align-self: flex-start;
+  }
+
+  .deduction-table-heading {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
