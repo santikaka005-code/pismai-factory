@@ -567,6 +567,22 @@ function normalizeEmployeePayGroupValue(value) {
   return payGroup;
 }
 
+function getPayGroupToneClass(value) {
+  const payGroup = normalizeEmployeePayGroupValue(value);
+  const toneMap = new Map([
+    ["เหมาโรงงาน", "pay-group-factory"],
+    ["เหมา(นนท์)", "pay-group-non"],
+    ["เหมาปุ้ย", "pay-group-pui"]
+  ]);
+
+  return toneMap.get(payGroup) || "pay-group-custom";
+}
+
+function renderPayGroupBadge(value) {
+  const payGroup = normalizeEmployeePayGroupValue(value);
+  return `<span class="pay-group-pill ${getPayGroupToneClass(payGroup)}">${escapeHtml(payGroup)}</span>`;
+}
+
 const defaultWageRates = [
   {
     id: 1,
@@ -7153,7 +7169,7 @@ function renderEmployeeForm(employee) {
 
         <label class="field">
           <span>กลุ่มรับเงิน</span>
-          <select name="pay_group" required>
+          <select name="pay_group" class="pay-group-select ${getPayGroupToneClass(selectedPayGroup)}" data-pay-group-select required>
             <option value="">เลือกกลุ่มรับเงิน</option>
             ${payGroups
               .map(
@@ -7196,7 +7212,7 @@ function renderEmployeeRow(employee, canManage, canDelete) {
       <td><strong>${escapeHtml(employee.emp_code)}</strong></td>
       <td>${escapeHtml(employee.fullname)}</td>
       <td>${escapeHtml(employee.department)}</td>
-      <td>${escapeHtml(getEmployeePayGroup(employee))}</td>
+      <td>${renderPayGroupBadge(getEmployeePayGroup(employee))}</td>
       <td><span class="badge ${statusClass}">${escapeHtml(employee.status)}</span></td>
       <td>${formatDate(employee.created_at)}</td>
       <td>${formatDate(employee.updated_at)}</td>
@@ -7218,7 +7234,22 @@ function renderEmployeeRow(employee, canManage, canDelete) {
   `;
 }
 
+function updatePayGroupSelectTone(select) {
+  select.classList.remove(
+    "pay-group-factory",
+    "pay-group-non",
+    "pay-group-pui",
+    "pay-group-custom"
+  );
+  select.classList.add(getPayGroupToneClass(select.value));
+}
+
 function bindEmployeeEvents(user) {
+  document.querySelectorAll("[data-pay-group-select]").forEach((select) => {
+    updatePayGroupSelectTone(select);
+    select.addEventListener("change", () => updatePayGroupSelectTone(select));
+  });
+
   document.querySelector("#employeeSearchForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -10205,7 +10236,7 @@ function getGroupReportPayGroups() {
 
 function getGroupReportRecords() {
   const range = normalizeGroupReportRange();
-  const employees = getEmployees();
+  const employees = getEmployees().filter((employee) => employee.status === "Active");
   const employeeMap = new Map(employees.map((employee) => [String(employee.id), employee]));
   const employeeCodeMap = new Map(employees.map((employee) => [String(employee.emp_code), employee]));
 
@@ -10214,12 +10245,17 @@ function getGroupReportRecords() {
       const employee =
         employeeMap.get(String(record.employee_id || "")) ||
         employeeCodeMap.get(String(record.emp_code || ""));
+      if (!employee) return null;
+
       const payGroup = getEmployeePayGroup(employee);
       const fruitId = productionFruitTypeForRecord(record);
       if (!groupReportDefaultGroups.includes(payGroup)) return null;
       return {
         ...record,
         employee,
+        employee_id: employee.id || record.employee_id,
+        emp_code: employee.emp_code || record.emp_code,
+        employee_name: employee.fullname || record.employee_name,
         pay_group: payGroup,
         fruit_type: fruitId,
         fruit_label: getProductionFruitLabel(fruitId),
@@ -10771,6 +10807,13 @@ function renderSummaryGroupReport(moduleItem) {
 
 function getGroupReportPayload(user, format) {
   const range = normalizeGroupReportRange();
+  const records = getGroupReportRecords();
+  const employeeKeys = new Set(records.map((record) => String(record.employee?.id || record.employee_id || "")));
+  const employeeCodes = new Set(records.map((record) => String(record.employee?.emp_code || record.emp_code || "")));
+  const employees = getEmployees().filter((employee) =>
+    employee.status === "Active" &&
+    (employeeKeys.has(String(employee.id)) || employeeCodes.has(String(employee.emp_code)))
+  );
   return {
     start_date: range.startDate,
     end_date: range.endDate,
@@ -10782,8 +10825,8 @@ function getGroupReportPayload(user, format) {
     export_options: { ...groupReportExportOptions },
     printed_by: user?.fullname || "System Admin",
     printed_by_position: getExportPositionLabel(user),
-    employees: getEmployees(),
-    production_records: getProductionRecords(),
+    employees,
+    production_records: records,
     export_format: format
   };
 }
