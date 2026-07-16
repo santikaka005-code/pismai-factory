@@ -10330,7 +10330,7 @@ function getTimeGroupReportGroups() {
 
 function getTimeGroupReportRecords() {
   const range = normalizeGroupReportRange();
-  const employees = getTimeEmployees();
+  const employees = getTimeEmployees().filter((employee) => employee.status === "Active");
   const employeeMap = new Map(employees.map((employee) => [String(employee.id), employee]));
   const employeeCodeMap = new Map(employees.map((employee) => [String(employee.emp_code), employee]));
   const records = getTimeRecords().filter((record) => {
@@ -10343,7 +10343,9 @@ function getTimeGroupReportRecords() {
       const employee =
         employeeMap.get(String(record.employee_id || "")) ||
         employeeCodeMap.get(String(record.emp_code || ""));
-      const typeOption = getTimeEmployeeTypeOption(record.employee_type || employee?.employee_type);
+      if (!employee) return null;
+
+      const typeOption = getTimeEmployeeTypeOption(employee.employee_type || record.employee_type);
       const reportGroupLabel = getTimeReportGroupLabel(typeOption.id);
       const enrichedRecord = {
         ...record,
@@ -10351,11 +10353,11 @@ function getTimeGroupReportRecords() {
         employee_type: typeOption.id,
         employee_type_label: reportGroupLabel,
         employee_wage_group_label: typeOption.shortLabel,
-        daily_wage: Number(record.daily_wage || employee?.daily_wage || typeOption.dailyWage),
-        ot_hourly_rate: Number(record.ot_hourly_rate || employee?.ot_hourly_rate || TIME_OT_HOURLY_RATE),
-        fullname: record.fullname || employee?.fullname || "-",
-        emp_code: record.emp_code || employee?.emp_code || "-",
-        department: record.department || employee?.department || "-"
+        daily_wage: Number(employee.daily_wage || record.daily_wage || typeOption.dailyWage),
+        ot_hourly_rate: Number(employee.ot_hourly_rate || record.ot_hourly_rate || TIME_OT_HOURLY_RATE),
+        fullname: employee.fullname || record.fullname || "-",
+        emp_code: employee.emp_code || record.emp_code || "-",
+        department: employee.department || record.department || "-"
       };
       const receiptRow = getTimeReceiptRow(enrichedRecord);
       return {
@@ -10367,6 +10369,7 @@ function getTimeGroupReportRecords() {
         total_amount: receiptRow.totalAmount
       };
     })
+    .filter(Boolean)
     .filter((record) => groupReportGroup === "all" || record.employee_type_label === groupReportGroup)
     .sort((a, b) =>
       `${a.employee_type_label} ${a.record_date || ""} ${a.emp_code || ""}`.localeCompare(
