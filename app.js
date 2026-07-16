@@ -721,6 +721,7 @@ let timeRecordMessage = "";
 let timeRecordMessageType = "success";
 let weeklyTimeEmployeeCode = "";
 let weeklyTimeDraft = Array.from({ length: 7 }, () => ({ clock_in: "", clock_out: "" }));
+let editingTimeRecordId = null;
 let productionView = "fast-entry";
 let selectedProductionFruit = "";
 let productionMessage = "";
@@ -2565,8 +2566,43 @@ function buildTimeRecord(payload, user) {
   };
 }
 
+function findDuplicateTimeRecord(empCode, recordDate, excludeId = null) {
+  const normalizedCode = normalizeTimeEmployeeCodeInput(empCode);
+  return getTimeRecords().find((record) => (
+    record.id !== excludeId &&
+    normalizeTimeEmployeeCodeInput(record.emp_code || "") === normalizedCode &&
+    record.record_date === recordDate
+  )) || null;
+}
+
+function assertNoDuplicateTimeRecord(empCode, recordDate, excludeId = null) {
+  const duplicate = findDuplicateTimeRecord(empCode, recordDate, excludeId);
+  if (duplicate) {
+    throw new Error(`พนักงานรหัส ${empCode} มีรายการวันที่ ${recordDate} แล้ว กรุณากดแก้ไขรายการเดิมแทน`);
+  }
+}
+
+function dateToLocalInputValue(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function shouldAuditTimeRecordEdit(record, now = new Date()) {
+  const createdAt = new Date(record.created_at || record.updated_at || now.toISOString());
+  const createdDate = dateToLocalInputValue(createdAt);
+  const today = dateToLocalInputValue(now);
+  const ageMinutes = Number.isNaN(createdAt.getTime()) ? Infinity : (now.getTime() - createdAt.getTime()) / 60000;
+  return ageMinutes > 2 || createdDate !== today || record.record_date !== today;
+}
+
 function apiCreateTimeRecord(payload, user) {
   const records = getTimeRecords();
+  const recordDate = String(payload.record_date || "").trim();
+  const empCode = normalizeTimeEmployeeCodeInput(payload.emp_code);
+  assertNoDuplicateTimeRecord(empCode, recordDate);
   const nextId = records.length ? Math.max(...records.map((record) => record.id || 0)) + 1 : 1;
   const record = {
     ...buildTimeRecord(payload, user),
@@ -2580,6 +2616,34 @@ function apiCreateTimeRecord(payload, user) {
     `Added time record ${record.emp_code} ${record.clock_in}-${record.clock_out}`
   );
   return record;
+}
+
+function apiUpdateTimeRecord(id, payload, user) {
+  const records = getTimeRecords();
+  const existingRecord = records.find((record) => record.id === id);
+  if (!existingRecord) {
+    throw new Error("ไม่พบรายการเวลาที่ต้องการแก้ไข");
+  }
+
+  const nextRecord = {
+    ...buildTimeRecord(payload, user),
+    id,
+    created_by: existingRecord.created_by,
+    created_at: existingRecord.created_at,
+    updated_by: user.fullname,
+    updated_at: new Date().toISOString()
+  };
+  assertNoDuplicateTimeRecord(nextRecord.emp_code, nextRecord.record_date, id);
+
+  saveTimeRecords(records.map((record) => (record.id === id ? nextRecord : record)));
+  if (shouldAuditTimeRecordEdit(existingRecord)) {
+    addAuditLog(
+      user,
+      "UPDATE_TIME_RECORD",
+      `Edited time record ${existingRecord.emp_code} #${id}: ${existingRecord.record_date} ${existingRecord.clock_in}-${existingRecord.clock_out} -> ${nextRecord.record_date} ${nextRecord.clock_in}-${nextRecord.clock_out}`
+    );
+  }
+  return nextRecord;
 }
 
 function apiDeleteTimeRecord(id, user) {
@@ -6279,6 +6343,10 @@ function bindReportEvents() {
 }
 
 function renderTimeReport(user, moduleItem) {
+  const editingTimeRecord = editingTimeRecordId
+    ? getTimeRecords().find((record) => record.id === editingTimeRecordId)
+    : null;
+  const dailyTimeRecords = apiGetTimeRecordsForDate(timeRecordDate);
   return `
     <section class="time-page">
       <section class="time-hero panel">
@@ -6314,22 +6382,24 @@ function renderTimeReport(user, moduleItem) {
           <form class="time-entry-form" id="timeRecordForm">
             <label class="field">
               <span>วันที่</span>
-              <input name="record_date" type="date" value="${escapeHtml(timeRecordDate)}" required />
+              <input name="record_date" type="date" value="${escapeHtml(editingTimeRecord?.record_date || timeRecordDate)}" required />
             </label>
             <label class="field">
               <span>รหัสพนักงาน</span>
-              <input name="emp_code" list="timeEmployeeCodes" inputmode="numeric" pattern="[0-9]{2,8}" placeholder="เช่น 12" required />
+              <input name="emp_code" list="timeEmployeeCodes" inputmode="numeric" pattern="[0-9]{2,8}" placeholder="เช่น 12" value="${escapeHtml(editingTimeRecord?.emp_code || "")}" required />
             </label>
             <label class="field">
               <span>เวลาเข้า</span>
-              <input name="clock_in" type="time" value="08:00" required />
+              <input name="clock_in" type="time" value="${escapeHtml(editingTimeRecord?.clock_in || "08:00")}" required />
             </label>
             <label class="field">
               <span>เวลาออก</span>
-              <input name="clock_out" type="time" value="17:00" required />
+              <input name="clock_out" type="time" value="${escapeHtml(editingTimeRecord?.clock_out || "17:00")}" required />
             </label>
-            <button class="btn btn-primary form-submit" type="submit">บันทึกรายการ</button>
+            <button class="btn btn-primary form-submit" type="submit">${editingTimeRecord ? "บันทึกการแก้ไข" : "บันทึกรายการ"}</button>
+            ${editingTimeRecord ? `<button class="btn btn-outline" id="cancelTimeRecordEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
           </form>
+          ${editingTimeRecord ? `<div class="alert alert-success">กำลังแก้ไขรายการ #${editingTimeRecord.id} ${escapeHtml(editingTimeRecord.emp_code)} ${escapeHtml(editingTimeRecord.clock_in)}-${escapeHtml(editingTimeRecord.clock_out)}</div>` : ""}
           <datalist id="timeEmployeeCodes">
             ${getTimeEmployees()
               .filter((employee) => employee.status !== "Inactive")
@@ -6354,12 +6424,67 @@ function renderTimeReport(user, moduleItem) {
             <div><span>ค่าแรงไม่ครบ 8 ชั่วโมง</span><strong>ปัดเป็นบาท: ชั่วโมงสุทธิ × ฐานรายวันของพนักงาน ÷ 8</strong></div>
             <div><span>ฐานรายวัน</span><strong>ปกติ ${TIME_DAILY_WAGE} บาท · พิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
             <div><span>ค่าล่วงเวลา</span><strong>ส่วนที่เกิน 8 ชั่วโมง × 50 บาท/ชั่วโมง</strong></div>
-            <div><span>เข้า-ออกหลายรอบ</span><strong>กรอกพนักงานและวันที่เดิมซ้ำได้ ระบบรวมชั่วโมงก่อนคิดเงิน</strong></div>
+            <div><span>กันกรอกซ้ำ</span><strong>พนักงาน 1 คนบันทึกได้ 1 รายการต่อวัน หากผิดให้กดแก้ไขรายการเดิม</strong></div>
+            <div><span>ประวัติการแก้ไข</span><strong>แก้ภายใน 2 นาทีไม่ลง Log · เกิน 2 นาทีหรือข้ามวันจะลง Audit Log</strong></div>
           </div>
         </section>
       </section>
+      ${renderDailyTimeRecordTable(dailyTimeRecords)}
       ` : renderWeeklyTimeEntry(user)}
     </section>
+  `;
+}
+
+function renderDailyTimeRecordTable(records) {
+  return `
+    <section class="table-card weekly-saved-records">
+      <div class="table-heading">รายการเวลาวันที่ ${escapeHtml(timeRecordDate)}</div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>วันที่</th>
+              <th>รหัส</th>
+              <th>ชื่อพนักงาน</th>
+              <th>เข้า</th>
+              <th>ออก</th>
+              <th>พัก</th>
+              <th>สุทธิ</th>
+              <th>ผู้บันทึก</th>
+              <th>จัดการ</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              records.length
+                ? records.map(renderTimeRecordRow).join("")
+                : `<tr><td colspan="9" class="empty-cell">ยังไม่มีรายการเวลาวันนี้</td></tr>`
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function renderTimeRecordRow(record) {
+  return `
+    <tr>
+      <td>${escapeHtml(record.record_date || "-")}</td>
+      <td><strong>${escapeHtml(record.emp_code || "-")}</strong></td>
+      <td>${escapeHtml(record.fullname || "-")}</td>
+      <td>${escapeHtml(record.clock_in || "-")}</td>
+      <td>${escapeHtml(record.clock_out || "-")}</td>
+      <td>${escapeHtml(formatMinutesToHourText(record.break_minutes))}</td>
+      <td><strong>${escapeHtml(formatMinutesToHourText(record.net_minutes))}</strong></td>
+      <td>${escapeHtml(record.created_by || "-")}</td>
+      <td>
+        <div class="table-actions">
+          <button class="btn btn-small btn-outline" data-edit-time-record="${record.id}" type="button">แก้ไข</button>
+          <button class="btn btn-small btn-danger" data-delete-time-record="${record.id}" type="button">ลบ</button>
+        </div>
+      </td>
+    </tr>
   `;
 }
 
@@ -6448,7 +6573,7 @@ function renderWeeklyTimeEntry(user) {
             <div><span>ค่าแรงปกติ</span><strong>ฐานรายวันของพนักงาน ÷ 8 × ชั่วโมงสุทธิ แล้วปัดเป็นบาท</strong></div>
             <div><span>ฐานครบ 8 ชั่วโมง</span><strong>ปกติ ${TIME_DAILY_WAGE} บาท · พิเศษ ${TIME_SPECIAL_DAILY_WAGE} บาท</strong></div>
             <div><span>เกิน 8 ชั่วโมง</span><strong>OT 50 บาท/ชั่วโมง</strong></div>
-            <div><span>หลายรอบในวันเดียว</span><strong>กรอกวันเดิมซ้ำได้ แล้วระบบรวมชั่วโมงก่อนคิดเงิน</strong></div>
+            <div><span>กันกรอกซ้ำ</span><strong>วันไหนมีรายการแล้ว ระบบจะให้แก้รายการเดิมแทนการบันทึกซ้ำ</strong></div>
           </div>
           <div class="weekly-actions">
             <button class="btn btn-outline" id="clearWeeklyTime" type="button">ล้างตาราง</button>
@@ -6471,6 +6596,7 @@ function renderWeeklyTimeEntry(user) {
                 <th>พัก</th>
                 <th>สุทธิ</th>
                 <th>ผู้บันทึก</th>
+                <th>จัดการ</th>
               </tr>
             </thead>
             <tbody>
@@ -6478,21 +6604,10 @@ function renderWeeklyTimeEntry(user) {
                 weeklyRecords.length
                   ? weeklyRecords
                       .map(
-                        (record) => `
-                          <tr>
-                            <td>${escapeHtml(record.record_date || "-")}</td>
-                            <td><strong>${escapeHtml(record.emp_code || "-")}</strong></td>
-                            <td>${escapeHtml(record.fullname || "-")}</td>
-                            <td>${escapeHtml(record.clock_in || "-")}</td>
-                            <td>${escapeHtml(record.clock_out || "-")}</td>
-                            <td>${escapeHtml(formatMinutesToHourText(record.break_minutes))}</td>
-                            <td><strong>${escapeHtml(formatMinutesToHourText(record.net_minutes))}</strong></td>
-                            <td>${escapeHtml(record.created_by || "-")}</td>
-                          </tr>
-                        `
+                        (record) => renderTimeRecordRow(record)
                       )
                       .join("")
-                  : `<tr><td colspan="8" class="empty-cell">ยังไม่มีรายการที่บันทึกในสัปดาห์นี้</td></tr>`
+                  : `<tr><td colspan="9" class="empty-cell">ยังไม่มีรายการที่บันทึกในสัปดาห์นี้</td></tr>`
               }
             </tbody>
           </table>
@@ -6602,6 +6717,7 @@ function bindTimeReportEvents(user) {
     button.addEventListener("click", () => {
       timeEntryMode = button.dataset.timeMode || "daily";
       timeRecordMessage = "";
+      editingTimeRecordId = null;
       render();
     });
   });
@@ -6709,24 +6825,58 @@ function bindTimeReportEvents(user) {
     updateWeeklyDayTotals();
   }
 
+  document.querySelectorAll("[data-edit-time-record]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.editTimeRecord);
+      const record = getTimeRecords().find((item) => item.id === id);
+      if (!record) {
+        setTimeRecordMessage("ไม่พบรายการเวลาที่ต้องการแก้ไข", "error");
+        render();
+        return;
+      }
+      editingTimeRecordId = id;
+      timeEntryMode = "daily";
+      timeRecordDate = record.record_date || timeRecordDate;
+      setTimeRecordMessage("แก้เวลาให้ถูกต้องแล้วกดบันทึกการแก้ไข");
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-delete-time-record]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.deleteTimeRecord);
+      if (!window.confirm("ยืนยันลบรายการเวลานี้?")) return;
+      apiDeleteTimeRecord(id, user);
+      if (editingTimeRecordId === id) editingTimeRecordId = null;
+      setTimeRecordMessage("ลบรายการเวลาเรียบร้อยแล้ว");
+      render();
+    });
+  });
+
+  document.querySelector("#cancelTimeRecordEdit")?.addEventListener("click", () => {
+    editingTimeRecordId = null;
+    setTimeRecordMessage("ยกเลิกการแก้ไขแล้ว");
+    render();
+  });
+
   document.querySelector("#timeRecordForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     timeRecordDate = String(form.get("record_date") || timeRecordDate);
 
     try {
-      const record = apiCreateTimeRecord(
-        {
-          record_date: timeRecordDate,
-          emp_code: form.get("emp_code"),
-          clock_in: form.get("clock_in"),
-          clock_out: form.get("clock_out")
-        },
-        user
-      );
-      setTimeRecordMessage(
-        `บันทึก ${record.emp_code} ${record.clock_in}-${record.clock_out} สุทธิ ${formatMinutesToHourText(record.net_minutes)} ชั่วโมง`
-      );
+      const payload = {
+        record_date: timeRecordDate,
+        emp_code: form.get("emp_code"),
+        clock_in: form.get("clock_in"),
+        clock_out: form.get("clock_out")
+      };
+      const record = editingTimeRecordId
+        ? apiUpdateTimeRecord(editingTimeRecordId, payload, user)
+        : apiCreateTimeRecord(payload, user);
+      const actionText = editingTimeRecordId ? "แก้ไข" : "บันทึก";
+      editingTimeRecordId = null;
+      setTimeRecordMessage(`${actionText} ${record.emp_code} ${record.clock_in}-${record.clock_out} สุทธิ ${formatMinutesToHourText(record.net_minutes)} ชั่วโมง`);
       render();
     } catch (error) {
       setTimeRecordMessage(error instanceof Error ? error.message : "บันทึกเวลาไม่สำเร็จ", "error");
