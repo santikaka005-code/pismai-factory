@@ -1722,6 +1722,11 @@ function isSpecialTimeEmployeeType(value) {
   return getTimeEmployeeTypeOption(value).category === "special";
 }
 
+function getTimeReportGroupLabel(value) {
+  const typeOption = getTimeEmployeeTypeOption(value);
+  return typeOption.category === "special" ? "กลุ่มพิเศษ" : "กลุ่มปกติ-347";
+}
+
 function defaultTimeEmployeesFromWeightEmployees() {
   return getEmployees().map((employee) => ({
     id: employee.id,
@@ -10249,11 +10254,7 @@ function getGroupReportTotals(groupRows) {
 }
 
 function getTimeGroupReportGroups() {
-  const existingGroups = new Set(
-    getTimeEmployees().map((employee) => getTimeEmployeeTypeOption(employee.employee_type).shortLabel)
-  );
-  timeEmployeeTypeOptions.forEach((option) => existingGroups.add(option.shortLabel));
-  return Array.from(existingGroups).filter(Boolean);
+  return ["กลุ่มปกติ-347", "กลุ่มพิเศษ"];
 }
 
 function getTimeGroupReportRecords() {
@@ -10272,11 +10273,13 @@ function getTimeGroupReportRecords() {
         employeeMap.get(String(record.employee_id || "")) ||
         employeeCodeMap.get(String(record.emp_code || ""));
       const typeOption = getTimeEmployeeTypeOption(record.employee_type || employee?.employee_type);
+      const reportGroupLabel = getTimeReportGroupLabel(typeOption.id);
       const enrichedRecord = {
         ...record,
         employee,
         employee_type: typeOption.id,
-        employee_type_label: typeOption.shortLabel,
+        employee_type_label: reportGroupLabel,
+        employee_wage_group_label: typeOption.shortLabel,
         daily_wage: Number(record.daily_wage || employee?.daily_wage || typeOption.dailyWage),
         ot_hourly_rate: Number(record.ot_hourly_rate || employee?.ot_hourly_rate || TIME_OT_HOURLY_RATE),
         fullname: record.fullname || employee?.fullname || "-",
