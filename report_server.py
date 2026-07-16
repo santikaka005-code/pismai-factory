@@ -2474,6 +2474,179 @@ def build_group_report_pdf(payload: dict) -> bytes:
     return buffer.getvalue()
 
 
+def time_group_report_options(payload: dict) -> dict:
+    options = payload.get("export_options") or {}
+    return {
+        "summary": bool(options.get("summary", True)),
+        "employees": bool(options.get("employees", True)),
+        "details": bool(options.get("details", False)),
+    }
+
+
+def build_time_group_report_excel(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    options = time_group_report_options(payload)
+    group_rows = payload.get("time_group_rows", []) or []
+    employee_rows = payload.get("time_employee_rows", []) or []
+    records = payload.get("time_group_records", []) or []
+    workbook = Workbook()
+    overview = workbook.active
+    overview.title = "Time Group Report"
+    overview.merge_cells("A1:H1")
+    overview["A1"] = COMPANY_NAME
+    overview["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
+    overview.merge_cells("A2:H2")
+    overview["A2"] = "Time Group Report"
+    overview["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
+    overview.merge_cells("A3:H3")
+    overview["A3"] = f"Date range {format_report_date(start_date)} - {format_report_date(end_date)} | Group {payload.get('group_label', 'All groups')}"
+    overview.merge_cells("A4:H4")
+    overview["A4"] = export_meta_text(payload)
+    overview.append([])
+    style_excel_report_sheet(overview, [1], [22, 16, 16, 18, 14, 14, 16, 16])
+
+    if options["summary"]:
+        summary = workbook.create_sheet("Summary By Group")
+        summary.append(["Group", "Employees", "Records", "Net time", "Normal hours", "OT hours", "Normal amount", "OT amount", "Total amount"])
+        for row in group_rows:
+            summary.append([
+                row.get("pay_group", "-"),
+                row.get("employees", 0),
+                row.get("records", 0),
+                minutes_text(row.get("net_minutes", 0)),
+                safe_float(row.get("normal_hours")),
+                safe_float(row.get("ot_hours")),
+                safe_float(row.get("normal_amount")),
+                safe_float(row.get("ot_amount")),
+                safe_float(row.get("amount")),
+            ])
+        style_excel_report_sheet(summary, [1], [20, 12, 12, 16, 14, 14, 16, 16, 16])
+
+    if options["employees"]:
+        employees = workbook.create_sheet("Employees")
+        employees.append(["Group", "Emp code", "Fullname", "Days", "Net time", "Normal hours", "OT hours", "Total amount"])
+        for row in employee_rows:
+            employees.append([
+                row.get("pay_group", "-"),
+                row.get("emp_code", "-"),
+                row.get("fullname", "-"),
+                row.get("records", 0),
+                minutes_text(row.get("net_minutes", 0)),
+                safe_float(row.get("normal_hours")),
+                safe_float(row.get("ot_hours")),
+                safe_float(row.get("amount")),
+            ])
+        style_excel_report_sheet(employees, [1], [20, 14, 28, 10, 16, 14, 14, 16])
+
+    if options["details"]:
+        details = workbook.create_sheet("Details")
+        details.append(["Date", "Group", "Emp code", "Fullname", "Clock in", "Clock out", "Net time", "OT rate", "Total amount"])
+        for record in records:
+            details.append([
+                record.get("record_date", ""),
+                record.get("employee_type_label", ""),
+                record.get("emp_code", ""),
+                record.get("fullname", ""),
+                record.get("clock_in", ""),
+                record.get("clock_out", ""),
+                minutes_text(record.get("net_minutes", 0)),
+                safe_float(record.get("ot_hourly_rate")),
+                safe_float(record.get("total_amount")),
+            ])
+        style_excel_report_sheet(details, [1], [14, 18, 14, 28, 12, 12, 16, 12, 16])
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def build_time_group_report_pdf(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    options = time_group_report_options(payload)
+    group_rows = payload.get("time_group_rows", []) or []
+    employee_rows = payload.get("time_employee_rows", []) or []
+    records = payload.get("time_group_records", []) or []
+    _, _, _, section = pdf_styles()
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=14 * mm,
+        bottomMargin=16 * mm,
+    )
+    story = report_header_story(
+        "Time Group Report",
+        f"Date range {format_report_date(start_date)} - {format_report_date(end_date)} | Group {payload.get('group_label', 'All groups')}",
+        payload,
+    )
+
+    def add_table(title: str, headers: list[str], rows: list[list], widths: list[float] | None = None):
+        table_rows = [headers] + rows
+        if len(table_rows) == 1:
+            table_rows.append(["-" for _ in headers])
+        col_widths = widths or [(267 / len(headers)) * mm for _ in headers]
+        table = Table(table_rows, repeatRows=1, colWidths=col_widths)
+        set_pdf_table_style(table, 1)
+        story.extend([Paragraph(title, section), table, Spacer(1, 7 * mm)])
+
+    if options["summary"]:
+        add_table(
+            "Summary By Group",
+            ["Group", "Employees", "Records", "Net time", "Normal", "OT", "Normal pay", "OT pay", "Total"],
+            [[
+                row.get("pay_group", "-"),
+                report_number(row.get("employees", 0), 0),
+                report_number(row.get("records", 0), 0),
+                minutes_text(row.get("net_minutes", 0)),
+                report_number(row.get("normal_hours", 0)),
+                report_number(row.get("ot_hours", 0)),
+                money(row.get("normal_amount", 0)),
+                money(row.get("ot_amount", 0)),
+                money(row.get("amount", 0)),
+            ] for row in group_rows],
+        )
+
+    if options["employees"]:
+        add_table(
+            "Employee Details",
+            ["Group", "Code", "Name", "Days", "Net time", "Normal", "OT", "Total"],
+            [[
+                row.get("pay_group", "-"),
+                row.get("emp_code", "-"),
+                row.get("fullname", "-"),
+                report_number(row.get("records", 0), 0),
+                minutes_text(row.get("net_minutes", 0)),
+                report_number(row.get("normal_hours", 0)),
+                report_number(row.get("ot_hours", 0)),
+                money(row.get("amount", 0)),
+            ] for row in employee_rows[:100]],
+        )
+
+    if options["details"]:
+        add_table(
+            "Time Records",
+            ["Date", "Group", "Code", "Name", "In", "Out", "Net", "OT rate", "Total"],
+            [[
+                record.get("record_date", ""),
+                record.get("employee_type_label", ""),
+                record.get("emp_code", ""),
+                record.get("fullname", ""),
+                record.get("clock_in", ""),
+                record.get("clock_out", ""),
+                minutes_text(record.get("net_minutes", 0)),
+                report_number(record.get("ot_hourly_rate", 0), 0),
+                money(record.get("total_amount", 0)),
+            ] for record in records[:100]],
+        )
+
+    if len(story) <= 4:
+        story.append(Paragraph("No selected report sections.", section))
+    doc.build(story)
+    return buffer.getvalue()
+
+
 def summarize_time(records: list[dict]) -> tuple[dict, list[dict], list[dict]]:
     summary = {
         "records": len(records),
@@ -2972,6 +3145,26 @@ class ReportHandler(BaseHTTPRequestHandler):
                 content,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 f"Group_Report_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.xlsx",
+            )
+            return
+
+        if parsed.path == "/reports/time-group-report-pdf":
+            start_date, end_date = normalized_range(payload)
+            content = build_time_group_report_pdf(payload)
+            self.send_file(
+                content,
+                "application/pdf",
+                f"Time_Group_Report_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.pdf",
+            )
+            return
+
+        if parsed.path == "/reports/time-group-report-excel":
+            start_date, end_date = normalized_range(payload)
+            content = build_time_group_report_excel(payload)
+            self.send_file(
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                f"Time_Group_Report_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.xlsx",
             )
             return
 

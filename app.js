@@ -10603,14 +10603,14 @@ function renderSummaryGroupReport(moduleItem) {
         </form>
       </section>
 
-      ${isTimeReport ? "" : `<section class="summary-export-panel group-report-export-panel">
+      <section class="summary-export-panel group-report-export-panel">
         <div>
-          <strong>Export / Print รายงานแบบกลุ่ม</strong>
+          <strong>Export / Print ${isTimeReport ? "รายงานแบบกลุ่มตามเวลา" : "รายงานแบบกลุ่มตามน้ำหนัก"}</strong>
           <span>เลือกก่อนพิมพ์ว่าจะส่งออกส่วนไหนบ้าง</span>
         </div>
         <div class="summary-export-options">
           <label><input type="checkbox" data-group-export-option="summary" ${groupReportExportOptions.summary ? "checked" : ""} /> สรุปตามกลุ่ม</label>
-          <label><input type="checkbox" data-group-export-option="fruit" ${groupReportExportOptions.fruit ? "checked" : ""} /> แยกตามผลไม้</label>
+          ${isTimeReport ? "" : `<label><input type="checkbox" data-group-export-option="fruit" ${groupReportExportOptions.fruit ? "checked" : ""} /> แยกตามผลไม้</label>`}
           <label><input type="checkbox" data-group-export-option="employees" ${groupReportExportOptions.employees ? "checked" : ""} /> รายละเอียดพนักงาน</label>
           <label><input type="checkbox" data-group-export-option="details" ${groupReportExportOptions.details ? "checked" : ""} /> รายละเอียดรายการ</label>
         </div>
@@ -10621,7 +10621,7 @@ function renderSummaryGroupReport(moduleItem) {
               <div class="time-summary-export-menu group-report-export-menu">
                 <button class="time-export-choice" id="exportGroupReportPdf" type="button">
                   <strong>Export PDF</strong>
-                  <span>ไฟล์รายงานแบบกลุ่มตามตัวเลือกที่เลือกไว้</span>
+                  <span>ไฟล์รายงานตามตัวเลือกที่เลือกไว้</span>
                 </button>
                 <button class="time-export-choice" id="exportGroupReportExcel" type="button">
                   <strong>Export Excel</strong>
@@ -10631,7 +10631,7 @@ function renderSummaryGroupReport(moduleItem) {
             `
             : ""
         }
-      </section>`}
+      </section>
 
       ${isTimeReport ? renderTimeGroupReportContent(records, groupRows, employeeRows, totals) : `
         <div class="summary-metrics">
@@ -10714,9 +10714,41 @@ function getGroupReportPayload(user, format) {
   };
 }
 
+function getTimeGroupReportPayload(user, format) {
+  const range = normalizeGroupReportRange();
+  const records = getTimeGroupReportRecords();
+  const groupRows = summarizeTimeGroupReportRows(records).map((row) => ({
+    pay_group: row.pay_group,
+    employees: row.employees.size,
+    records: row.records,
+    net_minutes: row.net_minutes,
+    normal_hours: row.normal_hours,
+    ot_hours: row.ot_hours,
+    normal_amount: row.normal_amount,
+    ot_amount: row.ot_amount,
+    amount: row.amount
+  }));
+  const employeeRows = getTimeGroupReportEmployeeRows(records);
+  return {
+    start_date: range.startDate,
+    end_date: range.endDate,
+    group_label: groupReportGroup === "all" ? "ทุกกลุ่ม" : groupReportGroup,
+    export_options: { ...groupReportExportOptions, fruit: false },
+    printed_by: user?.fullname || "System Admin",
+    printed_by_position: getExportPositionLabel(user),
+    time_group_rows: groupRows,
+    time_employee_rows: employeeRows,
+    time_group_records: records,
+    export_format: format
+  };
+}
+
 async function exportGroupReport(user, format) {
-  const records = getGroupReportRecords();
-  const hasOption = Object.values(groupReportExportOptions).some(Boolean);
+  const isTimeReport = groupReportMode === "time";
+  const records = isTimeReport ? getTimeGroupReportRecords() : getGroupReportRecords();
+  const hasOption = isTimeReport
+    ? Boolean(groupReportExportOptions.summary || groupReportExportOptions.employees || groupReportExportOptions.details)
+    : Object.values(groupReportExportOptions).some(Boolean);
   if (!hasOption) {
     groupReportMessage = "กรุณาเลือกส่วนรายงานที่ต้องการ Export อย่างน้อย 1 รายการ";
     groupReportMessageType = "error";
@@ -10732,8 +10764,10 @@ async function exportGroupReport(user, format) {
     return;
   }
 
-  const endpoint = format === "excel" ? "group-report-excel" : "group-report-pdf";
-  groupReportMessage = `กำลังสร้างไฟล์ ${format === "excel" ? "Excel" : "PDF"} รายงานแบบกลุ่ม...`;
+  const endpoint = isTimeReport
+    ? (format === "excel" ? "time-group-report-excel" : "time-group-report-pdf")
+    : (format === "excel" ? "group-report-excel" : "group-report-pdf");
+  groupReportMessage = `กำลังสร้างไฟล์ ${format === "excel" ? "Excel" : "PDF"} ${isTimeReport ? "รายงานแบบกลุ่มตามเวลา" : "รายงานแบบกลุ่ม"}...`;
   groupReportMessageType = "success";
   groupReportExportMenuOpen = true;
   render();
@@ -10742,10 +10776,10 @@ async function exportGroupReport(user, format) {
     await downloadReport(`${REPORT_API_BASE}/reports/${endpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(getGroupReportPayload(user, format))
+      body: JSON.stringify(isTimeReport ? getTimeGroupReportPayload(user, format) : getGroupReportPayload(user, format))
     });
     const range = normalizeGroupReportRange();
-    groupReportMessage = `Export รายงานแบบกลุ่ม ${range.startDate} ถึง ${range.endDate} เรียบร้อยแล้ว`;
+    groupReportMessage = `Export ${isTimeReport ? "รายงานแบบกลุ่มตามเวลา" : "รายงานแบบกลุ่ม"} ${range.startDate} ถึง ${range.endDate} เรียบร้อยแล้ว`;
     groupReportMessageType = "success";
     groupReportExportMenuOpen = false;
   } catch (error) {
