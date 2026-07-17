@@ -7086,7 +7086,9 @@ function renderTimeReport(user, moduleItem) {
             </label>
             <label class="field">
               <span>รหัสพนักงาน</span>
-              <input name="emp_code" list="timeEmployeeCodes" inputmode="numeric" pattern="[0-9]{2,8}" placeholder="เช่น 12" value="${escapeHtml(dailyEntryEmployeeCode)}" required />
+              <select name="emp_code" id="timeRecordEmployeeCode" required>
+                ${renderWeeklyTimeEmployeeOptions(getOrderedActiveTimeEmployees(), dailyEntryEmployeeCode)}
+              </select>
             </label>
             <label class="field">
               <span>เวลาเข้า</span>
@@ -7100,9 +7102,6 @@ function renderTimeReport(user, moduleItem) {
             ${editingTimeRecord ? `<button class="btn btn-outline" id="cancelTimeRecordEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
           </form>
           ${editingTimeRecord ? `<div class="alert alert-success">กำลังแก้ไขรายการ #${editingTimeRecord.id} ${escapeHtml(editingTimeRecord.emp_code)} ${escapeHtml(editingTimeRecord.clock_in)}-${escapeHtml(editingTimeRecord.clock_out)}</div>` : ""}
-          <datalist id="timeEmployeeCodes">
-            ${renderTimeEmployeeCodeOptions()}
-          </datalist>
         </section>
 
         <section class="panel time-policy-panel">
