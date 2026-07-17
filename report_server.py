@@ -74,6 +74,7 @@ BACKUP_TABLES = [
     "production_records",
     "time_records",
     "deduction_records",
+    "deduction_applications",
     "audit_logs",
 ]
 SYSTEM_ACCOUNT_PROFILES = {
@@ -307,6 +308,14 @@ def deduction_from_payload(payload: dict) -> dict:
     if payload.get("id") not in [None, ""]:
         deduction["id"] = payload.get("id")
     return deduction
+
+
+def deduction_application_from_payload(payload: dict) -> dict:
+    return {
+        "deduction_id": payload.get("deduction_id"),
+        "amount": payload.get("amount", 0),
+        "note": str(payload.get("note", "")).strip() or None,
+    }
 
 
 def next_table_id(table: str) -> int:
@@ -3640,6 +3649,29 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path == "/api/deduction-applications/apply":
+            applied_date = str(payload.get("applied_date", "")).strip()
+            items = payload.get("items", [])
+            if not applied_date or not isinstance(items, list) or not items:
+                self.send_json({"error": "applied_date and items are required."}, 400)
+                return
+            clean_items = [deduction_application_from_payload(item) for item in items if isinstance(item, dict)]
+            if not clean_items:
+                self.send_json({"error": "No valid deduction items."}, 400)
+                return
+            status, body = supabase_request(
+                "POST",
+                "rpc/apply_deduction_batch",
+                {
+                    "p_applied_date": applied_date,
+                    "p_created_by": str(payload.get("created_by", "")).strip(),
+                    "p_items": clean_items,
+                },
+                prefer="return=representation",
+            )
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
         if parsed.path == "/api/wage-rates":
             wage_rate = {
                 "item_type": str(payload.get("item_type", "")).strip(),
@@ -3880,7 +3912,38 @@ class ReportHandler(BaseHTTPRequestHandler):
             if deduction_id in [None, ""]:
                 self.send_json({"error": "id is required."}, 400)
                 return
+            existing_status, existing_rows = supabase_request(
+                "GET",
+                f"deduction_records?id=eq.{quote(str(deduction_id))}&select=employee_id,start_date,deduction_type,amount&limit=1",
+            )
+            if existing_status >= 400 or not isinstance(existing_rows, list) or not existing_rows:
+                self.send_json({"error": existing_rows if existing_status >= 400 else "Deduction not found."}, existing_status if existing_status >= 400 else 404)
+                return
+            status_check, applications = supabase_request(
+                "GET",
+                f"deduction_applications?deduction_id=eq.{quote(str(deduction_id))}&status=eq.Applied&select=amount",
+            )
+            if status_check >= 400:
+                self.send_json({"error": applications}, status_check)
+                return
+            applied_total = sum(float(row.get("amount") or 0) for row in applications) if isinstance(applications, list) else 0
+            requested_amount = float(payload.get("amount") or 0)
+            if requested_amount + 0.00001 < applied_total:
+                self.send_json({"error": "Amount cannot be lower than the amount already deducted."}, 409)
+                return
+            existing = existing_rows[0]
+            immutable_changed = (
+                abs(requested_amount - float(existing.get("amount") or 0)) > 0.00001
+                or str(payload.get("start_date") or "") != str(existing.get("start_date") or "")
+                or str(payload.get("employee_id") or "") != str(existing.get("employee_id") or "")
+                or str(payload.get("deduction_type") or "") != str(existing.get("deduction_type") or "")
+            )
+            if applied_total > 0 and immutable_changed:
+                self.send_json({"error": "A deduction with payment history cannot change its original details."}, 409)
+                return
             deduction = deduction_from_payload(payload)
+            if applied_total > 0 and deduction.get("status") not in ["Cancelled"]:
+                deduction["status"] = "Completed" if requested_amount <= applied_total + 0.00001 else "Pending"
             deduction["updated_at"] = datetime.utcnow().isoformat() + "Z"
             status, body = supabase_request(
                 "PATCH",
@@ -3953,6 +4016,16 @@ class ReportHandler(BaseHTTPRequestHandler):
             deduction_id = payload.get("id")
             if deduction_id in [None, ""]:
                 self.send_json({"error": "id is required."}, 400)
+                return
+            status_check, applications = supabase_request(
+                "GET",
+                f"deduction_applications?deduction_id=eq.{quote(str(deduction_id))}&status=eq.Applied&select=id&limit=1",
+            )
+            if status_check >= 400:
+                self.send_json({"error": applications}, status_check)
+                return
+            if isinstance(applications, list) and applications:
+                self.send_json({"error": "A deduction with payment history cannot be deleted."}, 409)
                 return
             status, body = supabase_request(
                 "DELETE",
@@ -4031,6 +4104,21 @@ class ReportHandler(BaseHTTPRequestHandler):
             if end_date:
                 params += f"&start_date=lte.{quote(end_date)}"
             status, body = supabase_request("GET", f"deduction_records?{params}")
+            self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/deduction-applications":
+            employee_kind = query.get("employee_kind", [""])[0].strip()
+            start_date = query.get("start_date", [""])[0].strip()
+            end_date = query.get("end_date", [""])[0].strip()
+            params = "select=*&status=eq.Applied&order=applied_date.desc,created_at.desc"
+            if employee_kind:
+                params += f"&employee_kind=eq.{quote(employee_kind)}"
+            if start_date:
+                params += f"&applied_date=gte.{quote(start_date)}"
+            if end_date:
+                params += f"&applied_date=lte.{quote(end_date)}"
+            status, body = supabase_request("GET", f"deduction_applications?{params}")
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 

@@ -755,6 +755,8 @@ let weeklyTimeDraft = Array.from({ length: 7 }, () => ({ clock_in: "", clock_out
 let editingTimeRecordId = null;
 let deductionActiveTab = "production";
 let deductionBonusEmployeeKind = "time";
+let deductionApprovalEmployeeKind = "production";
+let deductionApplications = [];
 let deductionStartDate = new Date().toISOString().slice(0, 10);
 let deductionEndDate = new Date().toISOString().slice(0, 10);
 let deductionEmployeeId = "";
@@ -1462,11 +1464,28 @@ function normalizeDeductionRecord(record) {
     deduction_label: String(record?.deduction_label || getDeductionTypeLabel(record?.deduction_type || "advance")).trim(),
     amount: Number.isFinite(amount) && amount > 0 ? amount : 0,
     note: String(record?.note || "").trim(),
-    status: record?.status || "Active",
+    status: record?.status || (String(record?.deduction_type || "") === ATTENDANCE_BONUS_TYPE ? "Active" : "Pending"),
     created_by: String(record?.created_by || "").trim(),
     updated_by: String(record?.updated_by || "").trim(),
     created_at: record?.created_at || now,
     updated_at: record?.updated_at || record?.created_at || now
+  };
+}
+
+function normalizeDeductionApplication(record) {
+  return {
+    id: Number(record?.id) || 0,
+    deduction_id: Number(record?.deduction_id) || 0,
+    employee_kind: normalizeDeductionKind(record?.employee_kind),
+    employee_id: Number(record?.employee_id) || 0,
+    emp_code: String(record?.emp_code || "").trim(),
+    employee_name: String(record?.employee_name || "").trim(),
+    applied_date: String(record?.applied_date || ""),
+    amount: Math.max(0, Number(record?.amount || 0)),
+    status: String(record?.status || "Applied"),
+    note: String(record?.note || "").trim(),
+    created_by: String(record?.created_by || "").trim(),
+    created_at: record?.created_at || new Date().toISOString()
   };
 }
 
@@ -1530,6 +1549,44 @@ async function createCloudDeduction(payload) {
   return created[0] || null;
 }
 
+async function hydrateDeductionApplicationsFromCloud(options = {}) {
+  const params = new URLSearchParams();
+  if (options.employee_kind) params.set("employee_kind", normalizeDeductionKind(options.employee_kind));
+  if (options.start_date) params.set("start_date", options.start_date);
+  if (options.end_date) params.set("end_date", options.end_date);
+  const query = params.toString();
+  const data = await cloudApiRequest(`/api/deduction-applications${query ? `?${query}` : ""}`);
+  const incoming = Array.isArray(data.data) ? data.data.map(normalizeDeductionApplication) : [];
+  if (!options.employee_kind && !options.start_date && !options.end_date) {
+    deductionApplications = incoming;
+  } else {
+    const incomingIds = new Set(incoming.map((record) => String(record.id)));
+    deductionApplications = [
+      ...deductionApplications.filter((record) => {
+        if (incomingIds.has(String(record.id))) return false;
+        if (options.employee_kind && record.employee_kind !== normalizeDeductionKind(options.employee_kind)) return true;
+        if (options.start_date && record.applied_date < options.start_date) return true;
+        if (options.end_date && record.applied_date > options.end_date) return true;
+        return false;
+      }),
+      ...incoming
+    ];
+  }
+  return incoming;
+}
+
+async function applyCloudDeductionBatch(appliedDate, items, actor) {
+  const data = await cloudApiRequest("/api/deduction-applications/apply", {
+    method: "POST",
+    body: JSON.stringify({
+      applied_date: appliedDate,
+      created_by: actor?.fullname || actor?.username || "",
+      items
+    })
+  });
+  return Array.isArray(data.data) ? data.data.map(normalizeDeductionApplication) : [];
+}
+
 async function updateCloudDeduction(id, payload) {
   const data = await cloudApiRequest("/api/deductions", {
     method: "PUT",
@@ -1560,8 +1617,8 @@ function getAdjustmentRecordsForRange(kind, startDate, endDate, employee = null)
   const normalizedKind = normalizeDeductionKind(kind);
   const employeeId = employee?.id ? String(employee.id) : "";
   const empCode = employee?.emp_code ? String(employee.emp_code) : "";
-  return getDeductionRecords().filter((record) => {
-    if (record.status !== "Active") return false;
+  const bonuses = getDeductionRecords().filter((record) => {
+    if (!isAttendanceBonusRecord(record) || record.status !== "Active") return false;
     if (record.employee_kind !== normalizedKind) return false;
     if (!deductionRangesOverlap(record, startDate, endDate)) return false;
     if (!employee) return true;
@@ -1570,6 +1627,56 @@ function getAdjustmentRecordsForRange(kind, startDate, endDate, employee = null)
       (empCode && String(record.emp_code) === empCode)
     );
   });
+  const appliedDeductions = deductionApplications
+    .filter((application) => {
+      if (application.status !== "Applied" || application.employee_kind !== normalizedKind) return false;
+      if (application.applied_date < startDate || application.applied_date > endDate) return false;
+      if (!employee) return true;
+      return (
+        (employeeId && String(application.employee_id) === employeeId) ||
+        (empCode && String(application.emp_code) === empCode)
+      );
+    })
+    .map((application) => {
+      const obligation = getDeductionRecords().find((record) => Number(record.id) === Number(application.deduction_id));
+      return normalizeDeductionRecord({
+        ...(obligation || {}),
+        id: `application-${application.id}`,
+        start_date: application.applied_date,
+        end_date: application.applied_date,
+        amount: application.amount,
+        status: "Active",
+        note: application.note || obligation?.note || "",
+        created_by: application.created_by || obligation?.created_by || ""
+      });
+    });
+  return [...bonuses, ...appliedDeductions];
+}
+
+function getReportAdjustmentRecords() {
+  const bonuses = getDeductionRecords().filter((record) => isAttendanceBonusRecord(record) && record.status === "Active");
+  const deductions = deductionApplications
+    .filter((application) => application.status === "Applied")
+    .map((application) => {
+      const obligation = getDeductionRecords().find((record) => Number(record.id) === Number(application.deduction_id));
+      return normalizeDeductionRecord({
+        ...(obligation || {}),
+        id: `application-${application.id}`,
+        start_date: application.applied_date,
+        end_date: application.applied_date,
+        amount: application.amount,
+        status: "Active",
+        note: application.note || obligation?.note || "",
+        created_by: application.created_by || obligation?.created_by || ""
+      });
+    });
+  return [...bonuses, ...deductions];
+}
+
+function getAppliedTotalForDeduction(deductionId) {
+  return deductionApplications
+    .filter((record) => record.status === "Applied" && Number(record.deduction_id) === Number(deductionId))
+    .reduce((sum, record) => sum + Number(record.amount || 0), 0);
 }
 
 function getDeductionsForRange(kind, startDate, endDate, employee = null) {
@@ -1622,6 +1729,7 @@ async function apiCreateDeduction(payload, actor) {
     deduction_label: getDeductionTypeLabel(payload.deduction_type),
     amount,
     note: payload.note,
+    status: bonusMode ? "Active" : "Pending",
     created_by: actor?.fullname || ""
   });
   const created = await createCloudDeduction(baseRecord);
@@ -1640,6 +1748,16 @@ async function apiUpdateDeduction(id, payload, actor) {
   const amount = Number(payload.amount || 0);
   if (!employee) throw new Error("กรุณาเลือกพนักงาน");
   if (amount <= 0) throw new Error("กรุณากรอกจำนวนเงินมากกว่า 0");
+  const appliedTotal = isAttendanceBonusRecord(existing) ? 0 : getAppliedTotalForDeduction(id);
+  if (amount < appliedTotal) throw new Error(`ยอดตั้งต้นต้องไม่น้อยกว่ายอดที่หักไปแล้ว ${money(appliedTotal)}`);
+  if (appliedTotal > 0 && (
+    amount !== Number(existing.amount) ||
+    String(payload.start_date) !== String(existing.start_date) ||
+    Number(payload.employee_id) !== Number(existing.employee_id) ||
+    String(payload.deduction_type) !== String(existing.deduction_type)
+  )) {
+    throw new Error("รายการที่เริ่มหักแล้วแก้ยอดตั้งต้น วันที่ พนักงาน หรือประเภทไม่ได้");
+  }
   const nextRecord = normalizeDeductionRecord({
     ...existing,
     employee_kind: kind,
@@ -1652,6 +1770,7 @@ async function apiUpdateDeduction(id, payload, actor) {
     deduction_label: getDeductionTypeLabel(payload.deduction_type),
     amount,
     note: payload.note,
+    status: isAttendanceBonusRecord(existing) ? "Active" : (amount <= appliedTotal ? "Completed" : "Pending"),
     updated_by: actor?.fullname || "",
     updated_at: new Date().toISOString()
   });
@@ -3214,7 +3333,7 @@ function buildReportPayload(date = reportDate, employeeIds = selectedReportEmplo
     employee_ids: employeeIds.map(Number),
     employees: getEmployees(),
     production_records: getProductionRecords(),
-    deduction_records: getDeductionRecords()
+    deduction_records: getReportAdjustmentRecords()
   };
 }
 
@@ -3237,7 +3356,7 @@ function buildFullExportPayload(user, rangeOverride = null, departmentOverride =
     employees: getEmployees(),
     production_records: getProductionRecords(),
     time_records: getTimeRecords(),
-    deduction_records: getDeductionRecords()
+    deduction_records: getReportAdjustmentRecords()
   };
 }
 
@@ -3513,7 +3632,7 @@ function renderApp(user, route) {
   }
   if (!deductionCloudBootstrapped) {
     deductionCloudBootstrapped = true;
-    hydrateDeductionsFromCloud().then(() => {
+    Promise.all([hydrateDeductionsFromCloud(), hydrateDeductionApplicationsFromCloud()]).then(() => {
       const currentRoute = location.hash.replace("#/", "");
       if (["compare-data", "summary-person", "summary-all", "summary-main", "summary-group-report", "summary-time-overview"].includes(currentRoute)) {
         render();
@@ -4338,8 +4457,14 @@ function isAttendanceBonusTab() {
   return deductionActiveTab === "bonus";
 }
 
+function isDeductionApprovalTab() {
+  return deductionActiveTab === "approval";
+}
+
 function getActiveAdjustmentEmployeeKind() {
-  return isAttendanceBonusTab() ? deductionBonusEmployeeKind : normalizeDeductionKind(deductionActiveTab);
+  if (isAttendanceBonusTab()) return deductionBonusEmployeeKind;
+  if (isDeductionApprovalTab()) return deductionApprovalEmployeeKind;
+  return normalizeDeductionKind(deductionActiveTab);
 }
 
 function getCurrentDeductionContext() {
@@ -4357,7 +4482,11 @@ function getCurrentDeductionContext() {
   const selectedEmployee = employees.find((employee) => String(employee.id) === String(selectedEmployeeId)) || null;
   const records = (bonusMode
     ? getBonusesForRange(employeeKind, range.startDate, range.endDate)
-    : getDeductionsForRange(employeeKind, range.startDate, range.endDate))
+    : getDeductionRecords().filter((record) => (
+      !isAttendanceBonusRecord(record) &&
+      record.employee_kind === employeeKind &&
+      deductionRangesOverlap(record, range.startDate, range.endDate)
+    )))
     .sort((a, b) => `${a.start_date} ${a.emp_code} ${a.deduction_label}`.localeCompare(`${b.start_date} ${b.emp_code} ${b.deduction_label}`, "th", { numeric: true }));
   const editingRecord = records.find((record) => Number(record.id) === Number(editingDeductionId)) || null;
   return { range, employees, selectedEmployee, records, editingRecord, employeeKind, bonusMode };
@@ -4377,26 +4506,115 @@ function renderDeductionEmployeeOptions(employees, selectedId) {
 }
 
 function renderDeductionRow(record) {
+  const appliedTotal = isAttendanceBonusRecord(record) ? 0 : getAppliedTotalForDeduction(record.id);
+  const remaining = Math.max(0, Number(record.amount || 0) - appliedTotal);
   return `
     <tr>
       <td><span class="deduction-date-cell">${escapeHtml(record.start_date)}</span></td>
       <td><strong>${escapeHtml(record.emp_code)}</strong></td>
       <td>${escapeHtml(record.employee_name)}</td>
       <td>${escapeHtml(record.deduction_label)}</td>
-      <td><strong>${money(record.amount)}</strong></td>
+      <td><strong>${money(record.amount)}</strong>${isAttendanceBonusRecord(record) ? "" : `<small class="deduction-row-balance">คงเหลือ ${money(remaining)}</small>`}</td>
       <td>${escapeHtml(record.note || "-")}</td>
       <td>${escapeHtml(record.created_by || "-")}</td>
       <td>
         <div class="table-actions">
-          <button class="btn btn-small btn-outline" type="button" data-edit-deduction="${record.id}">แก้ไข</button>
-          <button class="btn btn-small btn-danger" type="button" data-delete-deduction="${record.id}">ลบ</button>
+          ${appliedTotal > 0
+            ? `<span class="badge badge-muted">เริ่มหักแล้ว</span>`
+            : `<button class="btn btn-small btn-outline" type="button" data-edit-deduction="${record.id}">แก้ไข</button>
+               <button class="btn btn-small btn-danger" type="button" data-delete-deduction="${record.id}">ลบ</button>`}
         </div>
       </td>
     </tr>
   `;
 }
 
+function getPendingDeductionRows(kind) {
+  return getDeductionRecords()
+    .filter((record) => {
+      if (isAttendanceBonusRecord(record) || record.employee_kind !== normalizeDeductionKind(kind)) return false;
+      if (record.status === "Cancelled") return false;
+      return Number(record.amount || 0) - getAppliedTotalForDeduction(record.id) > 0.004;
+    })
+    .map((record) => {
+      const applied = getAppliedTotalForDeduction(record.id);
+      return { ...record, applied_amount: applied, remaining_amount: Math.max(0, Number(record.amount || 0) - applied) };
+    })
+    .sort((a, b) => `${a.emp_code} ${a.start_date} ${a.id}`.localeCompare(`${b.emp_code} ${b.start_date} ${b.id}`, "th", { numeric: true }));
+}
+
+function renderDeductionApproval(user, moduleItem) {
+  const rows = getPendingDeductionRows(deductionApprovalEmployeeKind);
+  const employeeCount = new Set(rows.map((row) => `${row.employee_kind}-${row.employee_id || row.emp_code}`)).size;
+  const remainingTotal = rows.reduce((sum, row) => sum + row.remaining_amount, 0);
+  const kindLabel = deductionApprovalEmployeeKind === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก";
+  return `
+    <section class="summary-page deduction-page deduction-approval-page">
+      <div class="summary-header">
+        <div>
+          <h2>${escapeHtml(moduleItem.label)}</h2>
+          <p>เลือกรายการและกำหนดยอดที่จะหักในรอบนี้ รายการที่ยังหักไม่ครบจะกลับมารอด้วยยอดคงเหลือเดิม</p>
+        </div>
+        <span class="badge badge-success deduction-cloud-badge">ฐานข้อมูลกลางพร้อมใช้งาน</span>
+      </div>
+      <div class="module-tabs deduction-tabs">
+        <button class="module-tab" type="button" data-deduction-tab="production">พนักงานเหมาน้ำหนัก</button>
+        <button class="module-tab" type="button" data-deduction-tab="time">พนักงานเหมาเวลา</button>
+        <button class="module-tab bonus-tab" type="button" data-deduction-tab="bonus">ลงเบี้ยขยัน</button>
+        <button class="module-tab active approval-tab" type="button" data-deduction-tab="approval">อนุมัติหักเงิน</button>
+      </div>
+      ${deductionMessage ? `<div class="alert ${deductionMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(deductionMessage)}</div>` : ""}
+      <section class="panel deduction-approval-toolbar">
+        <div class="deduction-kind-switch" role="group" aria-label="ประเภทพนักงานที่อนุมัติหักเงิน">
+          <span>ประเภทพนักงาน</span>
+          <button class="${deductionApprovalEmployeeKind === "production" ? "active" : ""}" type="button" data-approval-employee-kind="production">พนักงานเหมาน้ำหนัก</button>
+          <button class="${deductionApprovalEmployeeKind === "time" ? "active" : ""}" type="button" data-approval-employee-kind="time">พนักงานเหมาเวลา</button>
+        </div>
+        <label class="field deduction-approval-date">
+          <span>วันที่นำยอดไปหัก</span>
+          <input id="deductionApprovalDate" type="date" value="${escapeHtml(deductionStartDate)}" required />
+        </label>
+      </section>
+      <div class="summary-metrics deduction-metrics">
+        <div class="metric-card metric-blue"><span>รายการรอหัก</span><strong>${rows.length.toLocaleString("th-TH")} รายการ</strong><small>${kindLabel}</small></div>
+        <div class="metric-card metric-green"><span>จำนวนพนักงาน</span><strong>${employeeCount.toLocaleString("th-TH")} คน</strong><small>ที่ยังมียอดคงเหลือ</small></div>
+        <div class="metric-card metric-orange"><span>ยอดคงเหลือทั้งหมด</span><strong>${money(remainingTotal)}</strong><small>ยังไม่กระทบยอดสุทธิจนกว่าจะยืนยัน</small></div>
+      </div>
+      <form id="deductionApprovalForm">
+        <section class="table-card deduction-approval-table-card">
+          <div class="table-heading deduction-table-heading">
+            <div><strong>รายการรอการหัก</strong><span>แก้ยอดรอบนี้ได้ แต่ห้ามเกินยอดคงเหลือ</span></div>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th class="select-cell">เลือก</th><th>วันที่เริ่มรายการ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>ยอดตั้งต้น</th><th>หักสะสม</th><th>ยอดคงเหลือ</th><th>หักรอบนี้</th></tr></thead>
+              <tbody>
+                ${rows.length ? rows.map((row) => `
+                  <tr>
+                    <td class="select-cell"><input type="checkbox" data-approve-deduction="${row.id}" aria-label="เลือกรายการ ${escapeHtml(row.deduction_label)} ของ ${escapeHtml(row.employee_name)}" /></td>
+                    <td><span class="deduction-date-cell">${escapeHtml(row.start_date)}</span></td>
+                    <td><strong>${escapeHtml(row.emp_code)}</strong></td>
+                    <td>${escapeHtml(row.employee_name)}</td>
+                    <td>${escapeHtml(row.deduction_label)}</td>
+                    <td>${money(row.amount)}</td>
+                    <td>${money(row.applied_amount)}</td>
+                    <td><strong class="deduction-remaining">${money(row.remaining_amount)}</strong></td>
+                    <td><input class="deduction-approval-amount" data-approval-amount="${row.id}" type="number" min="0.01" max="${row.remaining_amount}" step="0.01" value="${row.remaining_amount}" disabled /></td>
+                  </tr>`).join("") : `<tr><td colspan="9" class="empty-cell">ไม่มีรายการค้างสำหรับ${kindLabel}</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <div class="deduction-approval-footer">
+          <div><span>เลือกแล้ว</span><strong id="deductionApprovalSelectedCount">0 รายการ</strong><small id="deductionApprovalSelectedTotal">รวม ฿0</small></div>
+          <button class="btn btn-primary deduction-submit-button" type="submit" ${rows.length ? "" : "disabled"}>ยืนยันหักเงินรอบนี้</button>
+        </div>
+      </form>
+    </section>`;
+}
+
 function renderDeductionEntry(user, moduleItem) {
+  if (isDeductionApprovalTab()) return renderDeductionApproval(user, moduleItem);
   const context = getCurrentDeductionContext();
   const editing = context.editingRecord;
   const formEmployeeId = editing?.employee_id || context.selectedEmployee?.id || "";
@@ -4411,7 +4629,7 @@ function renderDeductionEntry(user, moduleItem) {
       <div class="summary-header">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>บันทึกรายการหักและเบี้ยขยันลงฐานข้อมูลกลาง เพื่อนำไปคำนวณยอดสุทธิในรายงานและใบเสร็จโดยอัตโนมัติ</p>
+          <p>บันทึกรายการหักไว้รออนุมัติ หรือเพิ่มเบี้ยขยันลงฐานข้อมูลกลางสำหรับรายงานและใบเสร็จ</p>
         </div>
         <span class="badge badge-success deduction-cloud-badge">ฐานข้อมูลกลางพร้อมใช้งาน</span>
       </div>
@@ -4420,6 +4638,7 @@ function renderDeductionEntry(user, moduleItem) {
         <button class="module-tab ${deductionActiveTab === "production" ? "active" : ""}" type="button" data-deduction-tab="production">พนักงานเหมาน้ำหนัก</button>
         <button class="module-tab ${deductionActiveTab === "time" ? "active" : ""}" type="button" data-deduction-tab="time">พนักงานเหมาเวลา</button>
         <button class="module-tab ${deductionActiveTab === "bonus" ? "active bonus-tab" : ""}" type="button" data-deduction-tab="bonus">ลงเบี้ยขยัน</button>
+        <button class="module-tab ${deductionActiveTab === "approval" ? "active approval-tab" : ""}" type="button" data-deduction-tab="approval">อนุมัติหักเงิน</button>
       </div>
 
       ${context.bonusMode ? `
@@ -4453,22 +4672,22 @@ function renderDeductionEntry(user, moduleItem) {
       <div class="deduction-export-note">
         <span class="deduction-export-note-mark">฿</span>
         <div>
-          <strong>${context.bonusMode ? "ระบบจะบวกเบี้ยขยันให้อัตโนมัติ" : "ระบบจะหักยอดให้อัตโนมัติ"}</strong>
-          <span>เมื่อช่วงวันที่ Export ครอบคลุมวันที่ ${escapeHtml(context.range.startDate)} ยอดนี้จะถูก${context.bonusMode ? "บวก" : "หัก"}ในการคำนวณทันที</span>
+          <strong>${context.bonusMode ? "ระบบจะบวกเบี้ยขยันให้อัตโนมัติ" : "รายการหักจะถูกพักไว้ก่อน"}</strong>
+          <span>${context.bonusMode ? `เมื่อช่วงวันที่ Export ครอบคลุมวันที่ ${escapeHtml(context.range.startDate)} ยอดนี้จะถูกบวกในการคำนวณทันที` : "ยอดจะยังไม่ถูกหักจากเงิน จนกว่าจะเลือกและยืนยันในแท็บอนุมัติหักเงิน"}</span>
         </div>
       </div>
 
       <div class="summary-metrics deduction-metrics">
         <div class="metric-card metric-blue"><span>${actionLabel}</span><strong>${context.records.length.toLocaleString("th-TH")} รายการ</strong><small>ประจำวันที่ ${escapeHtml(context.range.startDate)}</small></div>
         <div class="metric-card metric-green"><span>จำนวนพนักงาน</span><strong>${employeeCount.toLocaleString("th-TH")} คน</strong><small>${employeeKindLabel}</small></div>
-        <div class="metric-card ${context.bonusMode ? "metric-green" : "metric-orange"}"><span>ยอด${context.bonusMode ? "เบี้ยขยัน" : "หัก"}รวมวันนี้</span><strong>${money(totalAmount)}</strong><small>${context.bonusMode ? "เงินเพิ่มก่อนคำนวณยอดสุทธิ" : "ยอดหักก่อนคำนวณเงินสุทธิ"}</small></div>
+        <div class="metric-card ${context.bonusMode ? "metric-green" : "metric-orange"}"><span>${context.bonusMode ? "ยอดเบี้ยขยันรวมวันนี้" : "ยอดตั้งต้นรวมวันนี้"}</span><strong>${money(totalAmount)}</strong><small>${context.bonusMode ? "เงินเพิ่มก่อนคำนวณยอดสุทธิ" : "รออนุมัติก่อนนำไปหักเงินจริง"}</small></div>
       </div>
 
       <section class="panel deduction-form-panel">
         <div class="section-title-row">
           <div>
             <h3>${editing ? `แก้ไข${actionLabel}` : `เพิ่ม${actionLabel}`}</h3>
-            <p class="muted-text">กรอกจำนวนเงินจริง ระบบจะนำยอดนี้ไป${context.bonusMode ? "บวก" : "หัก"}ในรายงานตามวันที่ที่เลือก</p>
+            <p class="muted-text">${context.bonusMode ? "กรอกจำนวนเงินจริง ระบบจะนำยอดไปบวกในรายงานตามวันที่ที่เลือก" : "กรอกยอดตั้งต้น รายการจะอยู่ในคิวรอและเก็บวันที่นี้ไว้จนกว่าจะหักครบ"}</p>
           </div>
           ${editing ? `<button class="btn btn-outline" id="cancelDeductionEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
         </div>
@@ -4527,7 +4746,7 @@ function renderDeductionEntry(user, moduleItem) {
                 <th>รหัส</th>
                 <th>ชื่อพนักงาน</th>
                 <th>${context.bonusMode ? "ประเภทเงินเพิ่ม" : "รายการหัก"}</th>
-                <th>จำนวนเงิน</th>
+                <th>${context.bonusMode ? "จำนวนเงิน" : "ยอดตั้งต้น"}</th>
                 <th>หมายเหตุ</th>
                 <th>ผู้บันทึก</th>
                 <th>จัดการ</th>
@@ -4546,17 +4765,25 @@ function renderDeductionEntry(user, moduleItem) {
 function bindDeductionEvents(user) {
   document.querySelectorAll("[data-deduction-tab]").forEach((button) => {
     button.addEventListener("click", async () => {
-      deductionActiveTab = button.dataset.deductionTab === "bonus" ? "bonus" : normalizeDeductionKind(button.dataset.deductionTab);
+      const requestedTab = button.dataset.deductionTab;
+      deductionActiveTab = ["bonus", "approval"].includes(requestedTab) ? requestedTab : normalizeDeductionKind(requestedTab);
       deductionEmployeeId = "";
       editingDeductionId = null;
       const employeeKind = getActiveAdjustmentEmployeeKind();
       setDeductionMessage("กำลังโหลดข้อมูลจากฐานกลาง...");
       render();
       try {
-        await hydrateDeductionsFromCloud({ employee_kind: employeeKind, start_date: deductionStartDate, end_date: deductionEndDate });
+        if (isDeductionApprovalTab()) {
+          await Promise.all([hydrateDeductionsFromCloud(), hydrateDeductionApplicationsFromCloud()]);
+        } else {
+          await Promise.all([
+            hydrateDeductionsFromCloud({ employee_kind: employeeKind, start_date: deductionStartDate, end_date: deductionEndDate }),
+            hydrateDeductionApplicationsFromCloud({ employee_kind: employeeKind, start_date: deductionStartDate, end_date: deductionEndDate })
+          ]);
+        }
         setDeductionMessage("");
       } catch (error) {
-        setDeductionMessage(`${error instanceof Error ? error.message : "โหลดข้อมูลไม่สำเร็จ"} กรุณาตรวจสอบว่ามีตาราง deduction_records ใน Supabase แล้ว`, "error");
+        setDeductionMessage(`${error instanceof Error ? error.message : "โหลดข้อมูลไม่สำเร็จ"} กรุณารันไฟล์ supabase_deduction_records_migration.sql ใน Supabase`, "error");
       }
       render();
     });
@@ -4574,6 +4801,21 @@ function bindDeductionEvents(user) {
         setDeductionMessage("");
       } catch (error) {
         setDeductionMessage(`${error instanceof Error ? error.message : "โหลดข้อมูลไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
+      }
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-approval-employee-kind]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      deductionApprovalEmployeeKind = normalizeDeductionKind(button.dataset.approvalEmployeeKind);
+      setDeductionMessage("กำลังโหลดรายการค้างจากฐานกลาง...");
+      render();
+      try {
+        await Promise.all([hydrateDeductionsFromCloud(), hydrateDeductionApplicationsFromCloud()]);
+        setDeductionMessage("");
+      } catch (error) {
+        setDeductionMessage(`${error instanceof Error ? error.message : "โหลดรายการค้างไม่สำเร็จ"} กรุณารันไฟล์ migration ของระบบหักเงินใน Supabase`, "error");
       }
       render();
     });
@@ -4657,6 +4899,67 @@ function bindDeductionEvents(user) {
       }
       render();
     });
+  });
+
+  const updateApprovalSummary = () => {
+    const checked = [...document.querySelectorAll("[data-approve-deduction]:checked")];
+    const total = checked.reduce((sum, checkbox) => {
+      const input = document.querySelector(`[data-approval-amount="${checkbox.dataset.approveDeduction}"]`);
+      return sum + Number(input?.value || 0);
+    }, 0);
+    const countNode = document.querySelector("#deductionApprovalSelectedCount");
+    const totalNode = document.querySelector("#deductionApprovalSelectedTotal");
+    if (countNode) countNode.textContent = `${checked.length.toLocaleString("th-TH")} รายการ`;
+    if (totalNode) totalNode.textContent = `รวม ${money(total)}`;
+  };
+
+  document.querySelectorAll("[data-approve-deduction]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const input = document.querySelector(`[data-approval-amount="${checkbox.dataset.approveDeduction}"]`);
+      if (input) input.disabled = !checkbox.checked;
+      updateApprovalSummary();
+    });
+  });
+  document.querySelectorAll("[data-approval-amount]").forEach((input) => input.addEventListener("input", updateApprovalSummary));
+
+  document.querySelector("#deductionApprovalForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const appliedDate = String(document.querySelector("#deductionApprovalDate")?.value || "");
+    const items = [...document.querySelectorAll("[data-approve-deduction]:checked")].map((checkbox) => {
+      const deductionId = Number(checkbox.dataset.approveDeduction);
+      const input = document.querySelector(`[data-approval-amount="${deductionId}"]`);
+      return { deduction_id: deductionId, amount: Number(input?.value || 0) };
+    });
+    if (!appliedDate) {
+      setDeductionMessage("กรุณาเลือกวันที่นำยอดไปหัก", "error");
+      render();
+      return;
+    }
+    if (!items.length) {
+      setDeductionMessage("กรุณาเลือกรายการที่ต้องการหักอย่างน้อย 1 รายการ", "error");
+      render();
+      return;
+    }
+    const pendingById = new Map(getPendingDeductionRows(deductionApprovalEmployeeKind).map((row) => [Number(row.id), row]));
+    const invalid = items.find((item) => item.amount <= 0 || item.amount > Number(pendingById.get(item.deduction_id)?.remaining_amount || 0));
+    if (invalid) {
+      setDeductionMessage("ยอดหักรอบนี้ต้องมากกว่า 0 และไม่เกินยอดคงเหลือ", "error");
+      render();
+      return;
+    }
+    try {
+      setDeductionMessage("กำลังยืนยันยอดหักกับฐานข้อมูลกลาง...");
+      render();
+      await applyCloudDeductionBatch(appliedDate, items, user);
+      deductionStartDate = appliedDate;
+      deductionEndDate = appliedDate;
+      await Promise.all([hydrateDeductionsFromCloud(), hydrateDeductionApplicationsFromCloud()]);
+      addAuditLog(user, "APPLY_DEDUCTION_BATCH", `Applied ${items.length} deductions on ${appliedDate}`);
+      setDeductionMessage(`ยืนยันหักเงิน ${items.length.toLocaleString("th-TH")} รายการเรียบร้อยแล้ว`);
+    } catch (error) {
+      setDeductionMessage(`${error instanceof Error ? error.message : "ยืนยันยอดหักไม่สำเร็จ"} กรุณาตรวจสอบยอดคงเหลือและ Supabase`, "error");
+    }
+    render();
   });
 }
 
@@ -5093,6 +5396,7 @@ function buildBackupData() {
       production_sessions: getProductionSessions(),
       time_records: getTimeRecords(),
       deduction_records: getDeductionRecords(),
+      deduction_applications: deductionApplications,
       audit_logs: getAuditLogs(),
       account_users: getAccountUsers()
     }
@@ -5209,7 +5513,7 @@ function bindBackupEvents(user) {
         const parsed = JSON.parse(String(reader.result || "{}"));
         const data = parsed.data || parsed;
         if (!data || typeof data !== "object") throw new Error("Invalid backup file.");
-        const knownKeys = ["account_users", "employees", "time_employees", "wage_rates", "production_records", "production_sessions", "time_records", "deduction_records", "audit_logs"];
+        const knownKeys = ["account_users", "employees", "time_employees", "wage_rates", "production_records", "production_sessions", "time_records", "deduction_records", "deduction_applications", "audit_logs"];
         const hasKnownData = knownKeys.some((key) => Array.isArray(data[key]));
         if (!hasKnownData) throw new Error("Backup file does not contain supported data.");
         const confirmed = window.confirm(
@@ -10459,7 +10763,7 @@ function getSummaryExportPayload(user, format) {
     printed_by_position: getExportPositionLabel(user),
     employees: getEmployees(),
     production_records: getProductionRecords(),
-    deduction_records: getDeductionRecords(),
+    deduction_records: getReportAdjustmentRecords(),
     export_sections: { ...summaryExportOptions },
     export_fields: JSON.parse(JSON.stringify(summaryExportFields)),
     export_format: format
