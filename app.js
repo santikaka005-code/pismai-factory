@@ -11,7 +11,10 @@ const CLOUD_MIGRATION_KEY = "pismai_factory_cloud_migration_v1";
 const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
 const AUDIT_LOG_PASSWORD = "1150";
 const REPORT_API_BASE =
-  location.protocol === "file:" ? "http://127.0.0.1:8787" : location.origin;
+  // The desktop launcher opens index.html directly. It must use the same
+  // cloud API as the hosted app, otherwise its browser-only data can never
+  // reach iPad or other devices.
+  location.protocol === "file:" ? "https://pismai-factory-test.onrender.com" : location.origin;
 const TIME_DAILY_WAGE = 347;
 const TIME_SPECIAL_DAILY_WAGE = 365;
 const TIME_STANDARD_HOURS = 8;
