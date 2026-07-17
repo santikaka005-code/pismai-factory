@@ -7,7 +7,7 @@ const PRODUCTION_SESSIONS_KEY = "pismai_factory_production_sessions";
 const TIME_RECORDS_KEY = "pismai_factory_time_records";
 const DEDUCTION_RECORDS_KEY = "pismai_factory_deduction_records";
 const AUDIT_LOG_KEY = "pismai_factory_audit_log";
-const CLOUD_MIGRATION_KEY = "pismai_factory_cloud_migration_v1";
+const CLOUD_MIGRATION_KEY = "pismai_factory_cloud_migration_v2";
 const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
 const AUDIT_LOG_PASSWORD = "1150";
 const REPORT_API_BASE =
@@ -1258,7 +1258,11 @@ function queueLiveStateSync(table) {
 async function bootstrapLiveStateFromCloud() {
   const response = await cloudApiRequest("/api/state");
   const state = response.data || {};
-  const needsMigration = localStorage.getItem(CLOUD_MIGRATION_KEY) !== "done";
+  // Only the desktop file launcher owns legacy browser-only data. A phone or
+  // iPad must only read cloud data, never upload its potentially stale cache.
+  const needsMigration =
+    location.protocol === "file:" &&
+    localStorage.getItem(CLOUD_MIGRATION_KEY) !== "done";
   applyingCloudState = true;
   try {
     for (const [table, config] of Object.entries(liveStateConfig)) {
@@ -1288,9 +1292,36 @@ async function bootstrapLiveStateFromCloud() {
         localStorage.setItem(config.key, JSON.stringify(cloudRows));
       }
     }
+    if (needsMigration) {
+      await migrateRemainingLocalDataToCloud();
+    }
     localStorage.setItem(CLOUD_MIGRATION_KEY, "done");
   } finally {
     applyingCloudState = false;
+  }
+}
+
+async function migrateRemainingLocalDataToCloud() {
+  // These older sections were saved only in the browser. Migrate them once
+  // before cloud hydration so an existing desktop dataset is not discarded.
+  await Promise.all([
+    syncAccountsToCloud().catch(() => []),
+    syncEmployeesToCloud().catch(() => []),
+    syncTimeEmployeesToCloud().catch(() => [])
+  ]);
+  const rates = getWageRates();
+  if (rates.length) {
+    await cloudApiRequest("/api/wage-rates/sync", {
+      method: "POST",
+      body: JSON.stringify({ rows: rates })
+    });
+  }
+  const deductions = getDeductionRecords();
+  if (deductions.length) {
+    await cloudApiRequest("/api/deductions/sync", {
+      method: "POST",
+      body: JSON.stringify({ rows: deductions })
+    });
   }
 }
 

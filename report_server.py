@@ -4192,6 +4192,40 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path == "/api/wage-rates/sync":
+            rows = payload.get("rows", [])
+            if not isinstance(rows, list):
+                self.send_json({"error": "rows must be a list"}, 400)
+                return
+            rates = []
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                row = {
+                    "item_type": str(item.get("item_type", "")).strip(),
+                    "rate": item.get("rate", 0),
+                    "effective_date": item.get("effective_date"),
+                    "note": item.get("note") or None,
+                    "created_by": item.get("created_by") or None,
+                }
+                if item.get("id") not in [None, ""]:
+                    row["id"] = item.get("id")
+                if row["item_type"] and row["effective_date"]:
+                    rates.append(row)
+            status, body = sync_rows_by_id("wage_rates", rates)
+            self.send_json({"data": body.get("synced", []) if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/deductions/sync":
+            rows = payload.get("rows", [])
+            if not isinstance(rows, list):
+                self.send_json({"error": "rows must be a list"}, 400)
+                return
+            deductions = [deduction_from_payload(item) for item in rows if isinstance(item, dict)]
+            status, body = sync_rows_by_id("deduction_records", deductions)
+            self.send_json({"data": body.get("synced", []) if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
         if parsed.path == "/api/time-employees":
             search = query.get("search", [""])[0].strip()
             params = "select=*&order=emp_code.asc"
