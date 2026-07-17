@@ -394,8 +394,11 @@ def live_state_row(table: str, payload: dict) -> dict:
         flower = payload.get("flower_weight", payload.get("flower", 0)) or 0
         row = {
             "record_date": payload.get("record_date") or payload.get("date"),
-            "session_id": payload.get("session_id"),
-            "employee_id": payload.get("employee_id"),
+            # Legacy browser ids belong to a different local database. Keep
+            # them in raw_payload, rather than failing cloud migration on a
+            # foreign-key mismatch.
+            "session_id": None,
+            "employee_id": None,
             "emp_code": payload.get("emp_code"),
             "employee_name": payload.get("employee_name") or payload.get("fullname"),
             "pay_group": payload.get("pay_group"),
@@ -417,7 +420,7 @@ def live_state_row(table: str, payload: dict) -> dict:
     elif table == "time_records":
         row = {
             "work_date": payload.get("work_date") or payload.get("record_date") or payload.get("date"),
-            "employee_id": payload.get("employee_id"),
+            "employee_id": None,
             "emp_code": payload.get("emp_code"),
             "employee_name": payload.get("employee_name") or payload.get("fullname"),
             "check_in": payload.get("check_in") or payload.get("clock_in"),
