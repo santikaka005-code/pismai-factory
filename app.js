@@ -7,6 +7,7 @@ const PRODUCTION_SESSIONS_KEY = "pismai_factory_production_sessions";
 const TIME_RECORDS_KEY = "pismai_factory_time_records";
 const DEDUCTION_RECORDS_KEY = "pismai_factory_deduction_records";
 const AUDIT_LOG_KEY = "pismai_factory_audit_log";
+const CLOUD_MIGRATION_KEY = "pismai_factory_cloud_migration_v1";
 const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
 const AUDIT_LOG_PASSWORD = "1150";
 const REPORT_API_BASE =
@@ -773,6 +774,9 @@ let accountCloudBootstrapped = false;
 let wageRateCloudBootstrapped = false;
 let employeeCloudBootstrapped = false;
 let deductionCloudBootstrapped = false;
+let liveStateCloudBootstrapped = false;
+let applyingCloudState = false;
+const liveStateSyncTimers = new Map();
 let lastRenderedRoute = "";
 let batchEntryText = "";
 let batchGridState = {
@@ -1224,6 +1228,67 @@ async function cloudApiRequest(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+const liveStateConfig = {
+  production_sessions: { key: PRODUCTION_SESSIONS_KEY, read: getProductionSessions },
+  production_records: { key: PRODUCTION_RECORDS_KEY, read: getProductionRecords },
+  time_records: { key: TIME_RECORDS_KEY, read: getTimeRecords },
+  audit_logs: { key: AUDIT_LOG_KEY, read: getAuditLogs }
+};
+
+function queueLiveStateSync(table) {
+  if (applyingCloudState || !liveStateConfig[table]) return;
+  clearTimeout(liveStateSyncTimers.get(table));
+  liveStateSyncTimers.set(table, setTimeout(async () => {
+    try {
+      await cloudApiRequest("/api/state", {
+        method: "POST",
+        body: JSON.stringify({ table, rows: liveStateConfig[table].read() })
+      });
+    } catch (error) {
+      console.error(`Cloud sync failed for ${table}.`, error);
+    }
+  }, 150));
+}
+
+async function bootstrapLiveStateFromCloud() {
+  const response = await cloudApiRequest("/api/state");
+  const state = response.data || {};
+  const needsMigration = localStorage.getItem(CLOUD_MIGRATION_KEY) !== "done";
+  applyingCloudState = true;
+  try {
+    for (const [table, config] of Object.entries(liveStateConfig)) {
+      const cloudRows = Array.isArray(state[table]) ? state[table] : [];
+      const localRows = config.read();
+      if (needsMigration && localRows.length) {
+        const merged = [...cloudRows];
+        const byId = new Map(cloudRows.map((row) => [String(row.id), row]));
+        let nextId = Math.max(0, ...cloudRows.map((row) => Number(row.id) || 0));
+        localRows.forEach((localRow) => {
+          const existing = byId.get(String(localRow.id));
+          if (!existing) {
+            merged.push(localRow);
+            byId.set(String(localRow.id), localRow);
+            return;
+          }
+          if (JSON.stringify(existing) === JSON.stringify(localRow)) return;
+          nextId += 1;
+          merged.push({ ...localRow, id: nextId });
+        });
+        await cloudApiRequest("/api/state", {
+          method: "POST",
+          body: JSON.stringify({ table, rows: merged })
+        });
+        localStorage.setItem(config.key, JSON.stringify(merged));
+      } else {
+        localStorage.setItem(config.key, JSON.stringify(cloudRows));
+      }
+    }
+    localStorage.setItem(CLOUD_MIGRATION_KEY, "done");
+  } finally {
+    applyingCloudState = false;
+  }
 }
 
 function normalizeCloudAccountUser(accountUser) {
@@ -2418,6 +2483,7 @@ function getProductionSessions() {
 
 function saveProductionSessions(sessions) {
   localStorage.setItem(PRODUCTION_SESSIONS_KEY, JSON.stringify(sessions));
+  queueLiveStateSync("production_sessions");
 }
 
 function getActiveProductionSession() {
@@ -2473,6 +2539,7 @@ function getAuditLogs() {
 
 function saveAuditLogs(logs) {
   localStorage.setItem(AUDIT_LOG_KEY, JSON.stringify(logs));
+  queueLiveStateSync("audit_logs");
 }
 
 function addAuditLog(user, action, detail) {
@@ -2790,6 +2857,7 @@ function getProductionRecords() {
 
 function saveProductionRecords(records) {
   localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(records));
+  queueLiveStateSync("production_records");
 }
 
 function normalizeTimeRecordWage(record) {
@@ -2827,6 +2895,7 @@ function getTimeRecords() {
 
 function saveTimeRecords(records) {
   localStorage.setItem(TIME_RECORDS_KEY, JSON.stringify(records));
+  queueLiveStateSync("time_records");
 }
 
 function nextLocalEmployeeId(...groups) {
@@ -3605,6 +3674,12 @@ async function handleLogin(event) {
 }
 
 function renderApp(user, route) {
+  if (!liveStateCloudBootstrapped) {
+    liveStateCloudBootstrapped = true;
+    bootstrapLiveStateFromCloud().then(() => render()).catch((error) => {
+      console.warn("Live cloud state bootstrap failed.", error);
+    });
+  }
   if (!accountCloudBootstrapped) {
     accountCloudBootstrapped = true;
     hydrateAccountsFromCloud().catch((error) => {

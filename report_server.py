@@ -77,6 +77,12 @@ BACKUP_TABLES = [
     "deduction_applications",
     "audit_logs",
 ]
+LIVE_STATE_TABLES = {
+    "production_sessions",
+    "production_records",
+    "time_records",
+    "audit_logs",
+}
 SYSTEM_ACCOUNT_PROFILES = {
     "Santi": {
         "username": "Santi",
@@ -367,6 +373,84 @@ def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
         if isinstance(body, list):
             synced.extend(body)
     return 200, {"synced": synced}
+
+
+def live_state_row(table: str, payload: dict) -> dict:
+    """Convert the browser cache shape to the stable Supabase shape."""
+    row_id = payload.get("id")
+    if table == "production_sessions":
+        row = {
+            "session_date": payload.get("session_date") or payload.get("date"),
+            "fruit_type": payload.get("fruit_type") or "mangosteen",
+            "status": payload.get("status") or "open",
+            "created_by": payload.get("created_by"),
+            "closed_by": payload.get("closed_by"),
+            "opened_at": payload.get("opened_at") or payload.get("start_time") or datetime.utcnow().isoformat() + "Z",
+            "closed_at": payload.get("closed_at") or payload.get("end_time") or None,
+            "raw_payload": payload,
+        }
+    elif table == "production_records":
+        water = payload.get("water_weight", payload.get("water", 0)) or 0
+        flower = payload.get("flower_weight", payload.get("flower", 0)) or 0
+        row = {
+            "record_date": payload.get("record_date") or payload.get("date"),
+            "session_id": payload.get("session_id"),
+            "employee_id": payload.get("employee_id"),
+            "emp_code": payload.get("emp_code"),
+            "employee_name": payload.get("employee_name") or payload.get("fullname"),
+            "pay_group": payload.get("pay_group"),
+            "fruit_type": payload.get("fruit_type") or "mangosteen",
+            "pile_no": str(payload.get("pile_no", payload.get("pile", ""))) or None,
+            "item_type": payload.get("item_type"),
+            "water_weight": water,
+            "flower_weight": flower,
+            "total_weight": payload.get("total_weight", float(water) + float(flower)),
+            "rate": payload.get("rate", 0) or 0,
+            "amount": payload.get("amount", payload.get("total_amount", payload.get("grand_total", 0))) or 0,
+            "note": payload.get("note"),
+            "created_by": payload.get("created_by"),
+            "updated_by": payload.get("updated_by"),
+            "created_at": payload.get("created_at") or datetime.utcnow().isoformat() + "Z",
+            "updated_at": payload.get("updated_at") or payload.get("created_at") or datetime.utcnow().isoformat() + "Z",
+            "raw_payload": payload,
+        }
+    elif table == "time_records":
+        row = {
+            "work_date": payload.get("work_date") or payload.get("record_date") or payload.get("date"),
+            "employee_id": payload.get("employee_id"),
+            "emp_code": payload.get("emp_code"),
+            "employee_name": payload.get("employee_name") or payload.get("fullname"),
+            "check_in": payload.get("check_in") or payload.get("clock_in"),
+            "check_out": payload.get("check_out") or payload.get("clock_out"),
+            "break_minutes": payload.get("break_minutes", 0) or 0,
+            "total_minutes": payload.get("total_minutes", payload.get("net_minutes", 0)) or 0,
+            "note": payload.get("note"),
+            "created_by": payload.get("created_by"),
+            "updated_by": payload.get("updated_by"),
+            "created_at": payload.get("created_at") or datetime.utcnow().isoformat() + "Z",
+            "updated_at": payload.get("updated_at") or payload.get("created_at") or datetime.utcnow().isoformat() + "Z",
+            "raw_payload": payload,
+        }
+    else:
+        row = {
+            "action": payload.get("action") or "UNKNOWN",
+            "module": payload.get("module"),
+            "description": payload.get("description") or payload.get("detail"),
+            "created_by": payload.get("created_by"),
+            "user_fullname": payload.get("user_fullname"),
+            "created_at": payload.get("created_at") or datetime.utcnow().isoformat() + "Z",
+            "metadata": payload,
+        }
+    if row_id not in [None, ""]:
+        row["id"] = row_id
+    return row
+
+
+def live_state_to_client(table: str, row: dict) -> dict:
+    raw = row.get("raw_payload") if table != "audit_logs" else row.get("metadata")
+    if isinstance(raw, dict):
+        return {**raw, "id": row.get("id", raw.get("id"))}
+    return row
 
 
 def supabase_configured() -> bool:
@@ -3475,6 +3559,24 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"status": "ok"})
             return
 
+        if parsed.path == "/api/state":
+            table = str(payload.get("table", "")).strip()
+            rows = payload.get("rows", [])
+            if table not in LIVE_STATE_TABLES or not isinstance(rows, list):
+                self.send_json({"error": "Invalid live-state table or rows."}, 400)
+                return
+            converted = [live_state_row(table, row) for row in rows if isinstance(row, dict)]
+            status, body = sync_rows_by_id(table, converted)
+            if status < 400:
+                ids = [str(row.get("id")) for row in converted if row.get("id") not in [None, ""]]
+                delete_path = table if not ids else f"{table}?id=not.in.({','.join(quote(value) for value in ids)})"
+                delete_status, delete_body = supabase_request("DELETE", delete_path, prefer="return=minimal")
+                if delete_status >= 400:
+                    self.send_json({"error": delete_body}, delete_status)
+                    return
+            self.send_json({"data": body.get("synced", []) if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
         if parsed.path == "/api/backup/restore":
             if not backup_authorized(self):
                 self.send_json({"error": "Backup code is required."}, 403)
@@ -4056,6 +4158,17 @@ class ReportHandler(BaseHTTPRequestHandler):
                 },
                 200 if status < 500 and time_status < 500 else max(status, time_status),
             )
+            return
+
+        if parsed.path == "/api/state":
+            state = {}
+            for table in LIVE_STATE_TABLES:
+                status, body = supabase_request("GET", f"{table}?select=*&order=id.asc")
+                if status >= 400:
+                    self.send_json({"error": body, "table": table}, status)
+                    return
+                state[table] = [live_state_to_client(table, row) for row in body]
+            self.send_json({"data": state})
             return
 
         if parsed.path == "/api/employees":

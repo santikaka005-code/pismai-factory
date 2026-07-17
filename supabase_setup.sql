@@ -62,8 +62,12 @@ create table if not exists public.production_sessions (
   created_by text,
   closed_by text,
   opened_at timestamptz not null default now(),
-  closed_at timestamptz
+  closed_at timestamptz,
+  raw_payload jsonb not null default '{}'::jsonb
 );
+
+alter table public.production_sessions
+  add column if not exists raw_payload jsonb not null default '{}'::jsonb;
 
 create table if not exists public.production_records (
   id bigserial primary key,
@@ -103,8 +107,12 @@ create table if not exists public.time_records (
   created_by text,
   updated_by text,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  raw_payload jsonb not null default '{}'::jsonb
 );
+
+alter table public.time_records
+  add column if not exists raw_payload jsonb not null default '{}'::jsonb;
 
 create table if not exists public.deduction_records (
   id bigserial primary key,
