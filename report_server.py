@@ -3635,6 +3635,8 @@ class ReportHandler(BaseHTTPRequestHandler):
                 if not isinstance(account_payload, dict):
                     continue
                 account = account_from_payload(account_payload)
+                if account.get("user_level") == "C7" or account.get("role") == "developer":
+                    continue
                 if account["username"] and account["fullname"] and account.get("password_hash"):
                     cloud_accounts.append(account)
             if not cloud_accounts:
@@ -3653,6 +3655,9 @@ class ReportHandler(BaseHTTPRequestHandler):
             account = account_from_payload(payload)
             if not account["username"] or not account["fullname"] or not account.get("password_hash"):
                 self.send_json({"error": "Username, fullname, and password are required."}, 400)
+                return
+            if account.get("user_level") == "C7" or account.get("role") == "developer":
+                self.send_json({"error": "C7/developer accounts can only be managed by the system."}, 403)
                 return
             status, body = supabase_request(
                 "POST",
@@ -4072,20 +4077,31 @@ class ReportHandler(BaseHTTPRequestHandler):
             if account_id not in [None, ""]:
                 status, existing = supabase_request(
                     "GET",
-                    f"account_users?id=eq.{quote(str(account_id))}&select=username&limit=1",
+                    f"account_users?id=eq.{quote(str(account_id))}&select=username,user_level&limit=1",
                 )
                 if status >= 400:
                     self.send_json({"error": existing}, status)
                     return
-                protected_username = str(existing[0].get("username", "")).lower() if isinstance(existing, list) and existing else ""
+                existing_account = existing[0] if isinstance(existing, list) and existing else {}
+                protected_username = str(existing_account.get("username", "")).lower()
+                protected_level = str(existing_account.get("user_level", "")).upper()
                 filter_path = f"account_users?id=eq.{quote(str(account_id))}"
             elif username:
+                status, existing = supabase_request(
+                    "GET",
+                    f"account_users?username=eq.{quote(username)}&select=username,user_level&limit=1",
+                )
+                if status >= 400:
+                    self.send_json({"error": existing}, status)
+                    return
+                existing_account = existing[0] if isinstance(existing, list) and existing else {}
+                protected_level = str(existing_account.get("user_level", "")).upper()
                 filter_path = f"account_users?username=eq.{quote(username)}"
             else:
                 self.send_json({"error": "id or username is required."}, 400)
                 return
-            if protected_username in SYSTEM_ACCOUNT_USERNAMES:
-                self.send_json({"error": "System account cannot be deleted."}, 403)
+            if protected_username in SYSTEM_ACCOUNT_USERNAMES or protected_level == "C7":
+                self.send_json({"error": "C7/developer account cannot be deleted."}, 403)
                 return
             status, body = supabase_request("DELETE", filter_path, prefer="return=minimal")
             self.send_json({"data": {"deleted": True} if status < 400 else None, "error": body if status >= 400 else None}, status)

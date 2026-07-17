@@ -415,27 +415,7 @@ const levelRouteAccess = {
     "wage-rates",
     "audit-log"
   ],
-  C6: [
-    "dashboard",
-    "production",
-    "summary-all",
-    "summary-main",
-    "summary-export",
-    "summary-time-overview",
-    "summary-person",
-    "compare-data",
-    "reports",
-    "time-report",
-    "settings",
-    "employees",
-    "production-employees",
-    "time-employees",
-    "pile-management",
-    "wage-rates",
-    "account-management",
-    "audit-log",
-    "backup"
-  ],
+  C6: modules.map((item) => item.id),
   C7: modules.map((item) => item.id)
 };
 
@@ -1053,9 +1033,28 @@ function getUserLevel(user) {
   return supportedAccountLevels.includes(level) ? level : "C1";
 }
 
+function isTopLevelUser(user) {
+  if (!user) return false;
+  const level = getUserLevel(user);
+  return (
+    level === "C6" ||
+    level === "C7" ||
+    user.role === "developer" ||
+    user.role_key === "developer" ||
+    user.is_system
+  );
+}
+
+function isC7Account(accountUser) {
+  if (!accountUser) return false;
+  const protectedProfile =
+    protectedSystemAccountProfiles[String(accountUser.username || "").toLowerCase()];
+  return getUserLevel(accountUser) === "C7" || protectedProfile?.level === "C7";
+}
+
 function getAllowedRoutesForUser(user) {
   if (!user) return [];
-  if (user.role === "developer" || user.role_key === "developer" || user.is_system) {
+  if (isTopLevelUser(user)) {
     return modules.map((item) => item.id);
   }
 
@@ -1079,7 +1078,7 @@ function visibleNavModulesForUser(user) {
 function canOpen(user, moduleId) {
   const moduleItem = modules.find((item) => item.id === moduleId);
   if (!moduleItem || !user) return false;
-  if (user.role === "developer" || user.role_key === "developer" || user.is_system) return true;
+  if (isTopLevelUser(user)) return true;
   return getAllowedRoutesForUser(user).includes(moduleId);
 }
 
@@ -1088,12 +1087,12 @@ function canManageEmployees(user) {
 }
 
 function canDeleteEmployees(user) {
-  return ["C5", "C6", "C7"].includes(getUserLevel(user)) || user.role === "developer";
+  return ["C5", "C6", "C7"].includes(getUserLevel(user)) || isTopLevelUser(user);
 }
 
 function canExportFullDetails(user) {
   if (!user) return false;
-  if (user.role === "developer" || user.role_key === "developer" || user.is_system) return true;
+  if (isTopLevelUser(user)) return true;
   const levelIndex = supportedAccountLevels.indexOf(String(user.level || "").toUpperCase());
   return levelIndex >= supportedAccountLevels.indexOf("C5");
 }
@@ -1140,7 +1139,7 @@ function normalizeAccountUser(user) {
 }
 
 function isProtectedSystemAccount(accountUser) {
-  return Boolean(accountUser?.is_system || protectedSystemAccountProfiles[String(accountUser?.username || "").toLowerCase()]);
+  return isC7Account(accountUser);
 }
 
 function ensureSystemDeveloperAccount(accountUsers) {
@@ -2009,8 +2008,8 @@ function apiUpdateAccountUser(id, payload, actor) {
     throw new Error("ไม่พบข้อมูลบัญชีนี้");
   }
 
-  if (isProtectedSystemAccount(existing)) {
-    throw new Error("บัญชีระบบนี้ไม่สามารถแก้ไขจากหน้าเว็บได้");
+  if (isC7Account(existing)) {
+    throw new Error("บัญชีระดับ C7 ผู้พัฒนาระบบไม่สามารถแก้ไขจากหน้าเว็บได้");
   }
 
   const cleanPayload = validateAccountPayload(payload, id);
@@ -2045,8 +2044,8 @@ async function apiDeleteAccountUser(id, actor) {
     throw new Error("ไม่พบข้อมูลบัญชีนี้");
   }
 
-  if (isProtectedSystemAccount(existing)) {
-    throw new Error("บัญชีระบบนี้ไม่สามารถลบจากหน้าเว็บได้");
+  if (isC7Account(existing)) {
+    throw new Error("บัญชีระดับ C7 ผู้พัฒนาระบบไม่สามารถลบได้");
   }
 
   const nextUsers = accountUsers.filter((accountUser) => accountUser.id !== id);
@@ -5445,7 +5444,7 @@ function renderAuditLogPasswordGate(moduleItem) {
           <h2>${escapeHtml(moduleItem.label)}</h2>
           <p>กรอกรหัสตัวเลข 4 หลักก่อนดูประวัติการใช้งานระบบ</p>
         </div>
-        <span class="badge badge-warning">Admin only</span>
+        <span class="badge badge-warning">C6/C7 only</span>
       </div>
       ${auditLogMessage ? `<div class="alert alert-error">${escapeHtml(auditLogMessage)}</div>` : ""}
       <form class="settings-security-form" id="auditLogPasswordForm">
@@ -6711,8 +6710,8 @@ function editProductionRecord(recordId, user) {
   if (!record) return;
   const labels = getProductionFieldLabels(productionFruitTypeForRecord(record));
 
-  if (isProductionRecordLocked(record) && user.role !== "admin") {
-    setProductionMessage("This record is locked. Admin only can edit after 5 minutes.", "error");
+  if (isProductionRecordLocked(record) && !isTopLevelUser(user)) {
+    setProductionMessage("This record is locked. C6/C7 only can edit after 5 minutes.", "error");
     render();
     return;
   }
@@ -6900,8 +6899,8 @@ function bindWageRateEvents(user) {
   document.querySelector("#wageRateForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
 
-    if (user.role !== "admin") {
-      window.alert("Only Admin can add wage rates.");
+    if (!isTopLevelUser(user)) {
+      window.alert("Only C6/C7 can add wage rates.");
       return;
     }
 
@@ -8363,7 +8362,7 @@ function bindEmployeeEvents(user) {
   document.querySelectorAll("[data-delete-employee]").forEach((button) => {
     button.addEventListener("click", async () => {
       if (!canDeleteEmployees(user)) {
-        window.alert("Only Admin can delete employees.");
+        window.alert("Only C5/C6/C7 can delete employees.");
         return;
       }
 
@@ -8652,7 +8651,7 @@ function bindTimeEmployeeEvents(user) {
   document.querySelectorAll("[data-delete-time-employee]").forEach((button) => {
     button.addEventListener("click", async () => {
       if (!canDeleteEmployees(user)) {
-        window.alert("Only Admin can delete employees.");
+        window.alert("Only C5/C6/C7 can delete employees.");
         return;
       }
       const id = Number(button.dataset.deleteTimeEmployee);
