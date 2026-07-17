@@ -3442,6 +3442,60 @@ tr:last-child td {
   background: var(--primary);
 }
 
+.deduction-tabs .module-tab.bonus-tab {
+  background: #067647;
+}
+
+.deduction-kind-switch {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #abefc6;
+  border-radius: 8px;
+  padding: 5px;
+  color: #166534;
+  background: #f0fdf4;
+}
+
+.deduction-kind-switch > span {
+  padding: 0 9px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.deduction-kind-switch button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 12px;
+  color: #344054;
+  background: transparent;
+  font-weight: 700;
+}
+
+.deduction-kind-switch button.active {
+  color: #ffffff;
+  background: #067647;
+}
+
+.btn-success {
+  color: #ffffff;
+  border-color: #067647;
+  background: #067647;
+}
+
+.btn-success:hover {
+  background: #05603a;
+}
+
+.deduction-readonly-field input[readonly] {
+  color: #166534;
+  border-color: #86efac;
+  background: #f0fdf4;
+  font-weight: 800;
+}
+
 .deduction-control-panel {
   display: flex;
   align-items: end;
@@ -3593,6 +3647,12 @@ tr:last-child td {
   white-space: nowrap;
 }
 
+.deduction-table-total.bonus-total {
+  color: #166534;
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
 .deduction-date-cell {
   color: #344054;
   font-weight: 700;
@@ -3625,6 +3685,16 @@ tr:last-child td {
   .deduction-tabs .module-tab {
     flex: 1 1 0;
     padding-inline: 10px;
+  }
+
+  .deduction-kind-switch {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .deduction-kind-switch > span {
+    padding-block: 5px;
   }
 
   .deduction-cloud-badge {

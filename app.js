@@ -46,6 +46,7 @@ const deductionTypeOptions = [
   { id: "tax", label: "ค่าภาษี" },
   { id: "room", label: "ค่าห้องพัก" }
 ];
+const ATTENDANCE_BONUS_TYPE = "attendance_bonus";
 
 const users = [
   {
@@ -264,9 +265,9 @@ modules.splice(
   },
   {
     id: "compare-data",
-    label: "บันทึกหักเงิน",
+    label: "บันทึกหักเงิน/เบี้ยขยัน",
     roles: ["admin", "hr"],
-    description: "บันทึกรายการหักเงินรายรอบสำหรับพนักงานเหมาน้ำหนักและพนักงานเหมาเวลา",
+    description: "บันทึกรายการหักเงินและเบี้ยขยันสำหรับพนักงานเหมาน้ำหนักและพนักงานเหมาเวลา",
     icon: "−"
   },
   {
@@ -753,6 +754,7 @@ let weeklyTimeEmployeeCode = "";
 let weeklyTimeDraft = Array.from({ length: 7 }, () => ({ clock_in: "", clock_out: "" }));
 let editingTimeRecordId = null;
 let deductionActiveTab = "production";
+let deductionBonusEmployeeKind = "time";
 let deductionStartDate = new Date().toISOString().slice(0, 10);
 let deductionEndDate = new Date().toISOString().slice(0, 10);
 let deductionEmployeeId = "";
@@ -1435,6 +1437,7 @@ async function deleteCloudTimeEmployee(id) {
 }
 
 function getDeductionTypeLabel(typeId) {
+  if (typeId === ATTENDANCE_BONUS_TYPE) return "เบี้ยขยัน";
   return deductionTypeOptions.find((item) => item.id === typeId)?.label || typeId || "-";
 }
 
@@ -1549,7 +1552,11 @@ function deductionRangesOverlap(record, startDate, endDate) {
   return recordStart <= endDate && recordEnd >= startDate;
 }
 
-function getDeductionsForRange(kind, startDate, endDate, employee = null) {
+function isAttendanceBonusRecord(record) {
+  return String(record?.deduction_type || "") === ATTENDANCE_BONUS_TYPE;
+}
+
+function getAdjustmentRecordsForRange(kind, startDate, endDate, employee = null) {
   const normalizedKind = normalizeDeductionKind(kind);
   const employeeId = employee?.id ? String(employee.id) : "";
   const empCode = employee?.emp_code ? String(employee.emp_code) : "";
@@ -1565,12 +1572,24 @@ function getDeductionsForRange(kind, startDate, endDate, employee = null) {
   });
 }
 
+function getDeductionsForRange(kind, startDate, endDate, employee = null) {
+  return getAdjustmentRecordsForRange(kind, startDate, endDate, employee).filter((record) => !isAttendanceBonusRecord(record));
+}
+
+function getBonusesForRange(kind, startDate, endDate, employee = null) {
+  return getAdjustmentRecordsForRange(kind, startDate, endDate, employee).filter(isAttendanceBonusRecord);
+}
+
 function sumDeductions(records) {
   return records.reduce((sum, record) => sum + Number(record.amount || 0), 0);
 }
 
 function getDeductionTotalForEmployee(kind, employee, startDate, endDate) {
   return sumDeductions(getDeductionsForRange(kind, startDate, endDate, employee));
+}
+
+function getBonusTotalForEmployee(kind, employee, startDate, endDate) {
+  return sumDeductions(getBonusesForRange(kind, startDate, endDate, employee));
 }
 
 function getDeductionEmployeeOptions(kind = deductionActiveTab) {
@@ -1586,11 +1605,12 @@ function findDeductionEmployee(kind, employeeId) {
 
 async function apiCreateDeduction(payload, actor) {
   const kind = normalizeDeductionKind(payload.employee_kind);
+  const bonusMode = payload.deduction_type === ATTENDANCE_BONUS_TYPE;
   const employee = findDeductionEmployee(kind, payload.employee_id);
   const amount = Number(payload.amount || 0);
   if (!employee) throw new Error("กรุณาเลือกพนักงาน");
-  if (!payload.start_date) throw new Error("กรุณาเลือกวันที่หักเงิน");
-  if (amount <= 0) throw new Error("กรุณากรอกจำนวนเงินที่ต้องหักมากกว่า 0");
+  if (!payload.start_date) throw new Error(`กรุณาเลือกวันที่${bonusMode ? "ลงเบี้ยขยัน" : "หักเงิน"}`);
+  if (amount <= 0) throw new Error("กรุณากรอกจำนวนเงินมากกว่า 0");
   const baseRecord = normalizeDeductionRecord({
     employee_kind: kind,
     employee_id: employee.id,
@@ -1605,9 +1625,9 @@ async function apiCreateDeduction(payload, actor) {
     created_by: actor?.fullname || ""
   });
   const created = await createCloudDeduction(baseRecord);
-  if (!created) throw new Error("ไม่สามารถบันทึกรายการหักเงินลงฐานข้อมูลกลางได้");
+  if (!created) throw new Error(`ไม่สามารถบันทึก${bonusMode ? "เบี้ยขยัน" : "รายการหักเงิน"}ลงฐานข้อมูลกลางได้`);
   saveDeductionRecords([...getDeductionRecords(), created]);
-  addAuditLog(actor, "CREATE_DEDUCTION", `Added deduction ${created.emp_code} ${created.deduction_label} ${created.amount}`);
+  addAuditLog(actor, bonusMode ? "CREATE_ATTENDANCE_BONUS" : "CREATE_DEDUCTION", `Added ${created.deduction_label} ${created.emp_code} ${created.amount}`);
   return created;
 }
 
@@ -1619,7 +1639,7 @@ async function apiUpdateDeduction(id, payload, actor) {
   const employee = findDeductionEmployee(kind, payload.employee_id);
   const amount = Number(payload.amount || 0);
   if (!employee) throw new Error("กรุณาเลือกพนักงาน");
-  if (amount <= 0) throw new Error("กรุณากรอกจำนวนเงินที่ต้องหักมากกว่า 0");
+  if (amount <= 0) throw new Error("กรุณากรอกจำนวนเงินมากกว่า 0");
   const nextRecord = normalizeDeductionRecord({
     ...existing,
     employee_kind: kind,
@@ -4314,21 +4334,33 @@ function setDeductionMessage(message, type = "success") {
   deductionMessageType = type;
 }
 
+function isAttendanceBonusTab() {
+  return deductionActiveTab === "bonus";
+}
+
+function getActiveAdjustmentEmployeeKind() {
+  return isAttendanceBonusTab() ? deductionBonusEmployeeKind : normalizeDeductionKind(deductionActiveTab);
+}
+
 function getCurrentDeductionContext() {
   const selectedDate = deductionStartDate || new Date().toISOString().slice(0, 10);
   const range = { startDate: selectedDate, endDate: selectedDate };
   deductionStartDate = selectedDate;
   deductionEndDate = selectedDate;
-  const employees = getDeductionEmployeeOptions(deductionActiveTab);
+  const employeeKind = getActiveAdjustmentEmployeeKind();
+  const bonusMode = isAttendanceBonusTab();
+  const employees = getDeductionEmployeeOptions(employeeKind);
   const selectedEmployeeId = employees.some((employee) => String(employee.id) === String(deductionEmployeeId))
     ? deductionEmployeeId
     : employees[0]?.id || "";
   deductionEmployeeId = selectedEmployeeId ? String(selectedEmployeeId) : "";
   const selectedEmployee = employees.find((employee) => String(employee.id) === String(selectedEmployeeId)) || null;
-  const records = getDeductionsForRange(deductionActiveTab, range.startDate, range.endDate)
+  const records = (bonusMode
+    ? getBonusesForRange(employeeKind, range.startDate, range.endDate)
+    : getDeductionsForRange(employeeKind, range.startDate, range.endDate))
     .sort((a, b) => `${a.start_date} ${a.emp_code} ${a.deduction_label}`.localeCompare(`${b.start_date} ${b.emp_code} ${b.deduction_label}`, "th", { numeric: true }));
   const editingRecord = records.find((record) => Number(record.id) === Number(editingDeductionId)) || null;
-  return { range, employees, selectedEmployee, records, editingRecord };
+  return { range, employees, selectedEmployee, records, editingRecord, employeeKind, bonusMode };
 }
 
 function renderDeductionTypeOptions(selectedType = "advance") {
@@ -4369,15 +4401,17 @@ function renderDeductionEntry(user, moduleItem) {
   const editing = context.editingRecord;
   const formEmployeeId = editing?.employee_id || context.selectedEmployee?.id || "";
   const formStartDate = editing?.start_date || context.range.startDate;
-  const totalDeduction = sumDeductions(context.records);
+  const totalAmount = sumDeductions(context.records);
   const employeeCount = new Set(context.records.map((record) => record.employee_id || record.emp_code)).size;
+  const actionLabel = context.bonusMode ? "เบี้ยขยัน" : "รายการหัก";
+  const employeeKindLabel = context.employeeKind === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก";
 
   return `
     <section class="summary-page deduction-page">
       <div class="summary-header">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>บันทึกรายการหักรายวันลงฐานข้อมูลกลาง และนำยอดไปคำนวณอัตโนมัติในรายงานและใบเสร็จ</p>
+          <p>บันทึกรายการหักและเบี้ยขยันลงฐานข้อมูลกลาง เพื่อนำไปคำนวณยอดสุทธิในรายงานและใบเสร็จโดยอัตโนมัติ</p>
         </div>
         <span class="badge badge-success deduction-cloud-badge">ฐานข้อมูลกลางพร้อมใช้งาน</span>
       </div>
@@ -4385,7 +4419,16 @@ function renderDeductionEntry(user, moduleItem) {
       <div class="module-tabs deduction-tabs">
         <button class="module-tab ${deductionActiveTab === "production" ? "active" : ""}" type="button" data-deduction-tab="production">พนักงานเหมาน้ำหนัก</button>
         <button class="module-tab ${deductionActiveTab === "time" ? "active" : ""}" type="button" data-deduction-tab="time">พนักงานเหมาเวลา</button>
+        <button class="module-tab ${deductionActiveTab === "bonus" ? "active bonus-tab" : ""}" type="button" data-deduction-tab="bonus">ลงเบี้ยขยัน</button>
       </div>
+
+      ${context.bonusMode ? `
+        <div class="deduction-kind-switch" role="group" aria-label="ประเภทพนักงานสำหรับเบี้ยขยัน">
+          <span>ประเภทพนักงาน</span>
+          <button class="${context.employeeKind === "production" ? "active" : ""}" type="button" data-bonus-employee-kind="production">พนักงานเหมาน้ำหนัก</button>
+          <button class="${context.employeeKind === "time" ? "active" : ""}" type="button" data-bonus-employee-kind="time">พนักงานเหมาเวลา</button>
+        </div>
+      ` : ""}
 
       ${
         deductionMessage
@@ -4396,11 +4439,11 @@ function renderDeductionEntry(user, moduleItem) {
       <section class="panel deduction-control-panel">
         <div class="deduction-control-copy">
           <strong>ดูรายการตามวันที่</strong>
-          <span>เลือกวันที่ที่ต้องการตรวจสอบหรือเพิ่มรายการหักเงิน</span>
+          <span>เลือกวันที่ที่ต้องการตรวจสอบหรือเพิ่ม${context.bonusMode ? "เบี้ยขยัน" : "รายการหักเงิน"}</span>
         </div>
         <form class="deduction-filter-form" id="deductionFilterForm">
           <label class="field">
-            <span>วันที่หักเงิน</span>
+            <span>${context.bonusMode ? "วันที่ลงเบี้ยขยัน" : "วันที่หักเงิน"}</span>
             <input name="start_date" type="date" value="${escapeHtml(context.range.startDate)}" required />
           </label>
           <button class="btn btn-outline deduction-load-button" type="submit">แสดงรายการ</button>
@@ -4410,27 +4453,28 @@ function renderDeductionEntry(user, moduleItem) {
       <div class="deduction-export-note">
         <span class="deduction-export-note-mark">฿</span>
         <div>
-          <strong>ระบบจะหักยอดให้อัตโนมัติ</strong>
-          <span>เมื่อช่วงวันที่ Export ครอบคลุมวันที่ ${escapeHtml(context.range.startDate)} รายการของวันนี้จะถูกรวมไปคำนวณทันที</span>
+          <strong>${context.bonusMode ? "ระบบจะบวกเบี้ยขยันให้อัตโนมัติ" : "ระบบจะหักยอดให้อัตโนมัติ"}</strong>
+          <span>เมื่อช่วงวันที่ Export ครอบคลุมวันที่ ${escapeHtml(context.range.startDate)} ยอดนี้จะถูก${context.bonusMode ? "บวก" : "หัก"}ในการคำนวณทันที</span>
         </div>
       </div>
 
       <div class="summary-metrics deduction-metrics">
-        <div class="metric-card metric-blue"><span>รายการหัก</span><strong>${context.records.length.toLocaleString("th-TH")} รายการ</strong><small>ประจำวันที่ ${escapeHtml(context.range.startDate)}</small></div>
-        <div class="metric-card metric-green"><span>จำนวนพนักงาน</span><strong>${employeeCount.toLocaleString("th-TH")} คน</strong><small>${deductionActiveTab === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก"}</small></div>
-        <div class="metric-card metric-orange"><span>ยอดหักรวมวันนี้</span><strong>${money(totalDeduction)}</strong><small>ยอดสุทธิหลังรวมทุกรายการ</small></div>
+        <div class="metric-card metric-blue"><span>${actionLabel}</span><strong>${context.records.length.toLocaleString("th-TH")} รายการ</strong><small>ประจำวันที่ ${escapeHtml(context.range.startDate)}</small></div>
+        <div class="metric-card metric-green"><span>จำนวนพนักงาน</span><strong>${employeeCount.toLocaleString("th-TH")} คน</strong><small>${employeeKindLabel}</small></div>
+        <div class="metric-card ${context.bonusMode ? "metric-green" : "metric-orange"}"><span>ยอด${context.bonusMode ? "เบี้ยขยัน" : "หัก"}รวมวันนี้</span><strong>${money(totalAmount)}</strong><small>${context.bonusMode ? "เงินเพิ่มก่อนคำนวณยอดสุทธิ" : "ยอดหักก่อนคำนวณเงินสุทธิ"}</small></div>
       </div>
 
       <section class="panel deduction-form-panel">
         <div class="section-title-row">
           <div>
-            <h3>${editing ? "แก้ไขรายการหักเงิน" : "เพิ่มรายการหักเงิน"}</h3>
-            <p class="muted-text">จำนวนเงินแต่ละรายการปล่อยว่างไม่ได้ เพราะระบบจะใช้ยอดนี้หักเงินจริงในรายงาน</p>
+            <h3>${editing ? `แก้ไข${actionLabel}` : `เพิ่ม${actionLabel}`}</h3>
+            <p class="muted-text">กรอกจำนวนเงินจริง ระบบจะนำยอดนี้ไป${context.bonusMode ? "บวก" : "หัก"}ในรายงานตามวันที่ที่เลือก</p>
           </div>
           ${editing ? `<button class="btn btn-outline" id="cancelDeductionEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
         </div>
         <form class="summary-export-form deduction-form" id="deductionForm">
           <input type="hidden" name="id" value="${editing?.id || ""}" />
+          <input type="hidden" name="employee_kind" value="${escapeHtml(context.employeeKind)}" />
           <label class="field">
             <span>พนักงาน</span>
             <select name="employee_id" required ${context.employees.length ? "" : "disabled"}>
@@ -4438,15 +4482,23 @@ function renderDeductionEntry(user, moduleItem) {
             </select>
           </label>
           <label class="field">
-            <span>วันที่หักเงิน</span>
+            <span>${context.bonusMode ? "วันที่ลงเบี้ยขยัน" : "วันที่หักเงิน"}</span>
             <input name="start_date" type="date" value="${escapeHtml(formStartDate)}" required />
           </label>
-          <label class="field">
-            <span>รายการหัก</span>
-            <select name="deduction_type" required>
-              ${renderDeductionTypeOptions(editing?.deduction_type || "advance")}
-            </select>
-          </label>
+          ${context.bonusMode ? `
+            <label class="field deduction-readonly-field">
+              <span>ประเภทเงินเพิ่ม</span>
+              <input value="เบี้ยขยัน" readonly />
+              <input type="hidden" name="deduction_type" value="${ATTENDANCE_BONUS_TYPE}" />
+            </label>
+          ` : `
+            <label class="field">
+              <span>รายการหัก</span>
+              <select name="deduction_type" required>
+                ${renderDeductionTypeOptions(editing?.deduction_type || "advance")}
+              </select>
+            </label>
+          `}
           <label class="field">
             <span>จำนวนเงิน</span>
             <input name="amount" type="number" min="0" step="1" value="${editing ? Number(editing.amount || 0) : ""}" placeholder="0" required />
@@ -4455,17 +4507,17 @@ function renderDeductionEntry(user, moduleItem) {
             <span>หมายเหตุ</span>
             <input name="note" value="${escapeHtml(editing?.note || "")}" placeholder="รายละเอียดเพิ่มเติมถ้ามี" />
           </label>
-          <button class="btn btn-primary deduction-submit-button" type="submit" ${context.employees.length ? "" : "disabled"}>${editing ? "บันทึกการแก้ไข" : "บันทึกรายการหัก"}</button>
+          <button class="btn ${context.bonusMode ? "btn-success" : "btn-primary"} deduction-submit-button" type="submit" ${context.employees.length ? "" : "disabled"}>${editing ? "บันทึกการแก้ไข" : `บันทึก${actionLabel}`}</button>
         </form>
       </section>
 
       <section class="table-card">
         <div class="table-heading deduction-table-heading">
           <div>
-            <strong>รายการหักประจำวันที่ ${escapeHtml(context.range.startDate)}</strong>
-            <span>${deductionActiveTab === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก"}</span>
+            <strong>${actionLabel}ประจำวันที่ ${escapeHtml(context.range.startDate)}</strong>
+            <span>${employeeKindLabel}</span>
           </div>
-          <span class="deduction-table-total">รวม ${money(totalDeduction)}</span>
+          <span class="deduction-table-total ${context.bonusMode ? "bonus-total" : ""}">รวม ${money(totalAmount)}</span>
         </div>
         <div class="table-scroll">
           <table>
@@ -4474,7 +4526,7 @@ function renderDeductionEntry(user, moduleItem) {
                 <th>วันที่</th>
                 <th>รหัส</th>
                 <th>ชื่อพนักงาน</th>
-                <th>รายการหัก</th>
+                <th>${context.bonusMode ? "ประเภทเงินเพิ่ม" : "รายการหัก"}</th>
                 <th>จำนวนเงิน</th>
                 <th>หมายเหตุ</th>
                 <th>ผู้บันทึก</th>
@@ -4482,7 +4534,7 @@ function renderDeductionEntry(user, moduleItem) {
               </tr>
             </thead>
             <tbody>
-              ${context.records.length ? context.records.map(renderDeductionRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีรายการหักเงินในวันนี้</td></tr>`}
+              ${context.records.length ? context.records.map(renderDeductionRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มี${actionLabel}ในวันนี้</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -4494,16 +4546,34 @@ function renderDeductionEntry(user, moduleItem) {
 function bindDeductionEvents(user) {
   document.querySelectorAll("[data-deduction-tab]").forEach((button) => {
     button.addEventListener("click", async () => {
-      deductionActiveTab = normalizeDeductionKind(button.dataset.deductionTab);
+      deductionActiveTab = button.dataset.deductionTab === "bonus" ? "bonus" : normalizeDeductionKind(button.dataset.deductionTab);
       deductionEmployeeId = "";
       editingDeductionId = null;
-      setDeductionMessage("กำลังโหลดรายการหักเงินจากฐานกลาง...");
+      const employeeKind = getActiveAdjustmentEmployeeKind();
+      setDeductionMessage("กำลังโหลดข้อมูลจากฐานกลาง...");
       render();
       try {
-        await hydrateDeductionsFromCloud({ employee_kind: deductionActiveTab, start_date: deductionStartDate, end_date: deductionEndDate });
+        await hydrateDeductionsFromCloud({ employee_kind: employeeKind, start_date: deductionStartDate, end_date: deductionEndDate });
         setDeductionMessage("");
       } catch (error) {
-        setDeductionMessage(`${error instanceof Error ? error.message : "โหลดรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบว่ามีตาราง deduction_records ใน Supabase แล้ว`, "error");
+        setDeductionMessage(`${error instanceof Error ? error.message : "โหลดข้อมูลไม่สำเร็จ"} กรุณาตรวจสอบว่ามีตาราง deduction_records ใน Supabase แล้ว`, "error");
+      }
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-bonus-employee-kind]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      deductionBonusEmployeeKind = normalizeDeductionKind(button.dataset.bonusEmployeeKind);
+      deductionEmployeeId = "";
+      editingDeductionId = null;
+      setDeductionMessage("กำลังโหลดข้อมูลจากฐานกลาง...");
+      render();
+      try {
+        await hydrateDeductionsFromCloud({ employee_kind: deductionBonusEmployeeKind, start_date: deductionStartDate, end_date: deductionEndDate });
+        setDeductionMessage("");
+      } catch (error) {
+        setDeductionMessage(`${error instanceof Error ? error.message : "โหลดข้อมูลไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
       }
       render();
     });
@@ -4518,7 +4588,7 @@ function bindDeductionEvents(user) {
     setDeductionMessage("กำลังโหลดรายการหักเงินจากฐานกลาง...");
     render();
     try {
-      await hydrateDeductionsFromCloud({ employee_kind: deductionActiveTab, start_date: deductionStartDate, end_date: deductionEndDate });
+      await hydrateDeductionsFromCloud({ employee_kind: getActiveAdjustmentEmployeeKind(), start_date: deductionStartDate, end_date: deductionEndDate });
       setDeductionMessage("โหลดรายการหักเงินจากฐานกลางเรียบร้อยแล้ว");
     } catch (error) {
       setDeductionMessage(`${error instanceof Error ? error.message : "โหลดรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
@@ -4530,28 +4600,29 @@ function bindDeductionEvents(user) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const id = Number(form.get("id") || 0);
+    const bonusMode = isAttendanceBonusTab();
     const payload = {
-      employee_kind: deductionActiveTab,
+      employee_kind: normalizeDeductionKind(form.get("employee_kind") || getActiveAdjustmentEmployeeKind()),
       employee_id: Number(form.get("employee_id") || 0),
       start_date: String(form.get("start_date") || deductionStartDate),
       end_date: String(form.get("start_date") || deductionStartDate),
-      deduction_type: String(form.get("deduction_type") || "advance"),
+      deduction_type: bonusMode ? ATTENDANCE_BONUS_TYPE : String(form.get("deduction_type") || "advance"),
       amount: Number(form.get("amount") || 0),
       note: String(form.get("note") || "")
     };
     try {
       if (id) {
         await apiUpdateDeduction(id, payload, user);
-        setDeductionMessage("แก้ไขรายการหักเงินในฐานกลางเรียบร้อยแล้ว");
+        setDeductionMessage(`แก้ไข${bonusMode ? "เบี้ยขยัน" : "รายการหักเงิน"}ในฐานกลางเรียบร้อยแล้ว`);
       } else {
         await apiCreateDeduction(payload, user);
-        setDeductionMessage("บันทึกรายการหักเงินลงฐานกลางเรียบร้อยแล้ว");
+        setDeductionMessage(`บันทึก${bonusMode ? "เบี้ยขยัน" : "รายการหักเงิน"}ลงฐานกลางเรียบร้อยแล้ว`);
       }
       deductionStartDate = payload.start_date;
       deductionEndDate = payload.end_date;
       deductionEmployeeId = String(payload.employee_id);
       editingDeductionId = null;
-      await hydrateDeductionsFromCloud({ employee_kind: deductionActiveTab, start_date: deductionStartDate, end_date: deductionEndDate });
+      await hydrateDeductionsFromCloud({ employee_kind: payload.employee_kind, start_date: deductionStartDate, end_date: deductionEndDate });
     } catch (error) {
       setDeductionMessage(`${error instanceof Error ? error.message : "บันทึกรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
     }
@@ -4575,12 +4646,12 @@ function bindDeductionEvents(user) {
   document.querySelectorAll("[data-delete-deduction]").forEach((button) => {
     button.addEventListener("click", async () => {
       const id = Number(button.dataset.deleteDeduction);
-      if (!window.confirm("ยืนยันลบรายการหักเงินนี้จากฐานกลาง Supabase?")) return;
+      if (!window.confirm("ยืนยันลบรายการนี้จากฐานกลาง Supabase?")) return;
       try {
         await apiDeleteDeduction(id, user);
         editingDeductionId = null;
-        await hydrateDeductionsFromCloud({ employee_kind: deductionActiveTab, start_date: deductionStartDate, end_date: deductionEndDate });
-        setDeductionMessage("ลบรายการหักเงินจากฐานกลางเรียบร้อยแล้ว");
+        await hydrateDeductionsFromCloud({ employee_kind: getActiveAdjustmentEmployeeKind(), start_date: deductionStartDate, end_date: deductionEndDate });
+        setDeductionMessage("ลบรายการจากฐานกลางเรียบร้อยแล้ว");
       } catch (error) {
         setDeductionMessage(`${error instanceof Error ? error.message : "ลบรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
       }
@@ -6712,7 +6783,7 @@ function buildPersonalReportPayload() {
     end_date: range.endDate,
     employees: getEmployees(),
     production_records: getProductionRecords(),
-    deduction_records: getDeductionsForRange("production", range.startDate, range.endDate)
+    deduction_records: getAdjustmentRecordsForRange("production", range.startDate, range.endDate)
   };
 }
 
@@ -10835,6 +10906,7 @@ function summarizeGroupReportRows(records, mode = "group") {
         total: 0,
         amount: 0,
         deduction_amount: 0,
+        bonus_amount: 0,
         net_amount: 0,
         deductedEmployees: new Set()
       });
@@ -10856,13 +10928,19 @@ function summarizeGroupReportRows(records, mode = "group") {
         range.startDate,
         range.endDate
       );
+      summary.bonus_amount += getBonusTotalForEmployee(
+        "production",
+        record.employee || { id: record.employee_id, emp_code: record.emp_code },
+        range.startDate,
+        range.endDate
+      );
     }
   });
 
   return Array.from(summaries.values())
     .map((summary) => ({
       ...summary,
-      net_amount: Math.max(0, Number(summary.amount || 0) - Number(summary.deduction_amount || 0))
+      net_amount: Math.max(0, Number(summary.amount || 0) + Number(summary.bonus_amount || 0) - Number(summary.deduction_amount || 0))
     }))
     .sort((a, b) =>
       `${a.pay_group} ${a.fruit_label}`.localeCompare(`${b.pay_group} ${b.fruit_label}`, "th")
@@ -10893,6 +10971,12 @@ function getGroupReportEmployeeRows(records) {
           range.startDate,
           range.endDate
         ),
+        bonus_amount: getBonusTotalForEmployee(
+          "production",
+          record.employee || { id: record.employee_id, emp_code: record.emp_code },
+          range.startDate,
+          range.endDate
+        ),
         net_amount: 0
       });
     }
@@ -10902,7 +10986,7 @@ function getGroupReportEmployeeRows(records) {
     row.flower += flower;
     row.total += water + flower;
     row.amount += amount;
-    row.net_amount = Math.max(0, Number(row.amount || 0) - Number(row.deduction_amount || 0));
+    row.net_amount = Math.max(0, Number(row.amount || 0) + Number(row.bonus_amount || 0) - Number(row.deduction_amount || 0));
   });
   return Array.from(rows.values()).sort((a, b) =>
     `${a.pay_group} ${a.emp_code}`.localeCompare(`${b.pay_group} ${b.emp_code}`, "th")
@@ -10919,10 +11003,11 @@ function getGroupReportTotals(groupRows) {
       totals.total += row.total;
       totals.amount += row.amount;
       totals.deduction_amount += Number(row.deduction_amount || 0);
+      totals.bonus_amount += Number(row.bonus_amount || 0);
       totals.net_amount += Number(row.net_amount ?? row.amount ?? 0);
       return totals;
     },
-    { employees: new Set(), records: 0, water: 0, flower: 0, total: 0, amount: 0, deduction_amount: 0, net_amount: 0 }
+    { employees: new Set(), records: 0, water: 0, flower: 0, total: 0, amount: 0, deduction_amount: 0, bonus_amount: 0, net_amount: 0 }
   );
 }
 
@@ -10999,6 +11084,7 @@ function summarizeTimeGroupReportRows(records) {
         ot_amount: 0,
         amount: 0,
         deduction_amount: 0,
+        bonus_amount: 0,
         net_amount: 0,
         deductedEmployees: new Set()
       });
@@ -11021,12 +11107,18 @@ function summarizeTimeGroupReportRows(records) {
         range.startDate,
         range.endDate
       );
+      summary.bonus_amount += getBonusTotalForEmployee(
+        "time",
+        record.employee || { id: record.employee_id, emp_code: record.emp_code },
+        range.startDate,
+        range.endDate
+      );
     }
   });
   return Array.from(summaries.values())
     .map((summary) => ({
       ...summary,
-      net_amount: Math.max(0, Number(summary.amount || 0) - Number(summary.deduction_amount || 0))
+      net_amount: Math.max(0, Number(summary.amount || 0) + Number(summary.bonus_amount || 0) - Number(summary.deduction_amount || 0))
     }))
     .sort((a, b) => a.pay_group.localeCompare(b.pay_group, "th"));
 }
@@ -11052,6 +11144,12 @@ function getTimeGroupReportEmployeeRows(records) {
           range.startDate,
           range.endDate
         ),
+        bonus_amount: getBonusTotalForEmployee(
+          "time",
+          record.employee || { id: record.employee_id, emp_code: record.emp_code },
+          range.startDate,
+          range.endDate
+        ),
         net_amount: 0
       });
     }
@@ -11061,7 +11159,7 @@ function getTimeGroupReportEmployeeRows(records) {
     row.normal_hours += Number(record.normal_hours) || 0;
     row.ot_hours += Number(record.ot_hours) || 0;
     row.amount += Number(record.total_amount) || 0;
-    row.net_amount = Math.max(0, Number(row.amount || 0) - Number(row.deduction_amount || 0));
+    row.net_amount = Math.max(0, Number(row.amount || 0) + Number(row.bonus_amount || 0) - Number(row.deduction_amount || 0));
   });
   return Array.from(rows.values()).sort((a, b) =>
     `${a.pay_group} ${a.emp_code}`.localeCompare(`${b.pay_group} ${b.emp_code}`, "th")
@@ -11078,10 +11176,11 @@ function getTimeGroupReportTotals(groupRows) {
       totals.ot_hours += row.ot_hours;
       totals.amount += row.amount;
       totals.deduction_amount += Number(row.deduction_amount || 0);
+      totals.bonus_amount += Number(row.bonus_amount || 0);
       totals.net_amount += Number(row.net_amount ?? row.amount ?? 0);
       return totals;
     },
-    { employees: new Set(), records: 0, net_minutes: 0, normal_hours: 0, ot_hours: 0, amount: 0, deduction_amount: 0, net_amount: 0 }
+    { employees: new Set(), records: 0, net_minutes: 0, normal_hours: 0, ot_hours: 0, amount: 0, deduction_amount: 0, bonus_amount: 0, net_amount: 0 }
   );
 }
 
@@ -11096,6 +11195,7 @@ function renderGroupReportSummaryRow(row, showFruit = false) {
       <td>${compactNumberText(row.flower)}</td>
       <td><strong>${compactNumberText(row.total)}</strong></td>
       <td><strong>${money(row.amount)}</strong></td>
+      <td>${money(row.bonus_amount || 0)}</td>
       <td>${money(row.deduction_amount || 0)}</td>
       <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
@@ -11113,6 +11213,7 @@ function renderGroupReportEmployeeRow(row) {
       <td>${numberText(row.flower)}</td>
       <td><strong>${numberText(row.total)}</strong></td>
       <td><strong>${money(row.amount)}</strong></td>
+      <td>${money(row.bonus_amount || 0)}</td>
       <td>${money(row.deduction_amount || 0)}</td>
       <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
@@ -11145,6 +11246,7 @@ function renderTimeGroupReportSummaryRow(row) {
       <td>${numberText(row.normal_hours)}</td>
       <td>${numberText(row.ot_hours)}</td>
       <td><strong>${money(row.amount)}</strong></td>
+      <td>${money(row.bonus_amount || 0)}</td>
       <td>${money(row.deduction_amount || 0)}</td>
       <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
@@ -11162,6 +11264,7 @@ function renderTimeGroupReportEmployeeRow(row) {
       <td>${numberText(row.normal_hours)}</td>
       <td>${numberText(row.ot_hours)}</td>
       <td><strong>${money(row.amount)}</strong></td>
+      <td>${money(row.bonus_amount || 0)}</td>
       <td>${money(row.deduction_amount || 0)}</td>
       <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
@@ -11211,15 +11314,15 @@ function renderTimeGroupReportContent(records, groupRows, employeeRows, totals) 
       <div class="metric-card metric-green"><span>เวลาสุทธิรวม</span><strong>${escapeHtml(formatMinutesToHourText(totals.net_minutes))}</strong><small>${formatDecimalHours(totals.net_minutes)} ชั่วโมง</small></div>
       <div class="metric-card metric-blue"><span>ยอดเงินรวม</span><strong>${money(totals.amount)}</strong><small>ก่อนหัก</small></div>
       <div class="metric-card metric-purple"><span>จำนวนกลุ่ม</span><strong>${groupRows.length.toLocaleString("th-TH")}</strong><small>${groupReportGroup === "all" ? "ทุกกลุ่ม" : groupReportGroup}</small></div>
-      <div class="metric-card metric-orange"><span>หัก / สุทธิ</span><strong>${money(totals.deduction_amount || 0)}</strong><small>สุทธิ ${money(totals.net_amount ?? totals.amount)}</small></div>
+      <div class="metric-card metric-orange"><span>เบี้ยขยัน / หัก</span><strong>${money(totals.bonus_amount || 0)} / ${money(totals.deduction_amount || 0)}</strong><small>สุทธิ ${money(totals.net_amount ?? totals.amount)}</small></div>
     </div>
 
     <section class="table-card">
       <div class="table-heading">สรุปตามกลุ่มเวลา</div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
-          <tbody>${groupRows.length ? groupRows.map(renderTimeGroupReportSummaryRow).join("") : `<tr><td colspan="9" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+          <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+          <tbody>${groupRows.length ? groupRows.map(renderTimeGroupReportSummaryRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
         </table>
       </div>
     </section>
@@ -11228,8 +11331,8 @@ function renderTimeGroupReportContent(records, groupRows, employeeRows, totals) 
       <div class="table-heading">รายละเอียดพนักงานตามกลุ่มเวลา</div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>วัน</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
-          <tbody>${employeeRows.length ? employeeRows.map(renderTimeGroupReportEmployeeRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+          <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>วัน</th><th>เวลาสุทธิ</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+          <tbody>${employeeRows.length ? employeeRows.map(renderTimeGroupReportEmployeeRow).join("") : `<tr><td colspan="11" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
         </table>
       </div>
     </section>
@@ -11352,7 +11455,7 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="metric-card metric-green"><span>น้ำหนักรวม</span><strong>${numberText(totals.total)} กก.</strong><small>น้ำ ${numberText(totals.water)} | ดอก ${numberText(totals.flower)}</small></div>
         <div class="metric-card metric-blue"><span>ยอดเงินรวม</span><strong>${money(totals.amount)}</strong><small>ก่อนหัก</small></div>
         <div class="metric-card metric-purple"><span>จำนวนกลุ่ม</span><strong>${groupRows.length.toLocaleString("th-TH")}</strong><small>${groupReportGroup === "all" ? "ทุกกลุ่ม" : groupReportGroup}</small></div>
-        <div class="metric-card metric-orange"><span>หัก / สุทธิ</span><strong>${money(totals.deduction_amount || 0)}</strong><small>สุทธิ ${money(totals.net_amount ?? totals.amount)}</small></div>
+        <div class="metric-card metric-orange"><span>เบี้ยขยัน / หัก</span><strong>${money(totals.bonus_amount || 0)} / ${money(totals.deduction_amount || 0)}</strong><small>สุทธิ ${money(totals.net_amount ?? totals.amount)}</small></div>
       </div>
 
       <section class="summary-grid group-report-top-grid">
@@ -11368,8 +11471,8 @@ function renderSummaryGroupReport(moduleItem) {
           <div class="table-heading">สรุปตามกลุ่ม</div>
           <div class="table-scroll">
             <table class="group-report-compact-table">
-              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>น้ำ</th><th>ดอก</th><th>รวม</th><th>เงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
-              <tbody>${groupRows.length ? groupRows.map((row) => renderGroupReportSummaryRow(row)).join("") : `<tr><td colspan="9" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>น้ำ</th><th>ดอก</th><th>รวม</th><th>เงิน</th><th>เบี้ยขยัน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+              <tbody>${groupRows.length ? groupRows.map((row) => renderGroupReportSummaryRow(row)).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
             </table>
           </div>
         </section>
@@ -11379,8 +11482,8 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">สรุปตามกลุ่มและผลไม้</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>รวม</th><th>รวมเงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
-            <tbody>${fruitRows.length ? fruitRows.map((row) => renderGroupReportSummaryRow(row, true)).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+            <tbody>${fruitRows.length ? fruitRows.map((row) => renderGroupReportSummaryRow(row, true)).join("") : `<tr><td colspan="11" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -11389,8 +11492,8 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">รายละเอียดพนักงานในกลุ่ม</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>รวม</th><th>รวมเงิน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
-            <tbody>${employeeRows.length ? employeeRows.map(renderGroupReportEmployeeRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
+            <tbody>${employeeRows.length ? employeeRows.map(renderGroupReportEmployeeRow).join("") : `<tr><td colspan="11" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -11431,7 +11534,7 @@ function getGroupReportPayload(user, format) {
     printed_by_position: getExportPositionLabel(user),
     employees,
     production_records: records,
-    deduction_records: getDeductionsForRange("production", range.startDate, range.endDate),
+    deduction_records: getAdjustmentRecordsForRange("production", range.startDate, range.endDate),
     export_format: format
   };
 }
@@ -11449,11 +11552,13 @@ function getTimeGroupReportPayload(user, format) {
     normal_amount: row.normal_amount,
     ot_amount: row.ot_amount,
     amount: row.amount,
+    bonus_amount: row.bonus_amount || 0,
     deduction_amount: row.deduction_amount || 0,
     net_amount: row.net_amount ?? row.amount
   }));
   const employeeRows = getTimeGroupReportEmployeeRows(records).map((row) => ({
     ...row,
+    bonus_amount: row.bonus_amount || 0,
     deduction_amount: row.deduction_amount || 0,
     net_amount: row.net_amount ?? row.amount
   }));
@@ -11467,7 +11572,7 @@ function getTimeGroupReportPayload(user, format) {
     time_group_rows: groupRows,
     time_employee_rows: employeeRows,
     time_group_records: records,
-    deduction_records: getDeductionsForRange("time", range.startDate, range.endDate),
+    deduction_records: getAdjustmentRecordsForRange("time", range.startDate, range.endDate),
     export_format: format
   };
 }

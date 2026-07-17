@@ -876,8 +876,17 @@ def build_employee_range_pdf(
         start_date,
         end_date,
     )
+    bonus_rows = bonus_records_for(
+        data,
+        "production",
+        employee_id,
+        (employee or {}).get("emp_code"),
+        start_date,
+        end_date,
+    )
     deduction_amount = deduction_total(deduction_rows)
-    net_amount = max(0, total_amount - deduction_amount)
+    bonus_amount = deduction_total(bonus_rows)
+    net_amount = max(0, total_amount + bonus_amount - deduction_amount)
     _, _, normal, section = pdf_styles()
     payload = {
         "printed_by": "ระบบรายงาน",
@@ -924,11 +933,12 @@ def build_employee_range_pdf(
     story.extend([info, Spacer(1, 5 * mm)])
     money_summary = Table(
         [[
-            Paragraph(f"<b>รวมก่อนหัก</b><br/>{money(total_amount)} บาท", normal),
+            Paragraph(f"<b>รวมก่อนปรับยอด</b><br/>{money(total_amount)} บาท", normal),
+            Paragraph(f"<b>เบี้ยขยัน</b><br/>{money(bonus_amount)} บาท", normal),
             Paragraph(f"<b>หัก</b><br/>{money(deduction_amount)} บาท", normal),
             Paragraph(f"<b>สุทธิ</b><br/>{money(net_amount)} บาท", normal),
         ]],
-        colWidths=[60 * mm, 60 * mm, 60 * mm],
+        colWidths=[52 * mm, 52 * mm, 52 * mm, 52 * mm],
     )
     money_summary.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFF7ED")),
@@ -940,17 +950,21 @@ def build_employee_range_pdf(
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
     story.extend([money_summary, Spacer(1, 5 * mm)])
-    if deduction_rows:
-        deduction_table = Table(
-            [["รายการหัก", "จำนวนเงิน", "หมายเหตุ"]] + [
-                [row.get("deduction_label", "-"), money(row.get("amount", 0)), row.get("note") or "-"]
-                for row in deduction_rows
-            ],
+    adjustment_rows = [
+        ["เงินเพิ่ม", row.get("deduction_label", "เบี้ยขยัน"), money(row.get("amount", 0)), row.get("note") or "-"]
+        for row in bonus_rows
+    ] + [
+        ["รายการหัก", row.get("deduction_label", "-"), money(row.get("amount", 0)), row.get("note") or "-"]
+        for row in deduction_rows
+    ]
+    if adjustment_rows:
+        adjustment_table = Table(
+            [["ประเภท", "รายการ", "จำนวนเงิน", "หมายเหตุ"]] + adjustment_rows,
             repeatRows=1,
-            colWidths=[80 * mm, 45 * mm, 80 * mm],
+            colWidths=[38 * mm, 64 * mm, 38 * mm, 65 * mm],
         )
-        set_pdf_table_style(deduction_table, 1)
-        story.extend([Paragraph("รายการหักเงิน", section), deduction_table, Spacer(1, 5 * mm)])
+        set_pdf_table_style(adjustment_table, 1)
+        story.extend([Paragraph("รายการปรับยอด", section), adjustment_table, Spacer(1, 4 * mm)])
     story.extend([Paragraph("สรุปผลผลิตรายวัน", section)])
 
     rows = [["วันที่", "น้ำหนักน้ำ (กก.)", "น้ำหนักดอก (กก.)", "น้ำหนักรวม (กก.)", "รายได้รวม (บาท)"]]
@@ -965,8 +979,11 @@ def build_employee_range_pdf(
     if len(rows) == 1:
         rows.append(["-", "0.00", "0.00", "0.00", "0.00"])
     rows.append(["รวมทั้งสิ้น", number(total_water), number(total_flower), number(total_weight), money(total_amount)])
+    if bonus_amount:
+        rows.append(["เบี้ยขยัน", "", "", "", money(bonus_amount)])
     if deduction_amount:
         rows.append(["หัก", "", "", "", money(deduction_amount)])
+    if bonus_amount or deduction_amount:
         rows.append(["สุทธิ", "", "", "", money(net_amount)])
 
     table = Table(rows, repeatRows=1, colWidths=[47 * mm, 52 * mm, 52 * mm, 55 * mm, 61 * mm])
@@ -1275,9 +1292,18 @@ def build_employee_range_excel(
         start_date,
         end_date,
     )
+    bonus_rows = bonus_records_for(
+        data,
+        "production",
+        employee_id,
+        employee.get("emp_code"),
+        start_date,
+        end_date,
+    )
     deduction_amount = deduction_total(deduction_rows)
+    bonus_amount = deduction_total(bonus_rows)
     gross_amount = sum(summary["total_amount"] for summary in daily_summaries)
-    net_amount = max(0, gross_amount - deduction_amount)
+    net_amount = max(0, gross_amount + bonus_amount - deduction_amount)
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "สรุปรายบุคคล"
@@ -1313,10 +1339,13 @@ def build_employee_range_excel(
     sheet.cell(total_row, 2, sum(summary["flower_weight"] for summary in daily_summaries))
     sheet.cell(total_row, 3, sum(summary["water_weight"] for summary in daily_summaries))
     sheet.cell(total_row, 4, gross_amount)
-    deduct_row = total_row + 1
+    bonus_row = total_row + 1
+    sheet.cell(bonus_row, 1, "เบี้ยขยัน")
+    sheet.cell(bonus_row, 4, bonus_amount)
+    deduct_row = total_row + 2
     sheet.cell(deduct_row, 1, "หัก")
     sheet.cell(deduct_row, 4, deduction_amount)
-    net_row = total_row + 2
+    net_row = total_row + 3
     sheet.cell(net_row, 1, "สุทธิ")
     sheet.cell(net_row, 4, net_amount)
 
@@ -1330,6 +1359,17 @@ def build_employee_range_excel(
             sheet.cell(row_index, 1, deduction.get("deduction_label", "-"))
             sheet.cell(row_index, 2, safe_float(deduction.get("amount")))
             sheet.cell(row_index, 3, deduction.get("note") or "-")
+
+    if bonus_rows:
+        bonus_detail_start = sheet.max_row + 2
+        sheet.cell(bonus_detail_start, 1, "รายการเบี้ยขยัน")
+        sheet.cell(bonus_detail_start, 2, "จำนวนเงิน")
+        sheet.cell(bonus_detail_start, 3, "หมายเหตุ")
+        for index, bonus in enumerate(bonus_rows, 1):
+            row_index = bonus_detail_start + index
+            sheet.cell(row_index, 1, bonus.get("deduction_label", "เบี้ยขยัน"))
+            sheet.cell(row_index, 2, safe_float(bonus.get("amount")))
+            sheet.cell(row_index, 3, bonus.get("note") or "-")
 
     for cell in sheet[header_row]:
         cell.font = Font(bold=True)
@@ -1690,6 +1730,33 @@ def deduction_records_for(payload: dict, employee_kind: str, employee_id: object
     emp_code_text = str(emp_code or "")
     rows = []
     for record in payload.get("deduction_records", []) or []:
+        if str(record.get("deduction_type") or "") == "attendance_bonus":
+            continue
+        if str(record.get("status") or "Active") != "Active":
+            continue
+        if str(record.get("employee_kind") or "production") != employee_kind:
+            continue
+        record_start = str(record.get("start_date") or "")
+        record_end = str(record.get("end_date") or record_start)
+        if record_start > end_date or record_end < start_date:
+            continue
+        same_employee = (
+            employee_id_text and str(record.get("employee_id") or "") == employee_id_text
+        ) or (
+            emp_code_text and str(record.get("emp_code") or "") == emp_code_text
+        )
+        if same_employee:
+            rows.append(record)
+    return rows
+
+
+def bonus_records_for(payload: dict, employee_kind: str, employee_id: object, emp_code: object, start_date: str, end_date: str) -> list[dict]:
+    employee_id_text = str(employee_id or "")
+    emp_code_text = str(emp_code or "")
+    rows = []
+    for record in payload.get("deduction_records", []) or []:
+        if str(record.get("deduction_type") or "") != "attendance_bonus":
+            continue
         if str(record.get("status") or "Active") != "Active":
             continue
         if str(record.get("employee_kind") or "production") != employee_kind:
@@ -1891,8 +1958,8 @@ def build_time_full_export_excel(payload: dict) -> bytes:
     style_table(summary_sheet, 1)
     autosize(summary_sheet)
 
-    deduction_sheet = workbook.create_sheet("Deductions")
-    deduction_sheet.append(["ประเภทพนักงาน", "วันที่เริ่ม", "วันที่สิ้นสุด", "รหัส", "ชื่อพนักงาน", "รายการหัก", "จำนวนเงิน", "หมายเหตุ", "ผู้บันทึก"])
+    deduction_sheet = workbook.create_sheet("Adjustments")
+    deduction_sheet.append(["ประเภทรายการ", "ประเภทพนักงาน", "วันที่เริ่ม", "วันที่สิ้นสุด", "รหัส", "ชื่อพนักงาน", "รายการ", "จำนวนเงิน", "หมายเหตุ", "ผู้บันทึก"])
     deduction_rows = [
         record
         for record in payload.get("deduction_records", []) or []
@@ -1902,6 +1969,7 @@ def build_time_full_export_excel(payload: dict) -> bytes:
     ]
     for record in sorted(deduction_rows, key=lambda item: (item.get("employee_kind", ""), item.get("start_date", ""), item.get("emp_code", ""))):
         deduction_sheet.append([
+            "เบี้ยขยัน" if record.get("deduction_type") == "attendance_bonus" else "รายการหัก",
             "พนักงานเหมาเวลา" if record.get("employee_kind") == "time" else "พนักงานเหมาน้ำหนัก",
             record.get("start_date", ""),
             record.get("end_date", ""),
@@ -1972,6 +2040,8 @@ def time_receipt_groups(payload: dict) -> list[dict]:
                 "ot_amount": 0.0,
                 "deduction_amount": 0.0,
                 "deductions": [],
+                "bonus_amount": 0.0,
+                "bonuses": [],
             },
         )
         net_minutes = float(record.get("net_minutes", 0) or 0)
@@ -2019,8 +2089,17 @@ def time_receipt_groups(payload: dict) -> list[dict]:
             end_date,
         )
         group["deduction_amount"] = deduction_total(group["deductions"])
+        group["bonuses"] = bonus_records_for(
+            payload,
+            "time",
+            group.get("employee_id"),
+            group.get("emp_code"),
+            start_date,
+            end_date,
+        )
+        group["bonus_amount"] = deduction_total(group["bonuses"])
         group["gross_amount"] = group["normal_amount"] + group["ot_amount"]
-        group["total_amount"] = max(0, group["gross_amount"] - group["deduction_amount"])
+        group["total_amount"] = max(0, group["gross_amount"] + group["bonus_amount"] - group["deduction_amount"])
     return sorted(groups.values(), key=lambda item: (str(item["emp_code"]), str(item["fullname"])))
 
 
@@ -2131,7 +2210,7 @@ def build_time_receipts_pdf(payload: dict) -> bytes:
         text(x + 55 * mm, summary_y + 12 * mm, f"เงินปกติ {report_number(group['normal_amount'], 0)} บาท", 7.5, True, "#064E25")
         text(x + 55 * mm, summary_y + 7 * mm, f"เงิน OT {report_number(group['ot_amount'], 0)} บาท", 7.5, True, "#064E25")
         right_text(x + panel_width - 8 * mm, summary_y + 12 * mm, f"รวม {report_number(group.get('gross_amount', group['total_amount']), 0)} บาท", 8, True, "#064E25")
-        right_text(x + panel_width - 8 * mm, summary_y + 7 * mm, f"หัก {report_number(group.get('deduction_amount', 0), 0)} บาท", 8, True, "#B42318")
+        right_text(x + panel_width - 8 * mm, summary_y + 7 * mm, f"เบี้ยขยัน {report_number(group.get('bonus_amount', 0), 0)} | หัก {report_number(group.get('deduction_amount', 0), 0)} บาท", 7.2, True, "#166534")
         right_text(x + panel_width - 8 * mm, summary_y + 2 * mm, f"สุทธิ {report_number(group['total_amount'], 0)} บาท", 10.5, True, "#064E25")
 
         deduction_y = y + 28 * mm
@@ -2155,7 +2234,7 @@ def build_time_receipts_pdf(payload: dict) -> bytes:
         text(x + panel_width - 43 * mm, sign_y, "ผู้จ่ายเงิน", 7, False)
 
     if not groups:
-        groups = [{"emp_code": "-", "fullname": "-", "department": "-", "rows": [], "normal_hours": 0, "ot_hours": 0, "normal_amount": 0, "ot_amount": 0, "deduction_amount": 0, "deductions": [], "gross_amount": 0, "total_amount": 0}]
+        groups = [{"emp_code": "-", "fullname": "-", "department": "-", "rows": [], "normal_hours": 0, "ot_hours": 0, "normal_amount": 0, "ot_amount": 0, "deduction_amount": 0, "deductions": [], "bonus_amount": 0, "bonuses": [], "gross_amount": 0, "total_amount": 0}]
 
     for group in groups:
         draw_panel(margin, margin, group, False)
@@ -2761,7 +2840,7 @@ def group_report_records(payload: dict) -> list[dict]:
     selected_fruit = payload.get("fruit_type") or "all"
     by_id, by_code = employee_lookup_maps(payload)
     rows = []
-    deducted_employee_keys = set()
+    adjusted_employee_keys = set()
     for record in payload.get("production_records", []):
         record_date = record.get("record_date") or record.get("date") or ""
         if not (start_date <= record_date <= end_date):
@@ -2777,10 +2856,21 @@ def group_report_records(payload: dict) -> list[dict]:
             continue
         employee_key = str((employee or {}).get("id") or record.get("employee_id") or record.get("emp_code") or "")
         record_deduction = 0
-        if employee_key and employee_key not in deducted_employee_keys:
-            deducted_employee_keys.add(employee_key)
+        record_bonus = 0
+        if employee_key and employee_key not in adjusted_employee_keys:
+            adjusted_employee_keys.add(employee_key)
             record_deduction = deduction_total(
                 deduction_records_for(
+                    payload,
+                    "production",
+                    (employee or {}).get("id") or record.get("employee_id"),
+                    (employee or {}).get("emp_code") or record.get("emp_code"),
+                    start_date,
+                    end_date,
+                )
+            )
+            record_bonus = deduction_total(
+                bonus_records_for(
                     payload,
                     "production",
                     (employee or {}).get("id") or record.get("employee_id"),
@@ -2799,6 +2889,7 @@ def group_report_records(payload: dict) -> list[dict]:
                 "fruit_label": production_fruit_label(payload, fruit_id),
                 "employee_name": record.get("employee_name") or (employee or {}).get("fullname") or "",
                 "deduction_amount": record_deduction,
+                "bonus_amount": record_bonus,
             }
         )
     return sorted(rows, key=lambda item: (item["pay_group"], item["fruit_label"], item["record_date"], str(item.get("emp_code", ""))))
@@ -2820,6 +2911,7 @@ def summarize_group_report(records: list[dict], mode: str = "group") -> list[dic
                 "total": 0.0,
                 "amount": 0.0,
                 "deduction_amount": 0.0,
+                "bonus_amount": 0.0,
                 "net_amount": 0.0,
             },
         )
@@ -2832,7 +2924,8 @@ def summarize_group_report(records: list[dict], mode: str = "group") -> list[dic
         row["total"] += water + flower
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
-        row["net_amount"] = max(0, row["amount"] - row["deduction_amount"])
+        row["bonus_amount"] += safe_float(record.get("bonus_amount"))
+        row["net_amount"] = max(0, row["amount"] + row["bonus_amount"] - row["deduction_amount"])
     return sorted(summaries.values(), key=lambda item: (item["pay_group"], item["fruit_label"]))
 
 
@@ -2852,6 +2945,7 @@ def group_report_employee_rows(records: list[dict]) -> list[dict]:
                 "total": 0.0,
                 "amount": 0.0,
                 "deduction_amount": 0.0,
+                "bonus_amount": 0.0,
                 "net_amount": 0.0,
             },
         )
@@ -2863,7 +2957,8 @@ def group_report_employee_rows(records: list[dict]) -> list[dict]:
         row["total"] += water + flower
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
-        row["net_amount"] = max(0, row["amount"] - row["deduction_amount"])
+        row["bonus_amount"] += safe_float(record.get("bonus_amount"))
+        row["net_amount"] = max(0, row["amount"] + row["bonus_amount"] - row["deduction_amount"])
     return sorted(rows.values(), key=lambda item: (item["pay_group"], item["emp_code"]))
 
 
@@ -2902,24 +2997,24 @@ def build_group_report_excel(payload: dict) -> bytes:
 
     if options["summary"]:
         summary = workbook.create_sheet("Summary By Group")
-        summary.append(["กลุ่ม", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน", "หัก", "สุทธิ"])
+        summary.append(["กลุ่ม", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
         for row in group_rows:
-            summary.append([row["pay_group"], len(row["employees"]), row["records"], row["water"], row["flower"], row["total"], row["amount"], row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
-        style_excel_report_sheet(summary, [1], [20, 12, 12, 14, 14, 14, 16, 14, 16])
+            summary.append([row["pay_group"], len(row["employees"]), row["records"], row["water"], row["flower"], row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
+        style_excel_report_sheet(summary, [1], [20, 12, 12, 14, 14, 14, 16, 14, 14, 16])
 
     if options["fruit"]:
         fruit = workbook.create_sheet("Group By Fruit")
-        fruit.append(["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน", "หัก", "สุทธิ"])
+        fruit.append(["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
         for row in fruit_rows:
-            fruit.append([row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], row["water"], row["flower"], row["total"], row["amount"], row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
-        style_excel_report_sheet(fruit, [1], [20, 16, 12, 12, 14, 14, 14, 16, 14, 16])
+            fruit.append([row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], row["water"], row["flower"], row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
+        style_excel_report_sheet(fruit, [1], [20, 16, 12, 12, 14, 14, 14, 16, 14, 14, 16])
 
     if options["employees"]:
         employees = workbook.create_sheet("Employees")
-        employees.append(["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน", "หัก", "สุทธิ"])
+        employees.append(["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
         for row in employee_rows:
-            employees.append([row["pay_group"], row["emp_code"], row["fullname"], row["records"], row["water"], row["flower"], row["total"], row["amount"], row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
-        style_excel_report_sheet(employees, [1], [20, 14, 26, 12, 14, 14, 14, 16, 14, 16])
+            employees.append([row["pay_group"], row["emp_code"], row["fullname"], row["records"], row["water"], row["flower"], row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
+        style_excel_report_sheet(employees, [1], [20, 14, 26, 12, 14, 14, 14, 16, 14, 14, 16])
 
     if options["details"]:
         details = workbook.create_sheet("Details")
@@ -2961,22 +3056,22 @@ def build_group_report_pdf(payload: dict) -> bytes:
     if options["summary"]:
         add_table(
             "สรุปตามกลุ่ม",
-            ["Group", "People", "Records", "Water", "Flower", "Total", "Amount", "Deduct", "Net"],
-            [[row["pay_group"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"]), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in group_rows],
+            ["Group", "People", "Records", "Water", "Flower", "Total", "Amount", "Bonus", "Deduct", "Net"],
+            [[row["pay_group"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in group_rows],
         )
 
     if options["fruit"]:
         add_table(
             "สรุปตามกลุ่มและผลไม้",
-            ["Group", "Fruit", "People", "Records", "Water", "Flower", "Total", "Amount", "Deduct", "Net"],
-            [[row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"]), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in fruit_rows],
+            ["Group", "Fruit", "People", "Records", "Water", "Flower", "Total", "Amount", "Bonus", "Deduct", "Net"],
+            [[row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in fruit_rows],
         )
 
     if options["employees"]:
         add_table(
             "รายละเอียดพนักงานในกลุ่ม",
-            ["Group", "Code", "Name", "Records", "Water", "Flower", "Total", "Amount", "Deduct", "Net"],
-            [[row["pay_group"], row["emp_code"], row["fullname"], row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"]), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in employee_rows[:80]],
+            ["Group", "Code", "Name", "Records", "Water", "Flower", "Total", "Amount", "Bonus", "Deduct", "Net"],
+            [[row["pay_group"], row["emp_code"], row["fullname"], row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in employee_rows[:80]],
         )
 
     if options["details"]:
@@ -3035,7 +3130,7 @@ def build_time_group_report_excel(payload: dict) -> bytes:
 
     if options["summary"]:
         summary = workbook.create_sheet("Summary By Group")
-        summary.append(["Group", "Employees", "Records", "Net time", "Normal hours", "OT hours", "Normal amount", "OT amount", "Total amount", "Deduct", "Net amount"])
+        summary.append(["Group", "Employees", "Records", "Net time", "Normal hours", "OT hours", "Normal amount", "OT amount", "Total amount", "Attendance bonus", "Deduct", "Net amount"])
         for row in group_rows:
             summary.append([
                 row.get("pay_group", "-"),
@@ -3047,14 +3142,15 @@ def build_time_group_report_excel(payload: dict) -> bytes:
                 safe_float(row.get("normal_amount")),
                 safe_float(row.get("ot_amount")),
                 safe_float(row.get("amount")),
+                safe_float(row.get("bonus_amount")),
                 safe_float(row.get("deduction_amount")),
                 safe_float(row.get("net_amount", row.get("amount"))),
             ])
-        style_excel_report_sheet(summary, [1], [20, 12, 12, 16, 14, 14, 16, 16, 16, 14, 16])
+        style_excel_report_sheet(summary, [1], [20, 12, 12, 16, 14, 14, 16, 16, 16, 16, 14, 16])
 
     if options["employees"]:
         employees = workbook.create_sheet("Employees")
-        employees.append(["Group", "Emp code", "Fullname", "Days", "Net time", "Normal hours", "OT hours", "Total amount", "Deduct", "Net amount"])
+        employees.append(["Group", "Emp code", "Fullname", "Days", "Net time", "Normal hours", "OT hours", "Total amount", "Attendance bonus", "Deduct", "Net amount"])
         for row in employee_rows:
             employees.append([
                 row.get("pay_group", "-"),
@@ -3065,10 +3161,11 @@ def build_time_group_report_excel(payload: dict) -> bytes:
                 safe_float(row.get("normal_hours")),
                 safe_float(row.get("ot_hours")),
                 safe_float(row.get("amount")),
+                safe_float(row.get("bonus_amount")),
                 safe_float(row.get("deduction_amount")),
                 safe_float(row.get("net_amount", row.get("amount"))),
             ])
-        style_excel_report_sheet(employees, [1], [20, 14, 28, 10, 16, 14, 14, 16, 14, 16])
+        style_excel_report_sheet(employees, [1], [20, 14, 28, 10, 16, 14, 14, 16, 16, 14, 16])
 
     if options["details"]:
         details = workbook.create_sheet("Details")
@@ -3126,7 +3223,7 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
     if options["summary"]:
         add_table(
             "Summary By Group",
-            ["Group", "Employees", "Records", "Net time", "Normal", "OT", "Total", "Deduct", "Net"],
+            ["Group", "Employees", "Records", "Net time", "Normal", "OT", "Total", "Bonus", "Deduct", "Net"],
             [[
                 row.get("pay_group", "-"),
                 report_number(row.get("employees", 0), 0),
@@ -3135,6 +3232,7 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
                 report_number(row.get("normal_hours", 0)),
                 report_number(row.get("ot_hours", 0)),
                 money(row.get("amount", 0)),
+                money(row.get("bonus_amount", 0)),
                 money(row.get("deduction_amount", 0)),
                 money(row.get("net_amount", row.get("amount", 0))),
             ] for row in group_rows],
@@ -3143,7 +3241,7 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
     if options["employees"]:
         add_table(
             "Employee Details",
-            ["Group", "Code", "Name", "Days", "Net time", "Normal", "OT", "Total", "Deduct", "Net"],
+            ["Group", "Code", "Name", "Days", "Net time", "Normal", "OT", "Total", "Bonus", "Deduct", "Net"],
             [[
                 row.get("pay_group", "-"),
                 row.get("emp_code", "-"),
@@ -3153,6 +3251,7 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
                 report_number(row.get("normal_hours", 0)),
                 report_number(row.get("ot_hours", 0)),
                 money(row.get("amount", 0)),
+                money(row.get("bonus_amount", 0)),
                 money(row.get("deduction_amount", 0)),
                 money(row.get("net_amount", row.get("amount", 0))),
             ] for row in employee_rows[:100]],
