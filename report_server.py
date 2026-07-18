@@ -49,6 +49,7 @@ BRAND_GREEN = "#0F7A3D"
 THAI_FONT = "Helvetica"
 THAI_FONT_BOLD = "Helvetica-Bold"
 TIME_SPECIAL_DAILY_WAGE = 365
+DURIAN_GRADES = ("A", "B", "C", "D", "E")
 TIME_SPECIAL_WAGE_TABLE = {
     2: 91,
     2.5: 114,
@@ -477,6 +478,9 @@ def live_state_row(table: str, payload: dict) -> dict:
             "item_type": payload.get("item_type"),
             "water_weight": water,
             "flower_weight": flower,
+            "grade_weights": payload.get("grade_weights") or {},
+            "grade_rates": payload.get("grade_rates") or {},
+            "grade_amounts": payload.get("grade_amounts") or {},
             "total_weight": payload.get("total_weight", float(water) + float(flower)),
             "rate": payload.get("rate", 0) or 0,
             "amount": payload.get("amount", payload.get("total_amount", payload.get("grand_total", 0))) or 0,
@@ -658,11 +662,17 @@ def employee_daily_summaries(records: list[dict]) -> list[dict]:
                 "date": record_date,
                 "water_weight": 0.0,
                 "flower_weight": 0.0,
+                "grade_weights": {grade: 0.0 for grade in DURIAN_GRADES},
+                "total_weight": 0.0,
                 "total_amount": 0.0,
             },
         )
         summary["water_weight"] += water_weight
         summary["flower_weight"] += flower_weight
+        grade_weights = production_grade_weights(record)
+        for grade in DURIAN_GRADES:
+            summary["grade_weights"][grade] += grade_weights[grade]
+        summary["total_weight"] += production_total_weight(record)
         summary["total_amount"] += total_amount
 
     return [summaries[date] for date in sorted(summaries)]
@@ -699,8 +709,9 @@ def pile_summary_rows(records: list[dict]) -> list[dict]:
     summaries: dict[str, dict] = {}
     for record in records:
         pile = str(record.get("pile_no") or record.get("pile") or "-")
-        incoming = float(record.get("water_weight", record.get("water", 0)) or 0)
-        outgoing = float(record.get("flower_weight", record.get("flower", 0)) or 0)
+        is_durian = (record.get("fruit_type") or "mangosteen") == "durian"
+        incoming = 0.0 if is_durian else float(record.get("water_weight", record.get("water", 0)) or 0)
+        outgoing = 0.0 if is_durian else float(record.get("flower_weight", record.get("flower", 0)) or 0)
         amount = float(record.get("total_amount", record.get("grand_total", 0)) or 0)
         summary = summaries.setdefault(
             pile,
@@ -709,12 +720,18 @@ def pile_summary_rows(records: list[dict]) -> list[dict]:
                 "incoming": 0.0,
                 "outgoing": 0.0,
                 "balance": 0.0,
+                "grades": {grade: 0.0 for grade in DURIAN_GRADES},
+                "total_weight": 0.0,
                 "amount": 0.0,
             },
         )
         summary["incoming"] += incoming
         summary["outgoing"] += outgoing
         summary["balance"] += incoming - outgoing
+        grade_weights = production_grade_weights(record)
+        for grade in DURIAN_GRADES:
+            summary["grades"][grade] += grade_weights[grade]
+        summary["total_weight"] += production_total_weight(record)
         summary["amount"] += amount
 
     def sort_key(item: dict) -> tuple[int, str]:
@@ -729,6 +746,8 @@ def summary_totals(rows: list[dict]) -> dict:
         "incoming": sum(row["incoming"] for row in rows),
         "outgoing": sum(row["outgoing"] for row in rows),
         "balance": sum(row["balance"] for row in rows),
+        "grades": {grade: sum(row.get("grades", {}).get(grade, 0) for row in rows) for grade in DURIAN_GRADES},
+        "total_weight": sum(row.get("total_weight", row["incoming"] + row["outgoing"]) for row in rows),
         "amount": sum(row["amount"] for row in rows),
     }
 
@@ -1032,7 +1051,7 @@ def build_employee_range_pdf(
     daily_summaries = employee_daily_summaries(records)
     total_water = sum(item["water_weight"] for item in daily_summaries)
     total_flower = sum(item["flower_weight"] for item in daily_summaries)
-    total_weight = total_water + total_flower
+    total_weight = sum(item.get("total_weight", item["water_weight"] + item["flower_weight"]) for item in daily_summaries)
     total_amount = sum(item["total_amount"] for item in daily_summaries)
     deduction_rows = deduction_records_for(
         data,
@@ -1133,26 +1152,28 @@ def build_employee_range_pdf(
         story.extend([Paragraph("รายการปรับยอด", section), adjustment_table, Spacer(1, 4 * mm)])
     story.extend([Paragraph("สรุปผลผลิตรายวัน", section)])
 
-    rows = [["วันที่", "น้ำหนักน้ำ (กก.)", "น้ำหนักดอก (กก.)", "น้ำหนักรวม (กก.)", "รายได้รวม (บาท)"]]
+    rows = [["วันที่", "น้ำหนักน้ำ (กก.)", "น้ำหนักดอก (กก.)", "ทุเรียนเกรด A-E", "น้ำหนักรวม (กก.)", "รายได้รวม (บาท)"]]
     for item in daily_summaries:
         rows.append([
             format_report_date(item["date"]),
             number(item["water_weight"]),
             number(item["flower_weight"]),
-            number(item["water_weight"] + item["flower_weight"]),
+            grade_totals_text(item.get("grade_weights")),
+            number(item.get("total_weight", item["water_weight"] + item["flower_weight"])),
             money(item["total_amount"]),
         ])
     if len(rows) == 1:
-        rows.append(["-", "0.00", "0.00", "0.00", "0.00"])
-    rows.append(["รวมทั้งสิ้น", number(total_water), number(total_flower), number(total_weight), money(total_amount)])
+        rows.append(["-", "0.00", "0.00", "-", "0.00", "0.00"])
+    total_grades = {grade: sum(item.get("grade_weights", {}).get(grade, 0) for item in daily_summaries) for grade in DURIAN_GRADES}
+    rows.append(["รวมทั้งสิ้น", number(total_water), number(total_flower), grade_totals_text(total_grades), number(total_weight), money(total_amount)])
     if bonus_amount:
-        rows.append(["เบี้ยขยัน", "", "", "", money(bonus_amount)])
+        rows.append(["เบี้ยขยัน", "", "", "", "", money(bonus_amount)])
     if deduction_amount:
-        rows.append(["หัก", "", "", "", money(deduction_amount)])
+        rows.append(["หัก", "", "", "", "", money(deduction_amount)])
     if bonus_amount or deduction_amount:
-        rows.append(["สุทธิ", "", "", "", money(net_amount)])
+        rows.append(["สุทธิ", "", "", "", "", money(net_amount)])
 
-    table = Table(rows, repeatRows=1, colWidths=[47 * mm, 52 * mm, 52 * mm, 55 * mm, 61 * mm])
+    table = Table(rows, repeatRows=1, colWidths=[38 * mm, 35 * mm, 35 * mm, 70 * mm, 40 * mm, 49 * mm])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(BRAND_GREEN)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -1279,10 +1300,7 @@ def build_daily_excel(data: dict, date: str) -> bytes:
         key=lambda item: (str(item.get("emp_code", "")), str(item.get("record_time", ""))),
     )
     employees = {employee["id"]: employee for employee in data.get("employees", [])}
-    total_weight = sum(
-        safe_float(record.get("water_weight")) + safe_float(record.get("flower_weight"))
-        for record in records
-    )
+    total_weight = sum(production_total_weight(record) for record in records)
     total_amount = sum(safe_float(record.get("total_amount")) for record in records)
     employee_count = len({record.get("employee_id") for record in records if record.get("employee_id") is not None})
 
@@ -1302,15 +1320,15 @@ def build_daily_excel(data: dict, date: str) -> bytes:
     thin = Side(style="thin", color=border_color)
     medium = Side(style="medium", color=green)
 
-    sheet.merge_cells("A1:N1")
+    sheet.merge_cells("A1:O1")
     sheet["A1"] = COMPANY_NAME
     sheet["A1"].font = Font(name="Sarabun", bold=True, size=12, color=dark_green)
     sheet["A1"].alignment = Alignment(vertical="center")
-    sheet.merge_cells("A2:N2")
+    sheet.merge_cells("A2:O2")
     sheet["A2"] = "รายงานผลผลิตและค่าแรงประจำวัน"
     sheet["A2"].font = Font(name="Sarabun", bold=True, size=22, color=green)
     sheet["A2"].alignment = Alignment(vertical="center")
-    sheet.merge_cells("A3:N3")
+    sheet.merge_cells("A3:O3")
     sheet["A3"] = f"ประจำวันที่ {format_report_date(date)} | สร้างรายงาน {datetime.now().strftime('%d/%m/%Y %H:%M')}"
     sheet["A3"].font = Font(name="Sarabun", size=10, color="667085")
 
@@ -1342,7 +1360,7 @@ def build_daily_excel(data: dict, date: str) -> bytes:
     headers = [
         "ลำดับ", "วันที่", "เวลา", "รหัสพนักงาน", "ชื่อ-นามสกุล", "กองที่",
         "นน. น้ำ", "นน. ดอก", "เรทน้ำ", "เรทดอก", "เงินค่าน้ำ", "เงินค่าดอก",
-        "นน. รวม", "เงินรวม", "ผู้บันทึก", "สถานะ",
+        "ทุเรียนเกรด A-E", "นน. รวม", "เงินรวม", "ผู้บันทึก", "สถานะ",
     ]
     header_row = 7
     for column, header in enumerate(headers, 1):
@@ -1375,7 +1393,8 @@ def build_daily_excel(data: dict, date: str) -> bytes:
             safe_float(record.get("flower_rate")),
             safe_float(record.get("water_amount")),
             safe_float(record.get("flower_amount")),
-            water_weight + flower_weight,
+            production_grade_text(record) if (record.get("fruit_type") or "mangosteen") == "durian" else "-",
+            production_total_weight(record),
             safe_float(record.get("total_amount")),
             record.get("created_by", ""),
             "อนุมัติแล้ว" if str(record.get("status", "")).lower() == "approved" else record.get("status", ""),
@@ -1386,23 +1405,25 @@ def build_daily_excel(data: dict, date: str) -> bytes:
             cell.fill = PatternFill("solid", fgColor=white if index % 2 else pale_green)
             cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
             cell.alignment = Alignment(
-                horizontal="left" if column in (4, 5, 15, 16) else "center" if column in (1, 2, 3, 6) else "right",
+                horizontal="left" if column in (4, 5, 13, 16, 17) else "center" if column in (1, 2, 3, 6) else "right",
                 vertical="center",
             )
         sheet.cell(row, 2).number_format = "dd/mm/yyyy"
-        for column in range(7, 15):
+        for column in list(range(7, 13)) + [14, 15]:
             sheet.cell(row, column).number_format = "#,##0.00"
-        if str(values[15]) == "อนุมัติแล้ว":
-            sheet.cell(row, 16).font = Font(name="Sarabun", bold=True, size=10, color=green)
+        if str(values[16]) == "อนุมัติแล้ว":
+            sheet.cell(row, 17).font = Font(name="Sarabun", bold=True, size=10, color=green)
 
     total_row = header_row + len(records) + 1
     sheet.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=6)
     sheet.cell(total_row, 1, "รวมทั้งสิ้น")
     sheet.cell(total_row, 7, sum(safe_float(record.get("water_weight")) for record in records))
     sheet.cell(total_row, 8, sum(safe_float(record.get("flower_weight")) for record in records))
-    sheet.cell(total_row, 13, total_weight)
-    sheet.cell(total_row, 14, total_amount)
-    for column in range(1, 17):
+    total_grades = {grade: sum(production_grade_weights(record)[grade] for record in records) for grade in DURIAN_GRADES}
+    sheet.cell(total_row, 13, grade_totals_text(total_grades))
+    sheet.cell(total_row, 14, total_weight)
+    sheet.cell(total_row, 15, total_amount)
+    for column in range(1, 18):
         cell = sheet.cell(total_row, column)
         cell.font = Font(name="Sarabun", bold=True, size=10, color=dark_green)
         cell.fill = PatternFill("solid", fgColor="DDEFE4")
@@ -1411,7 +1432,7 @@ def build_daily_excel(data: dict, date: str) -> bytes:
         if column >= 7:
             cell.number_format = "#,##0.00"
 
-    widths = [8, 13, 10, 15, 25, 9, 12, 12, 11, 11, 14, 14, 13, 15, 20, 14]
+    widths = [8, 13, 10, 15, 25, 9, 12, 12, 11, 11, 14, 14, 28, 13, 15, 20, 14]
     for column, width in enumerate(widths, 1):
         sheet.column_dimensions[get_column_letter(column)].width = width
     sheet.row_dimensions[1].height = 20
@@ -1423,9 +1444,9 @@ def build_daily_excel(data: dict, date: str) -> bytes:
     for row in range(8, total_row + 1):
         sheet.row_dimensions[row].height = 21
 
-    sheet.auto_filter.ref = f"A7:P{total_row - 1}"
+    sheet.auto_filter.ref = f"A7:Q{total_row - 1}"
     sheet.print_title_rows = "1:7"
-    sheet.print_area = f"A1:P{total_row}"
+    sheet.print_area = f"A1:Q{total_row}"
     sheet.page_setup.orientation = "landscape"
     sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
     sheet.page_setup.fitToWidth = 1
@@ -1484,6 +1505,8 @@ def build_employee_range_excel(
         "วันที่",
         "น้ำหนักดอก",
         "น้ำหนักน้ำ",
+        "ทุเรียนเกรด A-E",
+        "น้ำหนักรวม",
         "รวมเป็นเงิน",
     ]
     sheet.append([])
@@ -1496,6 +1519,8 @@ def build_employee_range_excel(
                 summary["date"],
                 summary["flower_weight"],
                 summary["water_weight"],
+                grade_totals_text(summary.get("grade_weights")),
+                summary.get("total_weight", summary["flower_weight"] + summary["water_weight"]),
                 summary["total_amount"],
             ]
         )
@@ -1504,16 +1529,19 @@ def build_employee_range_excel(
     sheet.cell(total_row, 1, "รวม")
     sheet.cell(total_row, 2, sum(summary["flower_weight"] for summary in daily_summaries))
     sheet.cell(total_row, 3, sum(summary["water_weight"] for summary in daily_summaries))
-    sheet.cell(total_row, 4, gross_amount)
+    total_grades = {grade: sum(summary.get("grade_weights", {}).get(grade, 0) for summary in daily_summaries) for grade in DURIAN_GRADES}
+    sheet.cell(total_row, 4, grade_totals_text(total_grades))
+    sheet.cell(total_row, 5, sum(summary.get("total_weight", summary["flower_weight"] + summary["water_weight"]) for summary in daily_summaries))
+    sheet.cell(total_row, 6, gross_amount)
     bonus_row = total_row + 1
     sheet.cell(bonus_row, 1, "เบี้ยขยัน")
-    sheet.cell(bonus_row, 4, bonus_amount)
+    sheet.cell(bonus_row, 6, bonus_amount)
     deduct_row = total_row + 2
     sheet.cell(deduct_row, 1, "หัก")
-    sheet.cell(deduct_row, 4, deduction_amount)
+    sheet.cell(deduct_row, 6, deduction_amount)
     net_row = total_row + 3
     sheet.cell(net_row, 1, "สุทธิ")
-    sheet.cell(net_row, 4, net_amount)
+    sheet.cell(net_row, 6, net_amount)
 
     if deduction_rows:
         detail_start = net_row + 2
@@ -2029,7 +2057,7 @@ def build_time_full_export_excel(payload: dict) -> bytes:
         except Exception:
             pass
 
-    total_weight = sum(float(record.get("water_weight", record.get("water", 0)) or 0) + float(record.get("flower_weight", record.get("flower", 0)) or 0) for record in production_records)
+    total_weight = sum(production_total_weight(record) for record in production_records)
     total_production_amount = sum(float(record.get("total_amount", record.get("grand_total", 0)) or 0) for record in production_records)
     total_time_minutes = sum(float(record.get("net_minutes", 0) or 0) for record in time_records)
     overview_rows = [
@@ -2056,6 +2084,8 @@ def build_time_full_export_excel(payload: dict) -> bytes:
         "กอง",
         "น้ำหนักน้ำ",
         "น้ำหนักดอก",
+        "เกรดทุเรียน A-E",
+        "น้ำหนักรวม",
         "รวมเงิน",
         "ผู้บันทึก",
     ]
@@ -2071,6 +2101,8 @@ def build_time_full_export_excel(payload: dict) -> bytes:
                 record.get("pile_no") or record.get("pile", ""),
                 float(record.get("water_weight", record.get("water", 0)) or 0),
                 float(record.get("flower_weight", record.get("flower", 0)) or 0),
+                production_grade_text(record) if (record.get("fruit_type") or "mangosteen") == "durian" else "-",
+                production_total_weight(record),
                 float(record.get("total_amount", record.get("grand_total", 0)) or 0),
                 record.get("created_by", ""),
             ]
@@ -2422,6 +2454,34 @@ def safe_float(value: float | int | str | None) -> float:
         return 0.0
 
 
+def production_grade_weights(record: dict) -> dict[str, float]:
+    source = record.get("grade_weights") if isinstance(record.get("grade_weights"), dict) else {}
+    return {grade: safe_float(source.get(grade, source.get(grade.lower(), 0))) for grade in DURIAN_GRADES}
+
+
+def production_grade_total(record: dict) -> float:
+    return sum(production_grade_weights(record).values())
+
+
+def production_total_weight(record: dict) -> float:
+    if (record.get("fruit_type") or "mangosteen") == "durian":
+        return production_grade_total(record)
+    explicit = record.get("total_weight")
+    if explicit not in [None, ""] and safe_float(explicit) > 0:
+        return safe_float(explicit)
+    return safe_float(record.get("water_weight", record.get("water", 0))) + safe_float(record.get("flower_weight", record.get("flower", 0)))
+
+
+def production_grade_text(record: dict) -> str:
+    weights = production_grade_weights(record)
+    return " | ".join(f"{grade} {report_number(weights[grade])}" for grade in DURIAN_GRADES)
+
+
+def grade_totals_text(weights: dict | None) -> str:
+    source = weights if isinstance(weights, dict) else {}
+    return " | ".join(f"{grade} {report_number(source.get(grade, 0))}" for grade in DURIAN_GRADES)
+
+
 def minutes_text(value: float | int | str | None) -> str:
     minutes = int(round(safe_float(value)))
     hours, remain = divmod(minutes, 60)
@@ -2767,7 +2827,7 @@ def production_summary_context(payload: dict) -> tuple[str, str, list[dict], lis
     records = filtered_production_records(payload)
     pile_rows = pile_summary_rows(records)
     totals = summary_totals(pile_rows)
-    total_weight = totals["incoming"] + totals["outgoing"]
+    total_weight = totals["total_weight"]
     totals = {**totals, "total_weight": total_weight}
     employee_count = len(
         {record.get("employee_id") or record.get("emp_code") or record.get("employee_name") for record in records}
@@ -2800,6 +2860,7 @@ def build_production_summary_excel(payload: dict) -> bytes:
             ("totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", totals["total_weight"]),
             ("water", "น้ำหนักน้ำ (กก.)", totals["incoming"]),
             ("flower", "น้ำหนักดอก (กก.)", totals["outgoing"]),
+            ("grades", "ทุเรียนเกรด A-E", grade_totals_text(totals.get("grades"))),
             ("amount", "ยอดเงินรวม", totals["amount"]),
             ("employees", "พนักงานที่มีรายการ", employee_count),
             ("records", "จำนวนรายการ", len(records)),
@@ -2820,7 +2881,8 @@ def build_production_summary_excel(payload: dict) -> bytes:
                 ("pile", "กอง", lambda row: row["pile"]),
                 ("water", "น้ำหนักน้ำ (กก.)", lambda row: row["incoming"]),
                 ("flower", "น้ำหนักดอก (กก.)", lambda row: row["outgoing"]),
-                ("total", "รวม (กก.)", lambda row: row["incoming"] + row["outgoing"]),
+                ("grades", "ทุเรียนเกรด A-E", lambda row: grade_totals_text(row.get("grades"))),
+                ("total", "รวม (กก.)", lambda row: row.get("total_weight", row["incoming"] + row["outgoing"])),
                 ("amount", "รวมเงิน", lambda row: row["amount"]),
             ],
         )
@@ -2833,6 +2895,8 @@ def build_production_summary_excel(payload: dict) -> bytes:
                 "pile": "รวม",
                 "incoming": totals["incoming"],
                 "outgoing": totals["outgoing"],
+                "grades": totals.get("grades", {}),
+                "total_weight": totals["total_weight"],
                 "amount": totals["amount"],
             }
             pile_sheet.append([getter(total_row) for _, _, getter in pile_defs])
@@ -2850,6 +2914,8 @@ def build_production_summary_excel(payload: dict) -> bytes:
                 ("pile", "กอง", lambda record: record.get("pile_no") or record.get("pile", "")),
                 ("water", "น้ำหนักน้ำ (กก.)", lambda record: safe_float(record.get("water_weight", record.get("water", 0)))),
                 ("flower", "น้ำหนักดอก (กก.)", lambda record: safe_float(record.get("flower_weight", record.get("flower", 0)))),
+                ("grades", "ทุเรียนเกรด A-E", lambda record: production_grade_text(record) if (record.get("fruit_type") or "mangosteen") == "durian" else "-"),
+                ("total", "น้ำหนักรวม (กก.)", lambda record: production_total_weight(record)),
                 ("amount", "รวมเงิน", lambda record: safe_float(record.get("total_amount", record.get("grand_total", 0)))),
                 ("createdBy", "ผู้บันทึก", lambda record: record.get("created_by", "")),
             ],
@@ -2892,6 +2958,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
             ("totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", report_number(totals["total_weight"])),
             ("water", "น้ำหนักน้ำ (กก.)", report_number(totals["incoming"])),
             ("flower", "น้ำหนักดอก (กก.)", report_number(totals["outgoing"])),
+            ("grades", "ทุเรียนเกรด A-E", grade_totals_text(totals.get("grades"))),
             ("amount", "ยอดเงินรวม", money(totals["amount"])),
             ("employees", "พนักงานที่มีรายการ", report_number(employee_count, 0)),
             ("records", "จำนวนรายการ", report_number(len(records), 0)),
@@ -2913,7 +2980,8 @@ def build_production_summary_pdf(payload: dict) -> bytes:
                 ("pile", "กอง", lambda row: row["pile"]),
                 ("water", "น้ำหนักน้ำ (กก.)", lambda row: report_number(row["incoming"])),
                 ("flower", "น้ำหนักดอก (กก.)", lambda row: report_number(row["outgoing"])),
-                ("total", "รวม (กก.)", lambda row: report_number(row["incoming"] + row["outgoing"])),
+                ("grades", "ทุเรียนเกรด A-E", lambda row: grade_totals_text(row.get("grades"))),
+                ("total", "รวม (กก.)", lambda row: report_number(row.get("total_weight", row["incoming"] + row["outgoing"]))),
                 ("amount", "รวมเงิน", lambda row: money(row["amount"])),
             ],
         )
@@ -2921,7 +2989,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
             pile_table_rows = [[label for _, label, _ in pile_defs]]
             for row in pile_rows:
                 pile_table_rows.append([getter(row) for _, _, getter in pile_defs])
-            total_row = {"pile": "รวม", "incoming": totals["incoming"], "outgoing": totals["outgoing"], "amount": totals["amount"]}
+            total_row = {"pile": "รวม", "incoming": totals["incoming"], "outgoing": totals["outgoing"], "grades": totals.get("grades", {}), "total_weight": totals["total_weight"], "amount": totals["amount"]}
             pile_table_rows.append([getter(total_row) for _, _, getter in pile_defs])
             col_width = (267 / len(pile_defs)) * mm
             pile_table = Table(pile_table_rows, repeatRows=1, colWidths=[col_width] * len(pile_defs))
@@ -2940,6 +3008,8 @@ def build_production_summary_pdf(payload: dict) -> bytes:
                 ("pile", "กอง", lambda record: record.get("pile_no") or record.get("pile", "")),
                 ("water", "น้ำหนักน้ำ (กก.)", lambda record: report_number(record.get("water_weight", record.get("water", 0)))),
                 ("flower", "น้ำหนักดอก (กก.)", lambda record: report_number(record.get("flower_weight", record.get("flower", 0)))),
+                ("grades", "ทุเรียนเกรด A-E", lambda record: production_grade_text(record) if (record.get("fruit_type") or "mangosteen") == "durian" else "-"),
+                ("total", "น้ำหนักรวม (กก.)", lambda record: report_number(production_total_weight(record))),
                 ("amount", "รวมเงิน", lambda record: money(record.get("total_amount", record.get("grand_total", 0)))),
                 ("createdBy", "ผู้บันทึก", lambda record: record.get("created_by", "")),
             ],
@@ -3074,6 +3144,7 @@ def summarize_group_report(records: list[dict], mode: str = "group") -> list[dic
                 "records": 0,
                 "water": 0.0,
                 "flower": 0.0,
+                "grades": {grade: 0.0 for grade in DURIAN_GRADES},
                 "total": 0.0,
                 "amount": 0.0,
                 "deduction_amount": 0.0,
@@ -3087,7 +3158,10 @@ def summarize_group_report(records: list[dict], mode: str = "group") -> list[dic
         row["records"] += 1
         row["water"] += water
         row["flower"] += flower
-        row["total"] += water + flower
+        grade_weights = production_grade_weights(record)
+        for grade in DURIAN_GRADES:
+            row["grades"][grade] += grade_weights[grade]
+        row["total"] += production_total_weight(record)
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
         row["bonus_amount"] += safe_float(record.get("bonus_amount"))
@@ -3108,6 +3182,7 @@ def group_report_employee_rows(records: list[dict]) -> list[dict]:
                 "records": 0,
                 "water": 0.0,
                 "flower": 0.0,
+                "grades": {grade: 0.0 for grade in DURIAN_GRADES},
                 "total": 0.0,
                 "amount": 0.0,
                 "deduction_amount": 0.0,
@@ -3120,7 +3195,10 @@ def group_report_employee_rows(records: list[dict]) -> list[dict]:
         row["records"] += 1
         row["water"] += water
         row["flower"] += flower
-        row["total"] += water + flower
+        grade_weights = production_grade_weights(record)
+        for grade in DURIAN_GRADES:
+            row["grades"][grade] += grade_weights[grade]
+        row["total"] += production_total_weight(record)
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
         row["bonus_amount"] += safe_float(record.get("bonus_amount"))
@@ -3163,30 +3241,30 @@ def build_group_report_excel(payload: dict) -> bytes:
 
     if options["summary"]:
         summary = workbook.create_sheet("Summary By Group")
-        summary.append(["กลุ่ม", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
+        summary.append(["กลุ่ม", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
         for row in group_rows:
-            summary.append([row["pay_group"], len(row["employees"]), row["records"], row["water"], row["flower"], row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
+            summary.append([row["pay_group"], len(row["employees"]), row["records"], row["water"], row["flower"], grade_totals_text(row.get("grades")), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
         style_excel_report_sheet(summary, [1], [20, 12, 12, 14, 14, 14, 16, 14, 14, 16])
 
     if options["fruit"]:
         fruit = workbook.create_sheet("Group By Fruit")
-        fruit.append(["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
+        fruit.append(["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
         for row in fruit_rows:
-            fruit.append([row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], row["water"], row["flower"], row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
+            fruit.append([row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], row["water"], row["flower"], grade_totals_text(row.get("grades")), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
         style_excel_report_sheet(fruit, [1], [20, 16, 12, 12, 14, 14, 14, 16, 14, 14, 16])
 
     if options["employees"]:
         employees = workbook.create_sheet("Employees")
-        employees.append(["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
+        employees.append(["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
         for row in employee_rows:
-            employees.append([row["pay_group"], row["emp_code"], row["fullname"], row["records"], row["water"], row["flower"], row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
+            employees.append([row["pay_group"], row["emp_code"], row["fullname"], row["records"], row["water"], row["flower"], grade_totals_text(row.get("grades")), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
         style_excel_report_sheet(employees, [1], [20, 14, 26, 12, 14, 14, 14, 16, 14, 14, 16])
 
     if options["details"]:
         details = workbook.create_sheet("Details")
-        details.append(["วันที่", "กลุ่ม", "ผลไม้", "รหัส", "ชื่อพนักงาน", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวมเงิน"])
+        details.append(["วันที่", "กลุ่ม", "ผลไม้", "รหัส", "ชื่อพนักงาน", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "น้ำหนักรวม", "รวมเงิน"])
         for record in records:
-            details.append([record["record_date"], record["pay_group"], record["fruit_label"], record.get("emp_code", ""), record.get("employee_name", ""), record.get("pile_no") or record.get("pile", ""), safe_float(record.get("water_weight", record.get("water", 0))), safe_float(record.get("flower_weight", record.get("flower", 0))), safe_float(record.get("total_amount", record.get("grand_total", 0)))])
+            details.append([record["record_date"], record["pay_group"], record["fruit_label"], record.get("emp_code", ""), record.get("employee_name", ""), record.get("pile_no") or record.get("pile", ""), safe_float(record.get("water_weight", record.get("water", 0))), safe_float(record.get("flower_weight", record.get("flower", 0))), production_grade_text(record) if record.get("fruit_type") == "durian" else "-", production_total_weight(record), safe_float(record.get("total_amount", record.get("grand_total", 0)))])
         style_excel_report_sheet(details, [1], [14, 20, 16, 14, 26, 10, 14, 14, 16])
 
     output = BytesIO()
@@ -3222,29 +3300,29 @@ def build_group_report_pdf(payload: dict) -> bytes:
     if options["summary"]:
         add_table(
             "สรุปตามกลุ่ม",
-            ["Group", "People", "Records", "Water", "Flower", "Total", "Amount", "Bonus", "Deduct", "Net"],
-            [[row["pay_group"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in group_rows],
+            ["Group", "People", "Records", "Water", "Flower", "Durian A-E", "Total", "Amount", "Bonus", "Deduct", "Net"],
+            [[row["pay_group"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), grade_totals_text(row.get("grades")), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in group_rows],
         )
 
     if options["fruit"]:
         add_table(
             "สรุปตามกลุ่มและผลไม้",
-            ["Group", "Fruit", "People", "Records", "Water", "Flower", "Total", "Amount", "Bonus", "Deduct", "Net"],
-            [[row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in fruit_rows],
+            ["Group", "Fruit", "People", "Records", "Water", "Flower", "Durian A-E", "Total", "Amount", "Bonus", "Deduct", "Net"],
+            [[row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), grade_totals_text(row.get("grades")), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in fruit_rows],
         )
 
     if options["employees"]:
         add_table(
             "รายละเอียดพนักงานในกลุ่ม",
-            ["Group", "Code", "Name", "Records", "Water", "Flower", "Total", "Amount", "Bonus", "Deduct", "Net"],
-            [[row["pay_group"], row["emp_code"], row["fullname"], row["records"], report_number(row["water"]), report_number(row["flower"]), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in employee_rows[:80]],
+            ["Group", "Code", "Name", "Records", "Water", "Flower", "Durian A-E", "Total", "Amount", "Bonus", "Deduct", "Net"],
+            [[row["pay_group"], row["emp_code"], row["fullname"], row["records"], report_number(row["water"]), report_number(row["flower"]), grade_totals_text(row.get("grades")), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in employee_rows[:80]],
         )
 
     if options["details"]:
         add_table(
             "รายละเอียดรายการ",
-            ["วันที่", "กลุ่ม", "ผลไม้", "รหัส", "ชื่อ", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "รวมเงิน"],
-            [[format_report_date(record["record_date"]), record["pay_group"], record["fruit_label"], record.get("emp_code", ""), record.get("employee_name", ""), record.get("pile_no") or record.get("pile", ""), report_number(record.get("water_weight", record.get("water", 0))), report_number(record.get("flower_weight", record.get("flower", 0))), money(record.get("total_amount", record.get("grand_total", 0)))] for record in records[:100]],
+            ["วันที่", "กลุ่ม", "ผลไม้", "รหัส", "ชื่อ", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "ทุเรียน A-E", "รวม", "รวมเงิน"],
+            [[format_report_date(record["record_date"]), record["pay_group"], record["fruit_label"], record.get("emp_code", ""), record.get("employee_name", ""), record.get("pile_no") or record.get("pile", ""), report_number(record.get("water_weight", record.get("water", 0))), report_number(record.get("flower_weight", record.get("flower", 0))), production_grade_text(record) if record.get("fruit_type") == "durian" else "-", report_number(production_total_weight(record)), money(record.get("total_amount", record.get("grand_total", 0)))] for record in records[:100]],
         )
 
     if len(story) <= 4:

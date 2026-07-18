@@ -82,6 +82,9 @@ create table if not exists public.production_records (
   item_type text,
   water_weight numeric(12,2) not null default 0,
   flower_weight numeric(12,2) not null default 0,
+  grade_weights jsonb not null default '{}'::jsonb,
+  grade_rates jsonb not null default '{}'::jsonb,
+  grade_amounts jsonb not null default '{}'::jsonb,
   total_weight numeric(12,2) not null default 0,
   rate numeric(12,2) not null default 0,
   amount numeric(12,2) not null default 0,
@@ -92,6 +95,11 @@ create table if not exists public.production_records (
   updated_at timestamptz not null default now(),
   raw_payload jsonb not null default '{}'::jsonb
 );
+
+alter table public.production_records
+  add column if not exists grade_weights jsonb not null default '{}'::jsonb,
+  add column if not exists grade_rates jsonb not null default '{}'::jsonb,
+  add column if not exists grade_amounts jsonb not null default '{}'::jsonb;
 
 create table if not exists public.time_records (
   id bigserial primary key,
@@ -177,6 +185,7 @@ create index if not exists idx_production_records_date on public.production_reco
 create index if not exists idx_production_records_employee on public.production_records(employee_id);
 create index if not exists idx_production_records_pay_group on public.production_records(pay_group);
 create index if not exists idx_production_records_fruit_type on public.production_records(fruit_type);
+create index if not exists idx_production_records_durian on public.production_records(record_date, pile_no) where fruit_type = 'durian';
 create index if not exists idx_deduction_records_kind_range on public.deduction_records(employee_kind, start_date, end_date);
 create index if not exists idx_deduction_records_employee on public.deduction_records(employee_kind, employee_id, emp_code);
 create index if not exists idx_deduction_applications_date on public.deduction_applications(employee_kind, applied_date);

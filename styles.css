@@ -2704,6 +2704,61 @@ tr:last-child td {
   gap: 18px;
 }
 
+.durian-grade-inputs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  gap: 10px;
+  grid-column: 1 / -1;
+}
+
+.durian-grade-field {
+  padding: 10px;
+  border-left: 4px solid #16835f;
+  background: #f5fbf8;
+}
+
+.durian-grade-field.grade-b,
+.durian-grade-side.grade-b { border-left-color: #2f6fc2; }
+.durian-grade-field.grade-c,
+.durian-grade-side.grade-c { border-left-color: #d49b20; }
+.durian-grade-field.grade-d,
+.durian-grade-side.grade-d { border-left-color: #d56b32; }
+.durian-grade-field.grade-e,
+.durian-grade-side.grade-e { border-left-color: #a95370; }
+
+.durian-batch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.durian-grade-side {
+  border-left: 4px solid #16835f;
+}
+
+.grade-breakdown {
+  display: block;
+  margin-top: 3px;
+  color: #47685b;
+  white-space: nowrap;
+}
+
+.legend-durian,
+.summary-bar.durian {
+  background: #16835f;
+}
+
+@media (max-width: 900px) {
+  .durian-grade-inputs {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  .durian-batch-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .batch-side {
   border: 1px solid var(--line);
   border-radius: 8px;
