@@ -314,6 +314,13 @@ modules.splice(
     icon: "⚙"
   },
   {
+    id: "accounting-control",
+    label: "มุมมองนักบัญชี",
+    roles: ["admin", "hr", "operator", "supervisor", "developer"],
+    description: "พื้นที่คำนวณ วางแผน และติดตามงานบัญชีจากข้อมูลที่กรอกเอง",
+    icon: "◉"
+  },
+  {
     id: "audit-log",
     label: "Audit Log",
     roles: ["admin"],
@@ -376,9 +383,9 @@ modules.forEach((moduleItem) => {
 });
 
 const levelRouteAccess = {
-  C1: ["dashboard", "production"],
-  C2: ["dashboard", "production", "summary-person"],
-  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report"],
+  C1: ["dashboard", "production", "accounting-control"],
+  C2: ["dashboard", "production", "summary-person", "accounting-control"],
+  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report", "accounting-control"],
   C4: [
     "dashboard",
     "production",
@@ -396,7 +403,8 @@ const levelRouteAccess = {
     "production-employees",
     "time-employees",
     "wage-rates",
-    "audit-log"
+    "audit-log",
+    "accounting-control"
   ],
   C5: [
     "dashboard",
@@ -413,7 +421,8 @@ const levelRouteAccess = {
     "time-employees",
     "pile-management",
     "wage-rates",
-    "audit-log"
+    "audit-log",
+    "accounting-control"
   ],
   C6: modules.map((item) => item.id),
   C7: modules.map((item) => item.id)
@@ -1068,7 +1077,7 @@ function getDefaultRouteForUser(user) {
 }
 
 function visibleNavModulesForUser(user) {
-  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings"];
+  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "settings", "accounting-control", "summary-all", "reports"];
   return navRouteIds
     .map((routeId) => modules.find((item) => item.id === routeId))
     .filter((item) => item && !item.hidden)
@@ -3707,6 +3716,13 @@ async function handleLogin(event) {
 }
 
 function renderApp(user, route) {
+  if (route === "accounting-control" && window.AccountingControl) {
+    window.AccountingControl.render(app, user, {
+      onExit: () => { location.hash = "#/dashboard"; },
+      onAudit: (action, description) => addAuditLog(user, action, description)
+    });
+    return;
+  }
   if (!liveStateCloudBootstrapped) {
     liveStateCloudBootstrapped = true;
     bootstrapLiveStateFromCloud().then(() => render()).catch((error) => {
@@ -3752,7 +3768,7 @@ function renderApp(user, route) {
 
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
   const visibleModules = visibleNavModulesForUser(user);
-  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings"];
+  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "settings", "accounting-control", "summary-all", "reports"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
 
