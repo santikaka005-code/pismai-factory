@@ -14,6 +14,11 @@
     ["cashflow", "เงินสด", "◫"],
     ["calendar", "กำหนดการ", "◷"],
     ["documents", "เอกสาร", "□"],
+    ["chart", "ผังบัญชี", "≡"],
+    ["journal", "สมุดรายวัน", "✎"],
+    ["trial", "งบทดลอง", "∑"],
+    ["statements", "งบการเงิน", "▥"],
+    ["closing", "ปิดงวด", "◉"],
     ["settings", "กติกา", "⚙"]
   ];
   const lawRules = {
@@ -161,14 +166,16 @@
     currentUser = user;
     callbacks = options || {};
     state = load();
+    window.AccountingLedger?.init(user, () => renderRoom(root));
     if (!accessGranted(user)) renderGate(root); else renderRoom(root);
   }
   function renderRoom(root) {
     const c = calc();
-    root.innerHTML = `<main class="acr-shell"><aside class="acr-rail"><div class="acr-logo">ACR</div><nav>${views.map(([id, label, icon]) => `<button class="${activeView === id ? "active" : ""}" data-ac-view="${id}" title="${label}"><b>${icon}</b><span>${label}</span></button>`).join("")}</nav><button class="acr-exit" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside><section class="acr-workspace"><header class="acr-header"><div><p>ACCOUNTING CONTROL ROOM</p><h1>ห้องควบคุมบัญชี</h1><span>${esc(state.company.name)} · ${thaiPeriod(state.selectedPeriod)}</span></div><div class="acr-header-actions"><label>รอบข้อมูล<input type="month" id="acrPeriod" value="${esc(state.selectedPeriod)}" /></label><span class="acr-status">รอนักบัญชียืนยัน</span><b class="acr-user">${esc(currentUser.level || "C1")}</b></div></header><div class="acr-trust"><span>✓ ข้อมูลกรอกด้วยตนเอง</span><span>ไม่เชื่อมบัญชีธนาคาร</span><span>อัปเดต ${state.updatedAt ? new Date(state.updatedAt).toLocaleString("th-TH") : "ยังไม่มี"}</span></div>${notice ? `<div class="acr-notice ${noticeType}">${esc(notice)}</div>` : ""}<div class="acr-view">${renderView(c)}</div><footer class="acr-footer"><span>สถานะข้อมูล: ยังไม่ยืนยันโดยนักบัญชี</span><span>กติกากฎหมายตรวจสอบล่าสุด ${lawRules.checkedAt}</span><span>ผู้ใช้งาน ${esc(currentUser.fullname || currentUser.username)}</span></footer></section></main>`;
+    root.innerHTML = `<main class="acr-shell"><aside class="acr-rail"><div class="acr-logo">PF</div><nav>${views.map(([id, label, icon]) => `<button class="${activeView === id ? "active" : ""}" data-ac-view="${id}" title="${label}"><b>${icon}</b><span>${label}</span></button>`).join("")}</nav><button class="acr-exit" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside><section class="acr-workspace"><header class="acr-header"><div><p>PF ACCOUNTING</p><h1>ระบบบัญชี PF Accounting</h1><span>${esc(state.company.name)} · ${thaiPeriod(state.selectedPeriod)}</span></div><div class="acr-header-actions"><label>รอบข้อมูล<input type="month" id="acrPeriod" value="${esc(state.selectedPeriod)}" /></label><span class="acr-status">รอนักบัญชียืนยัน</span><b class="acr-user">${esc(currentUser.level || "C1")}</b></div></header><div class="acr-trust"><span>✓ ข้อมูลกรอกด้วยตนเอง</span><span>ไม่เชื่อมบัญชีธนาคาร</span><span>อัปเดต ${state.updatedAt ? new Date(state.updatedAt).toLocaleString("th-TH") : "ยังไม่มี"}</span></div>${notice ? `<div class="acr-notice ${noticeType}">${esc(notice)}</div>` : ""}<div class="acr-view">${renderView(c)}</div><footer class="acr-footer"><span>สถานะข้อมูล: ยังไม่ยืนยันโดยนักบัญชี</span><span>กติกากฎหมายตรวจสอบล่าสุด ${lawRules.checkedAt}</span><span>ผู้ใช้งาน ${esc(currentUser.fullname || currentUser.username)}</span></footer></section></main>`;
     bindRoom(root);
   }
   function renderView(c) {
+    if (["chart", "journal", "trial", "statements", "closing"].includes(activeView) && window.AccountingLedger) return window.AccountingLedger.render(activeView);
     if (activeView === "entry") return entryView(c);
     if (activeView === "tax") return taxView(c);
     if (activeView === "cashflow") return cashView(c);
@@ -243,6 +250,7 @@
   }
 
   function bindRoom(root) {
+    window.AccountingLedger?.bind(root, () => renderRoom(root));
     root.querySelectorAll("[data-ac-view]").forEach((button) => button.addEventListener("click", () => { activeView = button.dataset.acView; notice = ""; renderRoom(root); }));
     root.querySelector("[data-ac-exit]")?.addEventListener("click", callbacks.onExit);
     root.querySelector("#acrPeriod")?.addEventListener("change", (event) => { state.selectedPeriod = event.target.value || currentPeriod(); save("เปลี่ยนรอบข้อมูล"); renderRoom(root); });

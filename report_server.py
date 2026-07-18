@@ -3,10 +3,12 @@
 import json
 import hashlib
 import hmac
+import base64
 import math
 import mimetypes
 import os
 import secrets
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -65,6 +67,8 @@ TIME_SPECIAL_WAGE_TABLE = {
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 BACKUP_ACCESS_CODE = os.environ.get("BACKUP_ACCESS_CODE", "1150")
+SESSION_SIGNING_SECRET = os.environ.get("SESSION_SIGNING_SECRET") or SUPABASE_SERVICE_ROLE_KEY or secrets.token_hex(32)
+ACCOUNTING_COMPANY_KEY = os.environ.get("ACCOUNTING_COMPANY_KEY", "pismai-main")
 BACKUP_TABLES = [
     "account_users",
     "employees",
@@ -95,6 +99,72 @@ SYSTEM_ACCOUNT_PROFILES = {
     }
 }
 SYSTEM_ACCOUNT_USERNAMES = {username.lower() for username in SYSTEM_ACCOUNT_PROFILES}
+
+
+def session_token(account: dict) -> str:
+    payload = {
+        "sub": str(account.get("id", "")),
+        "username": str(account.get("username", "")),
+        "level": str(account.get("user_level", "C1")),
+        "role": str(account.get("role", "")),
+        "exp": int(time.time()) + 12 * 60 * 60,
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+    signature = hmac.new(SESSION_SIGNING_SECRET.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def verify_session_token(token: str) -> dict | None:
+    try:
+        encoded, signature = token.split(".", 1)
+        expected = hmac.new(SESSION_SIGNING_SECRET.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        if int(payload.get("exp", 0)) <= int(time.time()):
+            return None
+        return payload
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def accounting_actor(handler: BaseHTTPRequestHandler, minimum_level: int = 1) -> dict | None:
+    actor = verify_session_token(handler.headers.get("X-Session-Token", ""))
+    level = int("".join(filter(str.isdigit, str(actor.get("level", "C1")))) or "1") if actor else 0
+    return actor if actor and level >= minimum_level else None
+
+
+def validate_accounting_workspace(workspace: object) -> str | None:
+    if not isinstance(workspace, dict):
+        return "workspace must be an object"
+    accounts = workspace.get("accounts", [])
+    journals = workspace.get("journals", [])
+    if not isinstance(accounts, list) or not isinstance(journals, list):
+        return "accounts and journals must be arrays"
+    account_ids = {str(row.get("id")) for row in accounts if isinstance(row, dict) and row.get("id")}
+    codes = [str(row.get("code", "")).strip().lower() for row in accounts if isinstance(row, dict)]
+    if not account_ids or any(not code for code in codes) or len(codes) != len(set(codes)):
+        return "chart of accounts contains missing or duplicate account codes"
+    for journal in journals:
+        if not isinstance(journal, dict) or journal.get("status") not in {"draft", "posted", "reversed"}:
+            return "journal status is invalid"
+        lines = journal.get("lines", [])
+        if not isinstance(lines, list):
+            return "journal lines must be an array"
+        debit = credit = 0.0
+        for line in lines:
+            if not isinstance(line, dict) or str(line.get("accountId")) not in account_ids:
+                return "journal references an unknown account"
+            line_debit = round(float(line.get("debit") or 0), 2)
+            line_credit = round(float(line.get("credit") or 0), 2)
+            if line_debit < 0 or line_credit < 0 or (line_debit and line_credit):
+                return "journal line has an invalid debit or credit"
+            debit += line_debit
+            credit += line_credit
+        if journal.get("status") in {"posted", "reversed"} and (len(lines) < 2 or debit <= 0 or abs(debit - credit) >= 0.005):
+            return "posted journal is not balanced"
+    return None
 
 
 def register_thai_font() -> str:
@@ -3546,7 +3616,7 @@ class ReportHandler(BaseHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Backup-Code")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Backup-Code, X-Session-Token")
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
@@ -3556,6 +3626,96 @@ class ReportHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         payload = self.read_json()
+
+        if parsed.path == "/api/accounting/journals":
+            actor = accounting_actor(self)
+            if not actor:
+                self.send_json({"error": "Accounting session is missing or expired."}, 401)
+                return
+            lines = payload.get("lines", [])
+            if not isinstance(lines, list):
+                self.send_json({"error": "Journal lines must be an array."}, 400)
+                return
+            rpc_payload = {
+                "p_company_key": ACCOUNTING_COMPANY_KEY,
+                "p_entry_date": payload.get("date"),
+                "p_journal_type": payload.get("journal_type", "general"),
+                "p_reference": payload.get("reference", ""),
+                "p_description": payload.get("description", ""),
+                "p_document_no": payload.get("document_no", ""),
+                "p_lines": [
+                    {
+                        "account_id": line.get("accountId") or line.get("account_id"),
+                        "description": line.get("memo") or line.get("description", ""),
+                        "debit": line.get("debit", 0),
+                        "credit": line.get("credit", 0),
+                        "partner_id": line.get("partner_id"),
+                        "due_date": line.get("due_date"),
+                        "tax_code": line.get("tax_code"),
+                        "cost_center": line.get("cost_center"),
+                        "production_batch": line.get("production_batch"),
+                        "project_code": line.get("project_code"),
+                    }
+                    for line in lines if isinstance(line, dict)
+                ],
+                "p_actor": actor.get("username", "unknown"),
+                "p_submit": payload.get("intent") != "draft",
+            }
+            status, body = supabase_request("POST", "rpc/ac_create_journal", rpc_payload)
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path in {"/api/accounting/journals/approve", "/api/accounting/journals/reject"}:
+            actor = accounting_actor(self, 5)
+            if not actor:
+                self.send_json({"error": "C5 or higher accounting session is required."}, 403)
+                return
+            journal_id = str(payload.get("journal_id", "")).strip()
+            if not journal_id:
+                self.send_json({"error": "journal_id is required."}, 400)
+                return
+            if parsed.path.endswith("/approve"):
+                rpc_name = "rpc/ac_approve_journal"
+                rpc_payload = {"p_journal_id": journal_id, "p_actor": actor.get("username"), "p_actor_level": actor.get("level")}
+            else:
+                rpc_name = "rpc/ac_reject_journal"
+                rpc_payload = {"p_journal_id": journal_id, "p_actor": actor.get("username"), "p_actor_level": actor.get("level"), "p_reason": payload.get("reason", "")}
+            status, body = supabase_request("POST", rpc_name, rpc_payload)
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/accounting/periods/close":
+            actor = accounting_actor(self, 5)
+            if not actor:
+                self.send_json({"error": "C5 or higher accounting session is required."}, 403)
+                return
+            status, body = supabase_request("POST", "rpc/ac_close_period", {"p_period_id": payload.get("period_id"), "p_actor": actor.get("username")})
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/accounting/accounts":
+            actor = accounting_actor(self, 5)
+            if not actor:
+                self.send_json({"error": "C5 or higher accounting session is required."}, 403)
+                return
+            company_status, companies = supabase_request("GET", f"ac_companies?company_key=eq.{quote(ACCOUNTING_COMPANY_KEY)}&select=id&limit=1")
+            if company_status >= 400 or not isinstance(companies, list) or not companies:
+                self.send_json({"error": companies if company_status >= 400 else "Accounting company is not initialized."}, company_status if company_status >= 400 else 404)
+                return
+            account_type = str(payload.get("type", ""))
+            if account_type not in {"asset", "liability", "equity", "revenue", "expense"}:
+                self.send_json({"error": "Invalid account type."}, 422)
+                return
+            normal_side = "debit" if account_type in {"asset", "expense"} else "credit"
+            if bool(payload.get("contra")):
+                normal_side = "credit" if normal_side == "debit" else "debit"
+            row = {"company_id": companies[0]["id"], "code": str(payload.get("code", "")).strip(), "name_th": str(payload.get("name", "")).strip(), "account_type": account_type, "normal_side": normal_side, "is_contra": bool(payload.get("contra")), "active": True, "system_account": False}
+            if not row["code"] or not row["name_th"]:
+                self.send_json({"error": "Account code and name are required."}, 400)
+                return
+            status, body = supabase_request("POST", "ac_accounts", row, prefer="return=representation")
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
 
         if parsed.path == "/reports/sync":
             save_data(payload)
@@ -3622,7 +3782,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 {"last_login_at": datetime.utcnow().isoformat() + "Z"},
                 prefer="return=minimal",
             )
-            self.send_json({"user": account_to_client(account)})
+            self.send_json({"user": account_to_client(account), "token": session_token(account)})
             return
 
         if parsed.path == "/api/accounts/sync":
@@ -3985,6 +4145,76 @@ class ReportHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         payload = self.read_json()
 
+        if parsed.path == "/api/accounting/workspace":
+            actor = accounting_actor(self)
+            if not actor:
+                self.send_json({"error": "Accounting session is missing or expired."}, 401)
+                return
+            workspace = payload.get("workspace")
+            validation_error = validate_accounting_workspace(workspace)
+            if validation_error:
+                self.send_json({"error": validation_error}, 422)
+                return
+            expected_revision = int(payload.get("revision") or 0)
+            status, existing_rows = supabase_request(
+                "GET",
+                f"accounting_workspaces?company_key=eq.{quote(ACCOUNTING_COMPANY_KEY)}&select=*",
+            )
+            if status >= 400:
+                self.send_json({"error": existing_rows}, status)
+                return
+            existing = existing_rows[0] if isinstance(existing_rows, list) and existing_rows else None
+            current_revision = int(existing.get("revision", 0)) if existing else 0
+            if expected_revision != current_revision:
+                self.send_json({"error": "Accounting workspace revision conflict.", "data": existing}, 409)
+                return
+            if existing:
+                old_workspace = existing.get("workspace") if isinstance(existing.get("workspace"), dict) else {}
+                old_periods = old_workspace.get("periods", {}) if isinstance(old_workspace.get("periods"), dict) else {}
+                new_periods = workspace.get("periods", {}) if isinstance(workspace.get("periods"), dict) else {}
+                for period, period_row in old_periods.items():
+                    if not isinstance(period_row, dict) or period_row.get("status") != "closed":
+                        continue
+                    old_journals = [row for row in old_workspace.get("journals", []) if str(row.get("date", "")).startswith(period)]
+                    new_journals = [row for row in workspace.get("journals", []) if str(row.get("date", "")).startswith(period)]
+                    reopened = isinstance(new_periods.get(period), dict) and new_periods[period].get("status") == "open"
+                    actor_level = int("".join(filter(str.isdigit, str(actor.get("level", "C1")))) or "1")
+                    if old_journals != new_journals and not (reopened and actor_level >= 5):
+                        self.send_json({"error": f"Closed accounting period {period} is immutable."}, 423)
+                        return
+            next_revision = current_revision + 1
+            row = {
+                "company_key": ACCOUNTING_COMPANY_KEY,
+                "revision": next_revision,
+                "workspace": workspace,
+                "updated_by": actor.get("username", "unknown"),
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            }
+            if existing:
+                save_status, saved = supabase_request(
+                    "PATCH",
+                    f"accounting_workspaces?company_key=eq.{quote(ACCOUNTING_COMPANY_KEY)}&revision=eq.{current_revision}",
+                    row,
+                    prefer="return=representation",
+                )
+                if save_status < 400 and (not isinstance(saved, list) or not saved):
+                    self.send_json({"error": "Accounting workspace revision conflict."}, 409)
+                    return
+            else:
+                save_status, saved = supabase_request("POST", "accounting_workspaces", row, prefer="return=representation")
+            if save_status >= 400:
+                self.send_json({"error": saved}, save_status)
+                return
+            workspace_hash = hashlib.sha256(json.dumps(workspace, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            supabase_request(
+                "POST",
+                "accounting_change_log",
+                {"company_key": ACCOUNTING_COMPANY_KEY, "revision": next_revision, "action": "WORKSPACE_SAVE", "actor_username": actor.get("username", "unknown"), "actor_level": actor.get("level", "C1"), "workspace_hash": workspace_hash, "metadata": {"journal_count": len(workspace.get("journals", [])), "account_count": len(workspace.get("accounts", []))}},
+                prefer="return=minimal",
+            )
+            self.send_json({"data": {"revision": next_revision, "updated_at": row["updated_at"]}})
+            return
+
         if parsed.path == "/api/employees":
             employee_id = payload.get("id")
             if employee_id in [None, ""]:
@@ -4161,6 +4391,60 @@ class ReportHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+
+        if parsed.path == "/api/accounting/workspace":
+            actor = accounting_actor(self)
+            if not actor:
+                self.send_json({"error": "Accounting session is missing or expired."}, 401)
+                return
+            status, rows = supabase_request(
+                "GET",
+                f"accounting_workspaces?company_key=eq.{quote(ACCOUNTING_COMPANY_KEY)}&select=revision,workspace,updated_by,updated_at&limit=1",
+            )
+            if status >= 400:
+                self.send_json({"error": rows}, status)
+                return
+            if not isinstance(rows, list) or not rows:
+                self.send_json({"error": "Accounting workspace has not been initialized."}, 404)
+                return
+            self.send_json({"data": rows[0]})
+            return
+
+        if parsed.path == "/api/accounting/bootstrap":
+            actor = accounting_actor(self)
+            if not actor:
+                self.send_json({"error": "Accounting session is missing or expired."}, 401)
+                return
+            company_status, companies = supabase_request("GET", f"ac_companies?company_key=eq.{quote(ACCOUNTING_COMPANY_KEY)}&select=*&limit=1")
+            if company_status >= 400 or not isinstance(companies, list) or not companies:
+                self.send_json({"error": companies if company_status >= 400 else "Accounting company is not initialized."}, company_status if company_status >= 400 else 404)
+                return
+            company = companies[0]
+            company_id = quote(str(company.get("id")))
+            datasets = {}
+            queries = {
+                "accounts": f"ac_accounts?company_id=eq.{company_id}&select=*&order=code.asc",
+                "periods": f"ac_periods?company_id=eq.{company_id}&select=*&order=start_date.desc",
+                "journals": f"ac_journal_entries?company_id=eq.{company_id}&select=*&order=entry_date.desc,created_at.desc&limit=500",
+                "partners": f"ac_partners?company_id=eq.{company_id}&select=*&active=eq.true&order=partner_code.asc",
+            }
+            for key, path in queries.items():
+                status, rows = supabase_request("GET", path)
+                if status >= 400:
+                    self.send_json({"error": rows, "dataset": key}, status)
+                    return
+                datasets[key] = rows if isinstance(rows, list) else []
+            journal_ids = [str(row.get("id")) for row in datasets["journals"] if row.get("id")]
+            if journal_ids:
+                status, lines = supabase_request("GET", f"ac_journal_lines?journal_id=in.({','.join(quote(value) for value in journal_ids)})&select=*&order=journal_id.asc,line_no.asc")
+                if status >= 400:
+                    self.send_json({"error": lines, "dataset": "journal_lines"}, status)
+                    return
+                datasets["journal_lines"] = lines if isinstance(lines, list) else []
+            else:
+                datasets["journal_lines"] = []
+            self.send_json({"data": {"company": company, **datasets}})
+            return
 
         if parsed.path == "/api/health":
             status, body = supabase_request("GET", "employees?select=id&limit=1")

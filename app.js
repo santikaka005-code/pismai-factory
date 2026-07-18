@@ -315,7 +315,7 @@ modules.splice(
   },
   {
     id: "accounting-control",
-    label: "มุมมองนักบัญชี",
+    label: "PF Accounting",
     roles: ["admin", "hr", "operator", "supervisor", "developer"],
     description: "พื้นที่คำนวณ วางแผน และติดตามงานบัญชีจากข้อมูลที่กรอกเอง",
     icon: "◉"
@@ -1008,7 +1008,7 @@ function getSession() {
 
 function saveSession(user, rememberSession = false) {
   const session = {
-    token: `mock-token-${user.role}-${Date.now()}`,
+    token: user.auth_token || `mock-token-${user.role}-${Date.now()}`,
     user: {
       id: user.id,
       username: user.username,
@@ -1077,7 +1077,7 @@ function getDefaultRouteForUser(user) {
 }
 
 function visibleNavModulesForUser(user) {
-  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "settings", "accounting-control", "summary-all", "reports"];
+  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings", "accounting-control"];
   return navRouteIds
     .map((routeId) => modules.find((item) => item.id === routeId))
     .filter((item) => item && !item.hidden)
@@ -1143,7 +1143,8 @@ function normalizeAccountUser(user) {
     isActive: user.isActive !== false,
     is_system: Boolean(user.is_system || protectedProfile?.is_system),
     created_at: user.created_at || new Date().toISOString(),
-    updated_at: user.updated_at || user.created_at || new Date().toISOString()
+    updated_at: user.updated_at || user.created_at || new Date().toISOString(),
+    auth_token: String(user.auth_token || "")
   };
 }
 
@@ -1221,10 +1222,12 @@ function saveAccountUsers(accountUsers) {
 }
 
 async function cloudApiRequest(path, options = {}) {
+  const sessionToken = getSession()?.token || "";
   const response = await fetch(`${REPORT_API_BASE}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(sessionToken ? { "X-Session-Token": sessionToken } : {}),
       ...(options.headers || {})
     }
   });
@@ -1348,7 +1351,7 @@ async function loginWithCloud(username, password) {
     method: "POST",
     body: JSON.stringify({ username, password })
   });
-  return normalizeCloudAccountUser(data.user || {});
+  return normalizeCloudAccountUser({ ...(data.user || {}), auth_token: data.token || "" });
 }
 
 async function syncAccountsToCloud(accounts = getAccountUsers()) {
@@ -3768,7 +3771,7 @@ function renderApp(user, route) {
 
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
   const visibleModules = visibleNavModulesForUser(user);
-  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "settings", "accounting-control", "summary-all", "reports"];
+  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings", "accounting-control"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
 
