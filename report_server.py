@@ -3038,6 +3038,8 @@ def employee_lookup_maps(payload: dict) -> tuple[dict[str, dict], dict[str, dict
 
 
 GROUP_REPORT_PAY_GROUPS = ["เหมาโรงงาน", "เหมา(นนท์)", "เหมาปุ้ย"]
+PRODUCTION_WITHHOLDING_TAX_RATE = 0.03
+PRODUCTION_WITHHOLDING_TAX_GROUPS = {"เหมา(นนท์)", "เหมาปุ้ย"}
 GROUP_REPORT_LEGACY_MAP = {
     "กลุ่ม A": "เหมาโรงงาน",
     "กลุ่ม B": "เหมา(นนท์)",
@@ -3053,6 +3055,12 @@ def normalize_group_report_pay_group(value: str) -> str:
     if pay_group in GROUP_REPORT_PAY_GROUPS:
         return pay_group
     return ""
+
+
+def production_withholding_tax(pay_group: str, amount: float | int | str | None) -> float:
+    if normalize_group_report_pay_group(pay_group) not in PRODUCTION_WITHHOLDING_TAX_GROUPS:
+        return 0.0
+    return round(max(0.0, safe_float(amount)) * PRODUCTION_WITHHOLDING_TAX_RATE + 1e-9, 2)
 
 
 def production_fruit_id(record: dict) -> str:
@@ -3148,6 +3156,7 @@ def summarize_group_report(records: list[dict], mode: str = "group") -> list[dic
                 "total": 0.0,
                 "amount": 0.0,
                 "deduction_amount": 0.0,
+                "withholding_tax_amount": 0.0,
                 "bonus_amount": 0.0,
                 "net_amount": 0.0,
             },
@@ -3165,7 +3174,11 @@ def summarize_group_report(records: list[dict], mode: str = "group") -> list[dic
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
         row["bonus_amount"] += safe_float(record.get("bonus_amount"))
-        row["net_amount"] = max(0, row["amount"] + row["bonus_amount"] - row["deduction_amount"])
+        row["withholding_tax_amount"] = production_withholding_tax(row["pay_group"], row["amount"])
+        row["net_amount"] = max(
+            0,
+            row["amount"] + row["bonus_amount"] - row["deduction_amount"] - row["withholding_tax_amount"],
+        )
     return sorted(summaries.values(), key=lambda item: (item["pay_group"], item["fruit_label"]))
 
 
@@ -3186,6 +3199,7 @@ def group_report_employee_rows(records: list[dict]) -> list[dict]:
                 "total": 0.0,
                 "amount": 0.0,
                 "deduction_amount": 0.0,
+                "withholding_tax_amount": 0.0,
                 "bonus_amount": 0.0,
                 "net_amount": 0.0,
             },
@@ -3202,7 +3216,11 @@ def group_report_employee_rows(records: list[dict]) -> list[dict]:
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
         row["bonus_amount"] += safe_float(record.get("bonus_amount"))
-        row["net_amount"] = max(0, row["amount"] + row["bonus_amount"] - row["deduction_amount"])
+        row["withholding_tax_amount"] = production_withholding_tax(row["pay_group"], row["amount"])
+        row["net_amount"] = max(
+            0,
+            row["amount"] + row["bonus_amount"] - row["deduction_amount"] - row["withholding_tax_amount"],
+        )
     return sorted(rows.values(), key=lambda item: (item["pay_group"], item["emp_code"]))
 
 
@@ -3241,24 +3259,24 @@ def build_group_report_excel(payload: dict) -> bytes:
 
     if options["summary"]:
         summary = workbook.create_sheet("Summary By Group")
-        summary.append(["กลุ่ม", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
+        summary.append(["กลุ่ม", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "รวม", "รวมเงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก ณ ที่จ่าย 3%", "สุทธิ"])
         for row in group_rows:
-            summary.append([row["pay_group"], len(row["employees"]), row["records"], row["water"], row["flower"], grade_totals_text(row.get("grades")), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
-        style_excel_report_sheet(summary, [1], [20, 12, 12, 14, 14, 14, 16, 14, 14, 16])
+            summary.append([row["pay_group"], len(row["employees"]), row["records"], row["water"], row["flower"], grade_totals_text(row.get("grades")), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("withholding_tax_amount", 0), row.get("net_amount", row["amount"])])
+        style_excel_report_sheet(summary, [1], [20, 12, 12, 14, 14, 22, 14, 16, 14, 14, 18, 16])
 
     if options["fruit"]:
         fruit = workbook.create_sheet("Group By Fruit")
-        fruit.append(["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
+        fruit.append(["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "รวม", "รวมเงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก ณ ที่จ่าย 3%", "สุทธิ"])
         for row in fruit_rows:
-            fruit.append([row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], row["water"], row["flower"], grade_totals_text(row.get("grades")), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
-        style_excel_report_sheet(fruit, [1], [20, 16, 12, 12, 14, 14, 14, 16, 14, 14, 16])
+            fruit.append([row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], row["water"], row["flower"], grade_totals_text(row.get("grades")), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("withholding_tax_amount", 0), row.get("net_amount", row["amount"])])
+        style_excel_report_sheet(fruit, [1], [20, 16, 12, 12, 14, 14, 22, 14, 16, 14, 14, 18, 16])
 
     if options["employees"]:
         employees = workbook.create_sheet("Employees")
-        employees.append(["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "รวม", "รวมเงิน", "เบี้ยขยัน", "หัก", "สุทธิ"])
+        employees.append(["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", "น้ำหนักน้ำ", "น้ำหนักดอก", "เกรดทุเรียน A-E", "รวม", "รวมเงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก ณ ที่จ่าย 3%", "สุทธิ"])
         for row in employee_rows:
-            employees.append([row["pay_group"], row["emp_code"], row["fullname"], row["records"], row["water"], row["flower"], grade_totals_text(row.get("grades")), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("net_amount", row["amount"])])
-        style_excel_report_sheet(employees, [1], [20, 14, 26, 12, 14, 14, 14, 16, 14, 14, 16])
+            employees.append([row["pay_group"], row["emp_code"], row["fullname"], row["records"], row["water"], row["flower"], grade_totals_text(row.get("grades")), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("withholding_tax_amount", 0), row.get("net_amount", row["amount"])])
+        style_excel_report_sheet(employees, [1], [20, 14, 26, 12, 14, 14, 22, 14, 16, 14, 14, 18, 16])
 
     if options["details"]:
         details = workbook.create_sheet("Details")
@@ -3279,7 +3297,19 @@ def build_group_report_pdf(payload: dict) -> bytes:
     group_rows = summarize_group_report(records, "group")
     fruit_rows = summarize_group_report(records, "fruit")
     employee_rows = group_report_employee_rows(records)
-    _, _, _, section = pdf_styles()
+    _, _, pdf_normal, section = pdf_styles()
+    grade_style = pdf_normal.clone("GroupReportGradeCell")
+    grade_style.fontSize = 6
+    grade_style.leading = 7
+    grade_style.alignment = 1
+
+    def grade_cell(weights: dict | None):
+        values = weights or {}
+        if not any(safe_float(values.get(grade)) for grade in DURIAN_GRADES):
+            return "-"
+        first = " / ".join(f"{grade}:{report_number(values.get(grade), 0)}" for grade in DURIAN_GRADES[:3])
+        second = " / ".join(f"{grade}:{report_number(values.get(grade), 0)}" for grade in DURIAN_GRADES[3:])
+        return Paragraph(f"{first}<br/>{second}", grade_style)
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=15 * mm, rightMargin=15 * mm, topMargin=14 * mm, bottomMargin=16 * mm)
     story = report_header_story(
@@ -3300,22 +3330,22 @@ def build_group_report_pdf(payload: dict) -> bytes:
     if options["summary"]:
         add_table(
             "สรุปตามกลุ่ม",
-            ["Group", "People", "Records", "Water", "Flower", "Durian A-E", "Total", "Amount", "Bonus", "Deduct", "Net"],
-            [[row["pay_group"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), grade_totals_text(row.get("grades")), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in group_rows],
+            ["กลุ่ม", "คน", "รายการ", "น้ำ", "ดอก", "ทุเรียน A-E", "รวม", "เงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก 3%", "สุทธิ"],
+            [[row["pay_group"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), grade_cell(row.get("grades")), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("withholding_tax_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in group_rows],
         )
 
     if options["fruit"]:
         add_table(
             "สรุปตามกลุ่มและผลไม้",
-            ["Group", "Fruit", "People", "Records", "Water", "Flower", "Durian A-E", "Total", "Amount", "Bonus", "Deduct", "Net"],
-            [[row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), grade_totals_text(row.get("grades")), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in fruit_rows],
+            ["กลุ่ม", "ผลไม้", "คน", "รายการ", "น้ำ", "ดอก", "ทุเรียน A-E", "รวม", "เงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก 3%", "สุทธิ"],
+            [[row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], report_number(row["water"]), report_number(row["flower"]), grade_cell(row.get("grades")), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("withholding_tax_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in fruit_rows],
         )
 
     if options["employees"]:
         add_table(
             "รายละเอียดพนักงานในกลุ่ม",
-            ["Group", "Code", "Name", "Records", "Water", "Flower", "Durian A-E", "Total", "Amount", "Bonus", "Deduct", "Net"],
-            [[row["pay_group"], row["emp_code"], row["fullname"], row["records"], report_number(row["water"]), report_number(row["flower"]), grade_totals_text(row.get("grades")), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in employee_rows[:80]],
+            ["กลุ่ม", "รหัส", "ชื่อ", "รายการ", "น้ำ", "ดอก", "ทุเรียน A-E", "รวม", "เงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก 3%", "สุทธิ"],
+            [[row["pay_group"], row["emp_code"], row["fullname"], row["records"], report_number(row["water"]), report_number(row["flower"]), grade_cell(row.get("grades")), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("withholding_tax_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in employee_rows[:80]],
         )
 
     if options["details"]:

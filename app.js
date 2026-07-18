@@ -551,6 +551,8 @@ const defaultEmployees = [
 ];
 
 const primaryPayGroups = ["เหมาโรงงาน", "เหมา(นนท์)", "เหมาปุ้ย"];
+const PRODUCTION_WITHHOLDING_TAX_RATE = 0.03;
+const productionWithholdingTaxGroups = new Set(["เหมา(นนท์)", "เหมาปุ้ย"]);
 const legacyPayGroupMap = {
   "กลุ่ม A": "เหมาโรงงาน",
   "กลุ่ม B": "เหมา(นนท์)",
@@ -2191,6 +2193,12 @@ function saveEmployees(employees) {
 
 function getEmployeePayGroup(employee) {
   return normalizeEmployeePayGroupValue(employee?.pay_group || "");
+}
+
+function getProductionWithholdingTax(payGroup, amount) {
+  const normalizedGroup = normalizeEmployeePayGroupValue(payGroup);
+  if (!productionWithholdingTaxGroups.has(normalizedGroup)) return 0;
+  return Math.round((Math.max(0, Number(amount) || 0) * PRODUCTION_WITHHOLDING_TAX_RATE + Number.EPSILON) * 100) / 100;
 }
 
 function getEmployeePayGroups() {
@@ -4960,6 +4968,15 @@ function renderDeductionEntry(user, moduleItem) {
           <span>${context.bonusMode ? `เมื่อช่วงวันที่ Export ครอบคลุมวันที่ ${escapeHtml(context.range.startDate)} ยอดนี้จะถูกบวกในการคำนวณทันที` : "ยอดจะยังไม่ถูกหักจากเงิน จนกว่าจะเลือกและยืนยันในแท็บอนุมัติหักเงิน"}</span>
         </div>
       </div>
+      ${!context.bonusMode && context.employeeKind === "production" ? `
+        <div class="deduction-export-note">
+          <span class="deduction-export-note-mark">3%</span>
+          <div>
+            <strong>หัก ณ ที่จ่ายอัตโนมัติสำหรับเหมา(นนท์) และเหมาปุ้ย</strong>
+            <span>ระบบคำนวณ 3% จากยอดค่าแรงก่อนหักเมื่อแสดงรายงานและ Export โดยไม่ต้องสร้างรายการหักหรือรออนุมัติซ้ำ</span>
+          </div>
+        </div>
+      ` : ""}
 
       <div class="summary-metrics deduction-metrics">
         <div class="metric-card metric-blue"><span>${actionLabel}</span><strong>${context.records.length.toLocaleString("th-TH")} รายการ</strong><small>ประจำวันที่ ${escapeHtml(context.range.startDate)}</small></div>
@@ -11770,6 +11787,7 @@ function summarizeGroupReportRows(records, mode = "group") {
         total: 0,
         amount: 0,
         deduction_amount: 0,
+        withholding_tax_amount: 0,
         bonus_amount: 0,
         net_amount: 0,
         deductedEmployees: new Set()
@@ -11805,7 +11823,13 @@ function summarizeGroupReportRows(records, mode = "group") {
   return Array.from(summaries.values())
     .map((summary) => ({
       ...summary,
-      net_amount: Math.max(0, Number(summary.amount || 0) + Number(summary.bonus_amount || 0) - Number(summary.deduction_amount || 0))
+      withholding_tax_amount: getProductionWithholdingTax(summary.pay_group, summary.amount),
+      net_amount: Math.max(
+        0,
+        Number(summary.amount || 0) + Number(summary.bonus_amount || 0)
+          - Number(summary.deduction_amount || 0)
+          - getProductionWithholdingTax(summary.pay_group, summary.amount)
+      )
     }))
     .sort((a, b) =>
       `${a.pay_group} ${a.fruit_label}`.localeCompare(`${b.pay_group} ${b.fruit_label}`, "th")
@@ -11837,6 +11861,7 @@ function getGroupReportEmployeeRows(records) {
           range.startDate,
           range.endDate
         ),
+        withholding_tax_amount: 0,
         bonus_amount: getBonusTotalForEmployee(
           "production",
           record.employee || { id: record.employee_id, emp_code: record.emp_code },
@@ -11853,7 +11878,13 @@ function getGroupReportEmployeeRows(records) {
     DURIAN_GRADES.forEach((grade) => row.grades[grade] += getRecordGradeWeights(record)[grade]);
     row.total += getRecordTotalWeight(record);
     row.amount += amount;
-    row.net_amount = Math.max(0, Number(row.amount || 0) + Number(row.bonus_amount || 0) - Number(row.deduction_amount || 0));
+    row.withholding_tax_amount = getProductionWithholdingTax(row.pay_group, row.amount);
+    row.net_amount = Math.max(
+      0,
+      Number(row.amount || 0) + Number(row.bonus_amount || 0)
+        - Number(row.deduction_amount || 0)
+        - Number(row.withholding_tax_amount || 0)
+    );
   });
   return Array.from(rows.values()).sort((a, b) =>
     `${a.pay_group} ${a.emp_code}`.localeCompare(`${b.pay_group} ${b.emp_code}`, "th")
@@ -11871,11 +11902,12 @@ function getGroupReportTotals(groupRows) {
       totals.total += row.total;
       totals.amount += row.amount;
       totals.deduction_amount += Number(row.deduction_amount || 0);
+      totals.withholding_tax_amount += Number(row.withholding_tax_amount || 0);
       totals.bonus_amount += Number(row.bonus_amount || 0);
       totals.net_amount += Number(row.net_amount ?? row.amount ?? 0);
       return totals;
     },
-    { employees: new Set(), records: 0, water: 0, flower: 0, grades: createEmptyDurianGradeWeights(0), total: 0, amount: 0, deduction_amount: 0, bonus_amount: 0, net_amount: 0 }
+    { employees: new Set(), records: 0, water: 0, flower: 0, grades: createEmptyDurianGradeWeights(0), total: 0, amount: 0, deduction_amount: 0, withholding_tax_amount: 0, bonus_amount: 0, net_amount: 0 }
   );
 }
 
@@ -12066,6 +12098,7 @@ function renderGroupReportSummaryRow(row, showFruit = false) {
       <td><strong>${money(row.amount)}</strong></td>
       <td>${money(row.bonus_amount || 0)}</td>
       <td>${money(row.deduction_amount || 0)}</td>
+      <td>${money(row.withholding_tax_amount || 0)}</td>
       <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
   `;
@@ -12085,6 +12118,7 @@ function renderGroupReportEmployeeRow(row) {
       <td><strong>${money(row.amount)}</strong></td>
       <td>${money(row.bonus_amount || 0)}</td>
       <td>${money(row.deduction_amount || 0)}</td>
+      <td>${money(row.withholding_tax_amount || 0)}</td>
       <td><strong>${money(row.net_amount ?? row.amount)}</strong></td>
     </tr>
   `;
@@ -12326,7 +12360,7 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="metric-card metric-green"><span>น้ำหนักรวม</span><strong>${numberText(totals.total)} กก.</strong><small>น้ำ ${numberText(totals.water)} | ดอก ${numberText(totals.flower)} | ทุเรียน ${numberText(getDurianGradeTotal(totals.grades))}</small></div>
         <div class="metric-card metric-blue"><span>ยอดเงินรวม</span><strong>${money(totals.amount)}</strong><small>ก่อนหัก</small></div>
         <div class="metric-card metric-purple"><span>จำนวนกลุ่ม</span><strong>${groupRows.length.toLocaleString("th-TH")}</strong><small>${groupReportGroup === "all" ? "ทุกกลุ่ม" : groupReportGroup}</small></div>
-        <div class="metric-card metric-orange"><span>เบี้ยขยัน / หัก</span><strong>${money(totals.bonus_amount || 0)} / ${money(totals.deduction_amount || 0)}</strong><small>สุทธิ ${money(totals.net_amount ?? totals.amount)}</small></div>
+        <div class="metric-card metric-orange"><span>หักทั่วไป / หัก 3%</span><strong>${money(totals.deduction_amount || 0)} / ${money(totals.withholding_tax_amount || 0)}</strong><small>เบี้ยขยัน ${money(totals.bonus_amount || 0)} · สุทธิ ${money(totals.net_amount ?? totals.amount)}</small></div>
       </div>
 
       <section class="summary-grid group-report-top-grid">
@@ -12342,8 +12376,8 @@ function renderSummaryGroupReport(moduleItem) {
           <div class="table-heading">สรุปตามกลุ่ม</div>
           <div class="table-scroll">
             <table class="group-report-compact-table">
-              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>น้ำ</th><th>ดอก</th><th>เกรดทุเรียน A-E</th><th>รวม</th><th>เงิน</th><th>เบี้ยขยัน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
-              <tbody>${groupRows.length ? groupRows.map((row) => renderGroupReportSummaryRow(row)).join("") : `<tr><td colspan="11" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>น้ำ</th><th>ดอก</th><th>เกรดทุเรียน A-E</th><th>รวม</th><th>เงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
+              <tbody>${groupRows.length ? groupRows.map((row) => renderGroupReportSummaryRow(row)).join("") : `<tr><td colspan="12" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
             </table>
           </div>
         </section>
@@ -12353,8 +12387,8 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">สรุปตามกลุ่มและผลไม้</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>เกรดทุเรียน A-E</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
-            <tbody>${fruitRows.length ? fruitRows.map((row) => renderGroupReportSummaryRow(row, true)).join("") : `<tr><td colspan="12" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>เกรดทุเรียน A-E</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
+            <tbody>${fruitRows.length ? fruitRows.map((row) => renderGroupReportSummaryRow(row, true)).join("") : `<tr><td colspan="13" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -12363,8 +12397,8 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">รายละเอียดพนักงานในกลุ่ม</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>เกรดทุเรียน A-E</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หัก</th><th>สุทธิ</th></tr></thead>
-            <tbody>${employeeRows.length ? employeeRows.map(renderGroupReportEmployeeRow).join("") : `<tr><td colspan="12" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>เกรดทุเรียน A-E</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
+            <tbody>${employeeRows.length ? employeeRows.map(renderGroupReportEmployeeRow).join("") : `<tr><td colspan="13" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>
