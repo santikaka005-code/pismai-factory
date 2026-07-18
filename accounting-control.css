@@ -5,3 +5,8 @@
 @media(max-width:1000px){.acl-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.acl-journal-head{grid-template-columns:1fr 1fr}.acl-audit div{grid-template-columns:1fr 1fr}.acl-audit span{grid-column:1/-1}}
 @media(max-width:640px){.acl-metrics,.acl-journal-head{grid-template-columns:1fr}.acl-journal-actions{flex-direction:column}.acl-audit div{grid-template-columns:1fr}.acl-audit span{grid-column:auto}}
 .acl-pill.pending_approval{border-color:#8a6a27;color:#ffd071}.acl-pill.rejected{border-color:#7a3030;color:#ff8989}.acl-reject-reason{display:block;color:#ff8989;margin-top:4px}
+
+/* Keep the expanded PF Accounting navigation inside the viewport. */
+html:has(.acr-shell),body:has(.acr-shell),#app:has(.acr-shell){min-height:100%;background:#050b0d}.acr-shell{min-height:100dvh;background-color:#050b0d}.acr-rail{box-sizing:border-box;height:100dvh;overflow:hidden}.acr-rail nav{min-height:0;flex:1;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#28543f transparent}.acr-rail nav::-webkit-scrollbar{width:5px}.acr-rail nav::-webkit-scrollbar-thumb{border-radius:999px;background:#28543f}.acr-rail nav button{flex-shrink:0}.acr-exit{flex-shrink:0;margin-top:8px!important}
+@media(max-height:820px) and (min-width:721px){.acr-rail{padding-top:9px;padding-bottom:9px}.acr-logo{height:38px;margin-bottom:8px}.acr-rail nav{gap:4px}.acr-rail nav button{min-height:52px;padding:4px}.acr-rail button b{font-size:18px}.acr-rail button span{font-size:10px}}
+@media(max-width:720px){.acr-rail{height:68px;overflow:hidden}.acr-rail nav{min-height:auto;overflow-x:auto;overflow-y:hidden;justify-content:flex-start}.acr-rail nav button{flex:0 0 58px}.acr-exit{display:none}}
