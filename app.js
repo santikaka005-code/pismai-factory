@@ -3592,6 +3592,11 @@ function render() {
   const session = getSession();
   const route = location.hash.replace("#/", "") || "login";
 
+  if (lastRenderedRoute === "audit-log" && route !== "audit-log") {
+    auditLogUnlocked = false;
+    auditLogMessage = "";
+  }
+
   if (!session && route !== "login") {
     location.hash = "#/login";
     return;
@@ -3871,15 +3876,11 @@ function renderApp(user, route) {
             </div>
           </div>
           <div class="user-box">
-            ${
-              moduleItem.id === "dashboard"
-                ? `<div class="online-users-widget" title="จำนวนผู้ใช้งานเว็บที่ยังใช้งานอยู่">
-                    <span class="online-dot" aria-hidden="true"></span>
-                    <span>ออนไลน์</span>
-                    <strong data-online-user-count>${onlineUserCountText()}</strong>
-                  </div>`
-                : ""
-            }
+            <div class="online-users-widget" title="จำนวนผู้ใช้งานเว็บที่ยังใช้งานอยู่">
+              <span class="online-dot" aria-hidden="true"></span>
+              <span>ออนไลน์</span>
+              <strong data-online-user-count>${onlineUserCountText()}</strong>
+            </div>
             <div class="user-meta">
               <strong>${escapeHtml(user.fullname)}</strong>
               <span>${escapeHtml(user.role_label || user.role)}</span>
