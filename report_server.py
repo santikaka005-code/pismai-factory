@@ -8,6 +8,7 @@ import math
 import mimetypes
 import os
 import secrets
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -88,6 +89,9 @@ LIVE_STATE_TABLES = {
     "time_records",
     "audit_logs",
 }
+ONLINE_USER_TIMEOUT_SECONDS = 45
+online_user_lock = threading.Lock()
+online_user_sessions: dict[str, dict] = {}
 SYSTEM_ACCOUNT_PROFILES = {
     "Santi": {
         "username": "Santi",
@@ -533,6 +537,56 @@ def live_state_to_client(table: str, row: dict) -> dict:
 
 def supabase_configured() -> bool:
     return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+
+def online_user_snapshot(now: float | None = None) -> dict:
+    current_time = now or time.time()
+    cutoff = current_time - ONLINE_USER_TIMEOUT_SECONDS
+    with online_user_lock:
+        expired = [
+            client_id
+            for client_id, session in online_user_sessions.items()
+            if float(session.get("last_seen", 0)) < cutoff
+        ]
+        for client_id in expired:
+            online_user_sessions.pop(client_id, None)
+        users = sorted(
+            online_user_sessions.values(),
+            key=lambda session: str(session.get("fullname") or session.get("username") or ""),
+        )
+        return {
+            "count": len(users),
+            "timeout_seconds": ONLINE_USER_TIMEOUT_SECONDS,
+            "users": [
+                {
+                    "username": session.get("username", ""),
+                    "fullname": session.get("fullname", ""),
+                    "route": session.get("route", ""),
+                    "last_seen": session.get("last_seen_iso", ""),
+                }
+                for session in users
+            ],
+        }
+
+
+def register_online_user(payload: dict) -> dict:
+    client_id = str(payload.get("client_id") or "").strip()
+    username = str(payload.get("username") or "").strip()
+    if not client_id:
+        client_id = secrets.token_urlsafe(18)
+    now = time.time()
+    with online_user_lock:
+        online_user_sessions[client_id] = {
+            "client_id": client_id,
+            "username": username,
+            "fullname": str(payload.get("fullname") or username or "ผู้ใช้งาน"),
+            "route": str(payload.get("route") or ""),
+            "last_seen": now,
+            "last_seen_iso": datetime.utcnow().isoformat() + "Z",
+        }
+    snapshot = online_user_snapshot(now)
+    snapshot["client_id"] = client_id
+    return snapshot
 
 
 def supabase_request(
@@ -3775,6 +3829,10 @@ class ReportHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         payload = self.read_json()
 
+        if parsed.path == "/api/online-users":
+            self.send_json({"data": register_online_user(payload)})
+            return
+
         if parsed.path == "/api/accounting/journals":
             actor = accounting_actor(self)
             if not actor:
@@ -4598,6 +4656,10 @@ class ReportHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+
+        if parsed.path == "/api/online-users":
+            self.send_json({"data": online_user_snapshot()})
+            return
 
         if parsed.path == "/api/accounting/workspace":
             actor = accounting_actor(self)

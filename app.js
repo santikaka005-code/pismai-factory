@@ -10,11 +10,15 @@ const AUDIT_LOG_KEY = "pismai_factory_audit_log";
 const CLOUD_MIGRATION_KEY = "pismai_factory_cloud_migration_v2";
 const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
 const AUDIT_LOG_PASSWORD = "1150";
+const ONLINE_CLIENT_KEY = "pismai_online_client_id";
+const ONLINE_HEARTBEAT_INTERVAL_MS = 15000;
 const REPORT_API_BASE =
   // The desktop launcher opens index.html directly. It must use the same
   // cloud API as the hosted app, otherwise its browser-only data can never
   // reach iPad or other devices.
   location.protocol === "file:" ? "https://pismai-factory-test.onrender.com" : location.origin;
+let onlineUserCount = 0;
+let onlineHeartbeatTimer = null;
 const TIME_DAILY_WAGE = 347;
 const TIME_SPECIAL_DAILY_WAGE = 365;
 const TIME_STANDARD_HOURS = 8;
@@ -1172,6 +1176,59 @@ async function cloudApiRequest(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+function getOnlineClientId() {
+  let clientId = sessionStorage.getItem(ONLINE_CLIENT_KEY);
+  if (!clientId) {
+    clientId = `web-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    sessionStorage.setItem(ONLINE_CLIENT_KEY, clientId);
+  }
+  return clientId;
+}
+
+function onlineUserCountText() {
+  const count = Math.max(onlineUserCount || (getSession() ? 1 : 0), 0);
+  return `${count.toLocaleString("th-TH")} คน`;
+}
+
+function updateOnlineUserBadges() {
+  document.querySelectorAll("[data-online-user-count]").forEach((element) => {
+    element.textContent = onlineUserCountText();
+  });
+}
+
+async function refreshOnlineUsers() {
+  const session = getSession();
+  if (!session) {
+    onlineUserCount = 0;
+    updateOnlineUserBadges();
+    return;
+  }
+
+  try {
+    const route = location.hash.replace("#/", "") || "dashboard";
+    const data = await cloudApiRequest("/api/online-users", {
+      method: "POST",
+      body: JSON.stringify({
+        client_id: getOnlineClientId(),
+        username: session.user.username,
+        fullname: session.user.fullname,
+        route
+      })
+    });
+    onlineUserCount = Number(data.data?.count) || 1;
+  } catch (error) {
+    onlineUserCount = Math.max(onlineUserCount, 1);
+    console.warn("Online user heartbeat failed.", error);
+  }
+  updateOnlineUserBadges();
+}
+
+function startOnlineUserHeartbeat() {
+  if (onlineHeartbeatTimer) return;
+  refreshOnlineUsers();
+  onlineHeartbeatTimer = window.setInterval(refreshOnlineUsers, ONLINE_HEARTBEAT_INTERVAL_MS);
 }
 
 const liveStateConfig = {
@@ -3546,9 +3603,13 @@ function render() {
   }
 
   if (!session) {
+    onlineUserCount = 0;
+    updateOnlineUserBadges();
     renderLogin();
     return;
   }
+
+  startOnlineUserHeartbeat();
 
   if (!canOpen(session.user, route)) {
     renderAccessDenied(session.user, route);
@@ -3810,6 +3871,15 @@ function renderApp(user, route) {
             </div>
           </div>
           <div class="user-box">
+            ${
+              moduleItem.id === "dashboard"
+                ? `<div class="online-users-widget" title="จำนวนผู้ใช้งานเว็บที่ยังใช้งานอยู่">
+                    <span class="online-dot" aria-hidden="true"></span>
+                    <span>ออนไลน์</span>
+                    <strong data-online-user-count>${onlineUserCountText()}</strong>
+                  </div>`
+                : ""
+            }
             <div class="user-meta">
               <strong>${escapeHtml(user.fullname)}</strong>
               <span>${escapeHtml(user.role_label || user.role)}</span>
@@ -3953,6 +4023,8 @@ function bindAppEvents(user, moduleItem) {
     auditLogUnlocked = false;
     auditLogMessage = "";
     clearSession();
+    onlineUserCount = 0;
+    updateOnlineUserBadges();
     location.hash = "#/login";
   });
 
@@ -4121,8 +4193,8 @@ function renderDashboard(user, moduleItem) {
           <strong>${escapeHtml(user.fullname)}</strong>
         </div>
         <div>
-          <span>สิทธิ์ระบบ</span>
-          <strong>${escapeHtml(user.role_label || user.role)}</strong>
+          <span>ผู้ใช้งานออนไลน์</span>
+          <strong data-online-user-count>${onlineUserCountText()}</strong>
         </div>
       </div>
 
@@ -12548,5 +12620,9 @@ function bindSummaryGroupReportEvents(user) {
 }
 
 window.addEventListener("hashchange", render);
+window.addEventListener("focus", refreshOnlineUsers);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshOnlineUsers();
+});
 startLiveClock();
 render();

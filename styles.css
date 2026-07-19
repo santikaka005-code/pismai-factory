@@ -742,6 +742,33 @@ input:disabled {
   gap: 12px;
 }
 
+.online-users-widget {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(167, 243, 208, 0.26);
+  border-radius: 999px;
+  padding: 0 12px;
+  color: #d7e0ec;
+  background: rgba(15, 118, 110, 0.2);
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.online-users-widget strong {
+  color: #ffffff;
+}
+
+.online-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #22c55e;
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.16);
+}
+
 .user-meta {
   text-align: right;
 }
