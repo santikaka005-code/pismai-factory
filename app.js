@@ -403,7 +403,6 @@ const levelRouteAccess = {
     "production-employees",
     "time-employees",
     "wage-rates",
-    "audit-log",
     "accounting-control"
   ],
   C5: modules.map((item) => item.id).filter((id) => id !== "audit-log"),
@@ -602,6 +601,8 @@ let productionMessage = "";
 let productionMessageType = "success";
 let auditLogUnlocked = false;
 let auditLogMessage = "";
+let auditLogSearch = "";
+let auditLogCategory = "all";
 let accountCloudBootstrapped = false;
 let wageRateCloudBootstrapped = false;
 let employeeCloudBootstrapped = false;
@@ -1015,7 +1016,7 @@ function visibleNavModulesForUser(user) {
 function canOpen(user, moduleId) {
   const moduleItem = modules.find((item) => item.id === moduleId);
   if (!moduleItem || !user) return false;
-  if (getUserLevel(user) === "C5" && moduleId === "audit-log") return false;
+  if (moduleId === "audit-log" && !["C6", "C7"].includes(getUserLevel(user))) return false;
   if (isTopLevelUser(user)) return true;
   return getAllowedRoutesForUser(user).includes(moduleId);
 }
@@ -5144,6 +5145,7 @@ function renderFullSettingsModule(user) {
   const rates = getWageRates();
   const accounts = getAccountUsers();
   const logs = getAuditLogs();
+  const canViewAuditLog = canOpen(user, "audit-log");
   const settingsTiles = [
     ["employees", "จัดการพนักงาน", "เลือกจัดการพนักงานเหมาน้ำหนักหรือพนักงานตามเวลา"],
     ["wage-rates", "ตั้งค่าอัตราค่าจ้าง", "เพิ่มอัตราใหม่และดูประวัติค่าน้ำ/ค่าดอกย้อนหลัง"],
@@ -5157,7 +5159,7 @@ function renderFullSettingsModule(user) {
       <div class="panel-head">
         <div>
           <h2>ตั้งค่า</h2>
-          <p>ศูนย์จัดการข้อมูลหลักสำหรับแอดมิน: พนักงาน บัญชี ค่าจ้าง Audit Log และ Backup ฐานข้อมูล</p>
+          <p>ศูนย์จัดการข้อมูลหลักสำหรับแอดมิน: พนักงาน บัญชี ค่าจ้าง และ Backup ฐานข้อมูล${canViewAuditLog ? " รวมถึง Audit Log" : ""}</p>
         </div>
         <span class="badge badge-success">Admin</span>
       </div>
@@ -5165,7 +5167,7 @@ function renderFullSettingsModule(user) {
         <div class="metric-card"><span>พนักงานใช้งาน</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>จาก ${employees.length.toLocaleString("th-TH")} คน</small></div>
         <div class="metric-card"><span>อัตราค่าจ้าง</span><strong>${rates.length.toLocaleString("th-TH")}</strong><small>รายการประวัติ</small></div>
         <div class="metric-card"><span>บัญชีระบบ</span><strong>${accounts.length.toLocaleString("th-TH")}</strong><small>รวมบัญชีแอดมิน</small></div>
-        <div class="metric-card"><span>Audit Log</span><strong>${logs.length.toLocaleString("th-TH")}</strong><small>รายการล่าสุด</small></div>
+        ${canViewAuditLog ? `<div class="metric-card"><span>Audit Log</span><strong>${logs.length.toLocaleString("th-TH")}</strong><small>รายการล่าสุด</small></div>` : ""}
       </div>
     </section>
 
@@ -5427,51 +5429,149 @@ function bindAccountManagementEvents(user) {
   });
 }
 
+function getAuditLogCategory(action) {
+  const normalized = String(action || "").toUpperCase();
+  if (/DELETE|REMOVE/.test(normalized)) return "delete";
+  if (/EXPORT|BACKUP|IMPORT/.test(normalized)) return "export";
+  if (/LOGIN|LOGOUT|AUTH|SIGN_IN|START_SESSION/.test(normalized)) return "access";
+  if (/UPDATE|EDIT|APPLY|APPROVE|REJECT|CLOSE|LOCK/.test(normalized)) return "update";
+  if (/CREATE|REGISTER|ADD/.test(normalized)) return "create";
+  return "system";
+}
+
+function getAuditLogActionLabel(action) {
+  const labels = {
+    CREATE_ATTENDANCE_BONUS: "เพิ่มเบี้ยขยัน",
+    CREATE_DEDUCTION: "เพิ่มรายการหักเงิน",
+    UPDATE_DEDUCTION: "แก้ไขรายการหักเงิน",
+    DELETE_DEDUCTION: "ลบรายการหักเงิน",
+    APPLY_DEDUCTION_BATCH: "นำรายการหักเงินไปใช้",
+    REGISTER_ACCOUNT: "สร้างบัญชีเข้าใช้งาน",
+    UPDATE_ACCOUNT: "แก้ไขบัญชีเข้าใช้งาน",
+    DELETE_ACCOUNT: "ลบบัญชีเข้าใช้งาน",
+    START_SESSION: "เริ่มกองงาน",
+    UPDATE_TIME_RECORD: "แก้ไขเวลาทำงาน",
+    DELETE_TIME_RECORD: "ลบเวลาทำงาน",
+    EXPORT_DATABASE_BACKUP: "ส่งออกข้อมูลสำรอง",
+    IMPORT_DATABASE_BACKUP: "นำเข้าข้อมูลสำรอง",
+    EXPORT_PILE_SUMMARY: "ส่งออกสรุปกอง"
+  };
+  const normalized = String(action || "").toUpperCase();
+  return labels[normalized] || normalized.replaceAll("_", " ") || "ไม่ระบุเหตุการณ์";
+}
+
+function getAuditLogCategoryLabel(category) {
+  return {
+    create: "เพิ่มข้อมูล",
+    update: "แก้ไขข้อมูล",
+    delete: "ลบข้อมูล",
+    access: "การเข้าใช้งาน",
+    export: "นำเข้า / ส่งออก",
+    system: "ระบบ"
+  }[category] || "ระบบ";
+}
+
+function formatAuditLogDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return { date: "-", time: "-" };
+  return {
+    date: date.toLocaleDateString("th-TH", { day: "2-digit", month: "short", year: "numeric" }),
+    time: date.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+  };
+}
+
 function renderAuditLog(moduleItem) {
   if (!auditLogUnlocked) {
     return renderAuditLogPasswordGate(moduleItem);
   }
 
   const logs = getAuditLogs().slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  const today = new Date().toDateString();
+  const todayCount = logs.filter((log) => new Date(log.created_at).toDateString() === today).length;
+  const uniqueUsers = new Set(logs.map((log) => log.username || log.user_fullname || log.created_by).filter(Boolean)).size;
+  const searchTerm = auditLogSearch.trim().toLocaleLowerCase("th-TH");
+  const filteredLogs = logs.filter((log) => {
+    const category = getAuditLogCategory(log.action);
+    const matchesCategory = auditLogCategory === "all" || category === auditLogCategory;
+    const searchable = [log.user_fullname, log.created_by, log.username, log.role, log.action, getAuditLogActionLabel(log.action), log.detail]
+      .filter(Boolean)
+      .join(" ")
+      .toLocaleLowerCase("th-TH");
+    return matchesCategory && (!searchTerm || searchable.includes(searchTerm));
+  });
   return `
-    <section class="panel">
+    <section class="panel audit-log-header">
       <div class="panel-head">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>${escapeHtml(moduleItem.description)}</p>
+          <p>ตรวจสอบประวัติการทำรายการสำคัญในระบบ เรียงจากรายการล่าสุด</p>
         </div>
-        <span class="badge badge-success">${logs.length.toLocaleString("th-TH")} รายการ</span>
+        <span class="badge audit-level-badge">เฉพาะ C6-C7</span>
+      </div>
+      <div class="audit-summary-grid">
+        <div class="audit-summary-item"><span>รายการทั้งหมด</span><strong>${logs.length.toLocaleString("th-TH")}</strong><small>รายการที่บันทึกไว้</small></div>
+        <div class="audit-summary-item"><span>กิจกรรมวันนี้</span><strong>${todayCount.toLocaleString("th-TH")}</strong><small>ตามเวลาของเครื่องนี้</small></div>
+        <div class="audit-summary-item"><span>ผู้ใช้งานที่พบ</span><strong>${uniqueUsers.toLocaleString("th-TH")}</strong><small>บัญชีในประวัติทั้งหมด</small></div>
       </div>
     </section>
-    <section class="table-card">
-      <div class="table-scroll">
-        <table>
+    <section class="panel audit-filter-panel">
+      <form class="audit-filter-form" id="auditLogFilterForm">
+        <label class="field audit-search-field">
+          <span>ค้นหาประวัติ</span>
+          <input name="auditSearch" type="search" value="${escapeHtml(auditLogSearch)}" placeholder="ค้นหาชื่อ ผู้ใช้ เหตุการณ์ หรือรายละเอียด" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>ประเภทกิจกรรม</span>
+          <select name="auditCategory">
+            <option value="all" ${auditLogCategory === "all" ? "selected" : ""}>ทุกประเภท</option>
+            <option value="create" ${auditLogCategory === "create" ? "selected" : ""}>เพิ่มข้อมูล</option>
+            <option value="update" ${auditLogCategory === "update" ? "selected" : ""}>แก้ไขข้อมูล</option>
+            <option value="delete" ${auditLogCategory === "delete" ? "selected" : ""}>ลบข้อมูล</option>
+            <option value="access" ${auditLogCategory === "access" ? "selected" : ""}>การเข้าใช้งาน</option>
+            <option value="export" ${auditLogCategory === "export" ? "selected" : ""}>นำเข้า / ส่งออก</option>
+            <option value="system" ${auditLogCategory === "system" ? "selected" : ""}>ระบบ</option>
+          </select>
+        </label>
+        <button class="btn btn-primary" type="submit">ค้นหา</button>
+        <button class="btn btn-outline" id="auditLogClearFilter" type="button">ล้างตัวกรอง</button>
+      </form>
+      <div class="audit-filter-result">แสดง <strong>${filteredLogs.length.toLocaleString("th-TH")}</strong> จาก ${logs.length.toLocaleString("th-TH")} รายการ</div>
+    </section>
+    <section class="table-card audit-log-card">
+      <div class="table-scroll audit-table-scroll">
+        <table class="audit-log-table">
           <thead>
             <tr>
-              <th>Time</th>
-              <th>User</th>
-              <th>Role</th>
-              <th>Action</th>
-              <th>Detail</th>
+              <th>วันและเวลา</th>
+              <th>ผู้ดำเนินการ</th>
+              <th>ประเภท</th>
+              <th>เหตุการณ์</th>
+              <th>รายละเอียด</th>
             </tr>
           </thead>
           <tbody>
             ${
-              logs.length
-                ? logs
+              filteredLogs.length
+                ? filteredLogs
                     .map(
-                      (log) => `
+                      (log) => {
+                        const category = getAuditLogCategory(log.action);
+                        const dateTime = formatAuditLogDateTime(log.created_at);
+                        const fullname = log.user_fullname || log.created_by || log.username || "ไม่ระบุผู้ใช้";
+                        const initial = String(fullname).trim().charAt(0).toLocaleUpperCase("th-TH") || "-";
+                        return `
                         <tr>
-                          <td>${formatDate(log.created_at)}</td>
-                          <td>${escapeHtml(log.user_fullname || log.created_by || log.username || "-")}</td>
-                          <td>${escapeHtml(log.role || "-")}</td>
-                          <td><strong>${escapeHtml(log.action || "-")}</strong></td>
-                          <td>${escapeHtml(log.detail || "-")}</td>
+                          <td class="audit-date-cell" data-label="วันและเวลา"><strong>${escapeHtml(dateTime.date)}</strong><span>${escapeHtml(dateTime.time)} น.</span></td>
+                          <td data-label="ผู้ดำเนินการ"><div class="audit-user"><span class="audit-user-initial">${escapeHtml(initial)}</span><div><strong>${escapeHtml(fullname)}</strong><span>${escapeHtml(log.username || log.role || "ไม่ระบุตำแหน่ง")}</span></div></div></td>
+                          <td data-label="ประเภท"><span class="audit-category audit-category-${category}">${escapeHtml(getAuditLogCategoryLabel(category))}</span></td>
+                          <td class="audit-action-cell" data-label="เหตุการณ์"><strong>${escapeHtml(getAuditLogActionLabel(log.action))}</strong><span>${escapeHtml(log.action || "-")}</span></td>
+                          <td class="audit-detail-cell" data-label="รายละเอียด">${escapeHtml(log.detail || "ไม่มีรายละเอียดเพิ่มเติม")}</td>
                         </tr>
-                      `
+                      `;
+                      }
                     )
                     .join("")
-                : `<tr><td colspan="5" class="empty-cell">ยังไม่มีประวัติการใช้งาน</td></tr>`
+                : `<tr><td colspan="5" class="empty-cell audit-empty-cell"><strong>ไม่พบประวัติที่ตรงกับตัวกรอง</strong><span>ลองเปลี่ยนคำค้นหาหรือเลือกประเภทกิจกรรมอื่น</span></td></tr>`
             }
           </tbody>
         </table>
@@ -5531,6 +5631,27 @@ function bindAuditLogPasswordEvents() {
 
     auditLogUnlocked = false;
     auditLogMessage = "รหัสไม่ถูกต้อง";
+    render();
+  });
+
+  document.querySelector("#auditLogFilterForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    auditLogSearch = String(form.get("auditSearch") || "");
+    auditLogCategory = String(form.get("auditCategory") || "all");
+    render();
+  });
+
+  document.querySelector("#auditLogFilterForm select[name='auditCategory']")?.addEventListener("change", (event) => {
+    auditLogCategory = event.currentTarget.value || "all";
+    const searchInput = document.querySelector("#auditLogFilterForm input[name='auditSearch']");
+    auditLogSearch = searchInput?.value || "";
+    render();
+  });
+
+  document.querySelector("#auditLogClearFilter")?.addEventListener("click", () => {
+    auditLogSearch = "";
+    auditLogCategory = "all";
     render();
   });
 }
