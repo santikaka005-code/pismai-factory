@@ -130,7 +130,7 @@ def verify_session_token(token: str) -> dict | None:
         return None
 
 
-def accounting_actor(handler: BaseHTTPRequestHandler, minimum_level: int = 1) -> dict | None:
+def accounting_actor(handler: BaseHTTPRequestHandler, minimum_level: int = 4) -> dict | None:
     actor = verify_session_token(handler.headers.get("X-Session-Token", ""))
     level = int("".join(filter(str.isdigit, str(actor.get("level", "C1")))) or "1") if actor else 0
     return actor if actor and level >= minimum_level else None

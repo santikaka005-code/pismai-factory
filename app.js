@@ -383,9 +383,9 @@ modules.forEach((moduleItem) => {
 });
 
 const levelRouteAccess = {
-  C1: ["dashboard", "production", "accounting-control"],
-  C2: ["dashboard", "production", "summary-person", "accounting-control"],
-  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report", "accounting-control"],
+  C1: ["dashboard", "production"],
+  C2: ["dashboard", "production", "summary-person"],
+  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report"],
   C4: [
     "dashboard",
     "production",

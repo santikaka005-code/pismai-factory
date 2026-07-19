@@ -4,7 +4,7 @@
   const DATA_KEY = "pismai_accounting_control_v1";
   const ACCESS_KEY = "pismai_accounting_access_v1";
   const PASSWORD_KEY = "pismai_accounting_password_hash_v1";
-  const DEFAULT_PASSWORD_HASH = "0eaa69a16d7c358a329a7111a809bd2f9a7ff489596bdda17538705e9e03e05d";
+  const DEFAULT_PASSWORD_HASH = "7ecd3c46f5a48d1ad55ae7fad8a1dabb25270d7b692929a63d243a91dad1466f";
   const ACCESS_MINUTES = 30;
   const THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
   const views = [
@@ -55,6 +55,7 @@
   function currentPeriod() { return new Date().toISOString().slice(0, 7); }
   function thaiPeriod(period) { const [year, month] = String(period).split("-").map(Number); return `${THAI_MONTHS[(month || 1) - 1]} ${(year || 2026) + 543}`; }
   function levelNumber(user) { return Number(String(user?.level || "C1").replace(/\D/g, "")) || 1; }
+  function isC4(user) { return levelNumber(user) === 4; }
   function isC5(user) { return levelNumber(user) >= 5 || user?.role === "developer" || user?.is_system; }
   function uid(prefix) { return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
   function addMonthsClamped(date, amount) {
@@ -143,6 +144,7 @@
   }
   function accessGranted(user) {
     if (isC5(user)) return true;
+    if (!isC4(user)) return false;
     try {
       const access = JSON.parse(sessionStorage.getItem(ACCESS_KEY) || "{}");
       return access.username === user.username && Date.now() < num(access.expiresAt);
@@ -154,7 +156,7 @@
     root.querySelector("#acrAccessForm")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const password = new FormData(event.currentTarget).get("password") || "";
-      const expected = localStorage.getItem(PASSWORD_KEY) || DEFAULT_PASSWORD_HASH;
+      const expected = DEFAULT_PASSWORD_HASH;
       if (await sha256(password) !== expected) { notice = "รหัสผ่านไม่ถูกต้อง"; noticeType = "error"; renderGate(root); return; }
       sessionStorage.setItem(ACCESS_KEY, JSON.stringify({ username: currentUser.username, expiresAt: Date.now() + ACCESS_MINUTES * 60000 }));
       callbacks.onAudit?.("ACCOUNTING_ACCESS", "เข้าพื้นที่นักบัญชีด้วยรหัสผ่าน");
@@ -167,6 +169,11 @@
     callbacks = options || {};
     state = load();
     window.AccountingLedger?.init(user, () => renderRoom(root));
+    if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) {
+      root.innerHTML = `<main class="acr-gate"><button class="acr-gate-back" data-ac-exit>Back</button><section class="acr-gate-card"><div class="acr-shield">PF</div><p class="acr-kicker">ACCESS DENIED</p><h1>PF Accounting is available from C4 and above.</h1><p>Please contact an administrator if this account needs accounting access.</p></section></main>`;
+      root.querySelector("[data-ac-exit]")?.addEventListener("click", callbacks.onExit);
+      return;
+    }
     if (!accessGranted(user)) renderGate(root); else renderRoom(root);
   }
   function renderRoom(root) {
