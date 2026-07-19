@@ -448,107 +448,9 @@ const builtInAccountLevels = {
   Gxy: "C6"
 };
 
-const defaultEmployees = [
-  {
-    id: 1,
-    emp_code: "10001",
-    fullname: "Somchai Prasert",
-    department: "Cutting",
-    pay_group: "เหมาโรงงาน",
-    shift: "Day",
-    status: "Active",
-    created_at: "2026-07-03T08:00:00.000Z",
-    updated_at: "2026-07-03T08:00:00.000Z"
-  },
-  {
-    id: 2,
-    emp_code: "10002",
-    fullname: "Suda Kittipong",
-    department: "Sewing",
-    pay_group: "เหมาโรงงาน",
-    shift: "Day",
-    status: "Active",
-    created_at: "2026-07-03T08:05:00.000Z",
-    updated_at: "2026-07-03T08:05:00.000Z"
-  },
-  {
-    id: 3,
-    emp_code: "10003",
-    fullname: "Anan Chaiyo",
-    department: "Packing",
-    pay_group: "เหมา(นนท์)",
-    shift: "Night",
-    status: "Inactive",
-    created_at: "2026-07-03T08:10:00.000Z",
-    updated_at: "2026-07-03T08:10:00.000Z"
-  },
-  {
-    id: 4,
-    emp_code: "10021",
-    fullname: "Somchai",
-    department: "Production",
-    pay_group: "เหมา(นนท์)",
-    shift: "Morning",
-    status: "Active",
-    created_at: "2026-07-03T08:15:00.000Z",
-    updated_at: "2026-07-03T08:15:00.000Z"
-  },
-  {
-    id: 5,
-    emp_code: "10025",
-    fullname: "Somsak",
-    department: "Production",
-    pay_group: "เหมา(นนท์)",
-    shift: "Morning",
-    status: "Active",
-    created_at: "2026-07-03T08:16:00.000Z",
-    updated_at: "2026-07-03T08:16:00.000Z"
-  },
-  {
-    id: 6,
-    emp_code: "10031",
-    fullname: "Wichai",
-    department: "Production",
-    pay_group: "เหมาปุ้ย",
-    shift: "Morning",
-    status: "Active",
-    created_at: "2026-07-03T08:17:00.000Z",
-    updated_at: "2026-07-03T08:17:00.000Z"
-  },
-  {
-    id: 7,
-    emp_code: "10044",
-    fullname: "Niran",
-    department: "Production",
-    pay_group: "เหมาปุ้ย",
-    shift: "Morning",
-    status: "Active",
-    created_at: "2026-07-03T08:18:00.000Z",
-    updated_at: "2026-07-03T08:18:00.000Z"
-  },
-  {
-    id: 8,
-    emp_code: "10052",
-    fullname: "Prasert",
-    department: "Production",
-    pay_group: "เหมาปุ้ย",
-    shift: "Morning",
-    status: "Active",
-    created_at: "2026-07-03T08:19:00.000Z",
-    updated_at: "2026-07-03T08:19:00.000Z"
-  },
-  {
-    id: 9,
-    emp_code: "10067",
-    fullname: "Manop",
-    department: "Production",
-    pay_group: "เหมาปุ้ย",
-    shift: "Morning",
-    status: "Active",
-    created_at: "2026-07-03T08:20:00.000Z",
-    updated_at: "2026-07-03T08:20:00.000Z"
-  }
-];
+// Employee data is managed only in the central database. Do not seed browser
+// storage with sample workers, because they can be mistaken for real staff.
+const defaultEmployees = [];
 
 const primaryPayGroups = ["เหมาโรงงาน", "เหมา(นนท์)", "เหมาปุ้ย"];
 const PRODUCTION_WITHHOLDING_TAX_RATE = 0.03;
@@ -589,59 +491,8 @@ function renderPayGroupBadge(value) {
   return `<span class="pay-group-pill ${getPayGroupToneClass(payGroup)}">${escapeHtml(payGroup)}</span>`;
 }
 
-const defaultWageRates = [
-  {
-    id: 1,
-    item_type: "water",
-    rate: 2,
-    effective_date: "2026-07-01",
-    created_by: "System Administrator",
-    created_at: "2026-07-01T08:00:00.000Z"
-  },
-  {
-    id: 2,
-    item_type: "flower",
-    rate: 3,
-    effective_date: "2026-07-01",
-    created_by: "System Administrator",
-    created_at: "2026-07-01T08:05:00.000Z"
-  },
-  {
-    id: 3,
-    item_type: "water",
-    rate: 2.25,
-    effective_date: "2026-07-03",
-    created_by: "System Administrator",
-    created_at: "2026-07-03T08:00:00.000Z"
-  }
-];
-
-const productionRows = [
-  {
-    date: "2026-07-03",
-    line: "Line A",
-    employee: "10001",
-    quantity: 1280,
-    wage: 2560,
-    status: "Approved"
-  },
-  {
-    date: "2026-07-03",
-    line: "Line B",
-    employee: "10002",
-    quantity: 940,
-    wage: 1880,
-    status: "Pending"
-  },
-  {
-    date: "2026-07-02",
-    line: "Line C",
-    employee: "10003",
-    quantity: 760,
-    wage: 1520,
-    status: "Review"
-  }
-];
+const defaultWageRates = [];
+const productionRows = [];
 
 const app = document.querySelector("#app");
 let employeeSearch = "";
@@ -12247,7 +12098,7 @@ function renderTimeGroupReportContent(records, groupRows, employeeRows, totals) 
       <div class="table-scroll">
         <table>
           <thead><tr><th>วันที่</th><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>เข้า</th><th>ออก</th><th>สุทธิ</th><th>OT/ชม.</th><th>รวมเงิน</th></tr></thead>
-          <tbody>${records.length ? records.slice(0, 200).map(renderTimeGroupReportDetailRow).join("") : `<tr><td colspan="9" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+          <tbody>${records.length ? records.map(renderTimeGroupReportDetailRow).join("") : `<tr><td colspan="9" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
         </table>
       </div>
     </section>

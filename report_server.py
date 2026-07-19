@@ -3528,7 +3528,7 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
                 money(row.get("bonus_amount", 0)),
                 money(row.get("deduction_amount", 0)),
                 money(row.get("net_amount", row.get("amount", 0))),
-            ] for row in employee_rows[:100]],
+            ] for row in employee_rows],
         )
 
     if options["details"]:
@@ -3545,7 +3545,7 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
                 minutes_text(record.get("net_minutes", 0)),
                 report_number(record.get("ot_hourly_rate", 0), 0),
                 money(record.get("total_amount", 0)),
-            ] for record in records[:100]],
+            ] for record in records],
         )
 
     if len(story) <= 4:
@@ -3828,6 +3828,25 @@ class ReportHandler(BaseHTTPRequestHandler):
         if parsed.path == "/reports/sync":
             save_data(payload)
             self.send_json({"status": "ok"})
+            return
+
+        if parsed.path == "/api/cleanup-test-data":
+            # These codes belong solely to the original demo dataset. They
+            # were never created as central employee records and must not be
+            # mixed into payroll or production history.
+            demo_codes = "10001,10002,10003,10021,10025,10031,10044,10052,10067"
+            results = {}
+            for table in ("production_records", "time_records"):
+                status, body = supabase_request(
+                    "DELETE",
+                    f"{table}?emp_code=in.({demo_codes})",
+                    prefer="return=representation",
+                )
+                if status >= 400:
+                    self.send_json({"error": body, "table": table}, status)
+                    return
+                results[table] = len(body) if isinstance(body, list) else 0
+            self.send_json({"deleted": results})
             return
 
         if parsed.path == "/api/state":
