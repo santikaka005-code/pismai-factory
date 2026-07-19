@@ -32,6 +32,13 @@
   let noticeType = "success";
   let cloudTimer;
   let cloudReady = false;
+  let lifecycleId = 0;
+
+  function safeRefresh() {
+    if (!String(location.hash).startsWith("#/accounting-control")) return;
+    if (hostRoot && !hostRoot.isConnected) return;
+    refreshHost();
+  }
 
   function id(prefix) { return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
   function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"})[c]); }
@@ -85,13 +92,13 @@
       const response = await fetch(`${API_PATH}/workspace`, { method:"PUT", headers:{"Content-Type":"application/json","X-Session-Token":token}, body:JSON.stringify({ revision:state.revision, workspace:state }) });
       const result = await response.json().catch(() => ({}));
       if (response.status === 409 && result.data?.workspace) {
-        notice = "ข้อมูลกลางมีเวอร์ชันใหม่กว่า กรุณาโหลดหน้าใหม่ก่อนบันทึกต่อ"; noticeType = "error"; refreshHost(); return;
+        notice = "ข้อมูลกลางมีเวอร์ชันใหม่กว่า กรุณาโหลดหน้าใหม่ก่อนบันทึกต่อ"; noticeType = "error"; safeRefresh(); return;
       }
       if (!response.ok) throw new Error(result.error || `Cloud ${response.status}`);
       state.revision = Number(result.data?.revision || state.revision + 1);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (error) {
-      notice = `บันทึกในเครื่องแล้ว แต่ยังส่งฐานกลางไม่สำเร็จ: ${error.message}`; noticeType = "error"; refreshHost();
+      notice = `บันทึกในเครื่องแล้ว แต่ยังส่งฐานกลางไม่สำเร็จ: ${error.message}`; noticeType = "error"; safeRefresh();
     }
   }
   async function remoteRequest(path, options) {
@@ -100,20 +107,21 @@
     if (!response.ok) throw new Error(typeof result.error === "string" ? result.error : result.error?.message || `Accounting API ${response.status}`);
     return result.data;
   }
-  async function hydrateCloud() {
+  async function hydrateCloud(expectedLifecycle = lifecycleId) {
     const token = authToken();
     if (!token || !location.protocol.startsWith("http")) return;
     try {
       const response = await fetch(`${API_PATH}/bootstrap`, { headers:{"X-Session-Token":token} });
       if (!response.ok) return;
       const result = await response.json();
+      if (expectedLifecycle !== lifecycleId || !String(location.hash).startsWith("#/accounting-control")) return;
       const data=result.data||{}, linesByJournal=new Map();
       (data.journal_lines||[]).forEach(line=>{const rows=linesByJournal.get(line.journal_id)||[];rows.push({accountId:line.account_id,memo:line.description||"",debit:num(line.debit),credit:num(line.credit),partner_id:line.partner_id||"",due_date:line.due_date||"",tax_code:line.tax_code||""});linesByJournal.set(line.journal_id,rows);});
       state.accounts=(data.accounts||[]).map(a=>({id:a.id,code:a.code,name:a.name_th,type:a.account_type,contra:Boolean(a.is_contra),active:Boolean(a.active),system:Boolean(a.system_account)}));
       state.periods=Object.fromEntries((data.periods||[]).map(p=>[p.period_code,{id:p.id,status:p.status,closedBy:p.closed_by||"",closedAt:p.closed_at||""}]));
       state.journals=(data.journals||[]).map(j=>({id:j.id,date:j.entry_date,period:periodOf(j.entry_date),reference:j.journal_no,externalReference:j.reference||"",description:j.description,documentNo:"",lines:linesByJournal.get(j.id)||[],status:j.status,createdBy:j.created_by,createdAt:j.created_at,postedBy:j.posted_by||"",postedAt:j.posted_at||"",rejectionReason:j.rejection_reason||""}));
       state.company=data.company||state.company; state.updatedAt=new Date().toISOString(); state.updatedBy="cloud"; cloudReady=true;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); refreshHost();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); safeRefresh();
     } catch { /* offline mode keeps the last verified local copy */ }
   }
   function accountById(accountId) { return state.accounts.find(a => a.id === accountId); }
@@ -168,7 +176,7 @@
     const content = view==="chart"?chartView():view==="journal"?journalView():view==="trial"?trialView():view==="statements"?statementsView():closingView();
     return `${notice?`<div class="acr-notice ${noticeType}">${esc(notice)}</div>`:""}${content}`;
   }
-  function rerender() { noticeType=noticeType||"success"; refreshHost(); }
+  function rerender() { noticeType=noticeType||"success"; safeRefresh(); }
   function bind(root, refresh) {
     hostRoot=root; refreshHost=refresh||function(){};
     root.querySelector("#aclAccountForm")?.addEventListener("submit",async e=>{
@@ -213,6 +221,7 @@
       }catch(error){notice=error.message;noticeType="error";rerender();}
     }));
   }
-  function init(user, refresh) { currentUser=user; refreshHost=refresh||function(){}; state=load(); hydrateCloud(); }
-  window.AccountingLedger={views,init,render,bind,getState:()=>state,trialBalance,balances};
+  function init(user, refresh) { lifecycleId += 1; currentUser=user; refreshHost=refresh||function(){}; state=load(); hydrateCloud(lifecycleId); }
+  function deactivate() { lifecycleId += 1; hostRoot=null; refreshHost=function(){}; clearTimeout(cloudTimer); }
+  window.AccountingLedger={views,init,deactivate,render,bind,getState:()=>state,trialBalance,balances};
 })();

@@ -46,6 +46,11 @@
   let notice = "";
   let noticeType = "success";
 
+  function exitControl() {
+    window.AccountingLedger?.deactivate?.();
+    callbacks.onExit?.();
+  }
+
   function esc(value) {
     return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
   }
@@ -152,7 +157,7 @@
   }
   function renderGate(root) {
     root.innerHTML = `<main class="acr-gate"><button class="acr-gate-back" data-ac-exit>← กลับระบบหลัก</button><section class="acr-gate-card"><div class="acr-shield">⌾</div><p class="acr-kicker">PROTECTED ACCOUNTING AREA</p><h1>ยืนยันตัวตนเพื่อเข้าพื้นที่นักบัญชี</h1><p>พื้นที่นี้มีข้อมูลประมาณการทางบัญชี ภาษี และเอกสารภายใน ระบบจะบันทึกประวัติการเข้าใช้งาน</p>${notice ? `<div class="acr-notice ${noticeType}">${esc(notice)}</div>` : ""}<form id="acrAccessForm"><label>รหัสผ่านพื้นที่นักบัญชี<input type="password" name="password" autocomplete="current-password" required autofocus /></label><button type="submit">เข้าสู่ห้องควบคุมบัญชี</button></form><small>ระดับ C5 ขึ้นไปเข้าใช้งานได้โดยไม่ต้องกรอกรหัสผ่าน • สิทธิ์หมดอายุหลังไม่ใช้งาน ${ACCESS_MINUTES} นาที</small></section></main>`;
-    root.querySelector("[data-ac-exit]")?.addEventListener("click", callbacks.onExit);
+    root.querySelector("[data-ac-exit]")?.addEventListener("click", exitControl);
     root.querySelector("#acrAccessForm")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const password = new FormData(event.currentTarget).get("password") || "";
@@ -168,10 +173,12 @@
     currentUser = user;
     callbacks = options || {};
     state = load();
-    window.AccountingLedger?.init(user, () => renderRoom(root));
+    window.AccountingLedger?.init(user, () => {
+      if (String(location.hash).startsWith("#/accounting-control") && root.isConnected) renderRoom(root);
+    });
     if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) {
       root.innerHTML = `<main class="acr-gate"><button class="acr-gate-back" data-ac-exit>Back</button><section class="acr-gate-card"><div class="acr-shield">PF</div><p class="acr-kicker">ACCESS DENIED</p><h1>PF Accounting is available from C4 and above.</h1><p>Please contact an administrator if this account needs accounting access.</p></section></main>`;
-      root.querySelector("[data-ac-exit]")?.addEventListener("click", callbacks.onExit);
+      root.querySelector("[data-ac-exit]")?.addEventListener("click", exitControl);
       return;
     }
     if (!accessGranted(user)) renderGate(root); else renderRoom(root);
@@ -259,7 +266,7 @@
   function bindRoom(root) {
     window.AccountingLedger?.bind(root, () => renderRoom(root));
     root.querySelectorAll("[data-ac-view]").forEach((button) => button.addEventListener("click", () => { activeView = button.dataset.acView; notice = ""; renderRoom(root); }));
-    root.querySelector("[data-ac-exit]")?.addEventListener("click", callbacks.onExit);
+    root.querySelector("[data-ac-exit]")?.addEventListener("click", exitControl);
     root.querySelector("#acrPeriod")?.addEventListener("change", (event) => { state.selectedPeriod = event.target.value || currentPeriod(); save("เปลี่ยนรอบข้อมูล"); renderRoom(root); });
     root.querySelectorAll("[data-scenario]").forEach((button) => button.addEventListener("click", () => { state.scenario = button.dataset.scenario; save(`เลือกสถานการณ์ ${state.scenario}`); renderRoom(root); }));
     root.querySelector("#acrMonthForm")?.addEventListener("submit", (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const row = {}; form.forEach((value,key) => row[key] = num(value)); state.months[state.selectedPeriod] = row; save(`บันทึกตัวเลขรอบ ${state.selectedPeriod}`); notice="บันทึกข้อมูลและคำนวณใหม่แล้ว"; noticeType="success"; activeView="overview"; renderRoom(root); });
