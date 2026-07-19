@@ -406,24 +406,7 @@ const levelRouteAccess = {
     "audit-log",
     "accounting-control"
   ],
-  C5: [
-    "dashboard",
-    "production",
-    "summary-all",
-    "summary-main",
-    "summary-person",
-    "compare-data",
-    "reports",
-    "time-report",
-    "settings",
-    "employees",
-    "production-employees",
-    "time-employees",
-    "pile-management",
-    "wage-rates",
-    "audit-log",
-    "accounting-control"
-  ],
+  C5: modules.map((item) => item.id).filter((id) => id !== "audit-log"),
   C6: modules.map((item) => item.id),
   C7: modules.map((item) => item.id)
 };
@@ -987,6 +970,7 @@ function isTopLevelUser(user) {
   if (!user) return false;
   const level = getUserLevel(user);
   return (
+    level === "C5" ||
     level === "C6" ||
     level === "C7" ||
     user.role === "developer" ||
@@ -1004,6 +988,9 @@ function isC7Account(accountUser) {
 
 function getAllowedRoutesForUser(user) {
   if (!user) return [];
+  if (getUserLevel(user) === "C5") {
+    return levelRouteAccess.C5;
+  }
   if (isTopLevelUser(user)) {
     return modules.map((item) => item.id);
   }
@@ -1028,6 +1015,7 @@ function visibleNavModulesForUser(user) {
 function canOpen(user, moduleId) {
   const moduleItem = modules.find((item) => item.id === moduleId);
   if (!moduleItem || !user) return false;
+  if (getUserLevel(user) === "C5" && moduleId === "audit-log") return false;
   if (isTopLevelUser(user)) return true;
   return getAllowedRoutesForUser(user).includes(moduleId);
 }
@@ -1931,7 +1919,7 @@ function validateAccountPayload(payload, existingId = null) {
   };
 }
 
-function apiCreateAccountUser(payload, actor) {
+async function apiCreateAccountUser(payload, actor) {
   const accountUsers = getAccountUsers();
   const cleanPayload = validateAccountPayload(payload);
   const now = new Date().toISOString();
@@ -1945,16 +1933,20 @@ function apiCreateAccountUser(payload, actor) {
     updated_at: now
   });
 
-  saveAccountUsers([...accountUsers, accountUser]);
-  cloudApiRequest("/api/accounts", {
+  const response = await cloudApiRequest("/api/accounts", {
     method: "POST",
     body: JSON.stringify({ ...accountUser, created_by: actor?.username || "" })
-  }).catch((error) => console.warn("Cloud account create failed.", error));
+  });
+  const cloudAccount = Array.isArray(response.data) && response.data[0]
+    ? normalizeAccountUser({ ...accountUser, ...response.data[0], phone: accountUser.phone })
+    : accountUser;
+
+  saveAccountUsers([...accountUsers, cloudAccount]);
   addAuditLog(actor, "REGISTER_ACCOUNT", `Registered ${accountUser.username} (${accountUser.role_label}, ${accountUser.level})`);
-  return accountUser;
+  return cloudAccount;
 }
 
-function apiUpdateAccountUser(id, payload, actor) {
+async function apiUpdateAccountUser(id, payload, actor) {
   const accountUsers = getAccountUsers();
   const existing = accountUsers.find((accountUser) => accountUser.id === id);
   if (!existing) {
@@ -1981,9 +1973,17 @@ function apiUpdateAccountUser(id, payload, actor) {
     throw new Error("ต้องเหลือบัญชีผู้จัดการที่ใช้งานได้อย่างน้อย 1 บัญชี");
   }
 
-  saveAccountUsers(nextUsers);
-  addAuditLog(actor, "UPDATE_ACCOUNT", `Updated ${updatedUser.username} (${updatedUser.role_label}, ${updatedUser.level})`);
-  return updatedUser;
+  const response = await cloudApiRequest("/api/accounts", {
+    method: "PUT",
+    body: JSON.stringify({ id, ...cleanPayload, updated_by: actor?.username || "" })
+  });
+  const cloudUser = Array.isArray(response.data) && response.data[0]
+    ? normalizeAccountUser({ ...updatedUser, ...response.data[0], phone: updatedUser.phone })
+    : updatedUser;
+
+  saveAccountUsers(accountUsers.map((accountUser) => (accountUser.id === id ? cloudUser : accountUser)));
+  addAuditLog(actor, "UPDATE_ACCOUNT", `Updated ${cloudUser.username} (${cloudUser.role_label}, ${cloudUser.level})`);
+  return cloudUser;
 }
 
 async function apiDeleteAccountUser(id, actor) {
@@ -5367,7 +5367,7 @@ function bindAccountManagementEvents(user) {
     render();
   });
 
-  document.querySelector("#accountForm")?.addEventListener("submit", (event) => {
+  document.querySelector("#accountForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const id = Number(form.get("id"));
@@ -5384,10 +5384,10 @@ function bindAccountManagementEvents(user) {
 
     try {
       if (id) {
-        apiUpdateAccountUser(id, payload, user);
+        await apiUpdateAccountUser(id, payload, user);
         setAccountMessage("Account updated.");
       } else {
-        apiCreateAccountUser(payload, user);
+        await apiCreateAccountUser(payload, user);
         setAccountMessage("Account registered.");
       }
       editingAccountUserId = null;

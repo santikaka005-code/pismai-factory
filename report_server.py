@@ -4358,6 +4358,46 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path == "/api/accounts":
+            account_id = payload.get("id")
+            if account_id in [None, ""]:
+                self.send_json({"error": "id is required."}, 400)
+                return
+            existing_status, existing_rows = supabase_request(
+                "GET",
+                f"account_users?id=eq.{quote(str(account_id))}&select=id,username,role,user_level&limit=1",
+            )
+            if existing_status >= 400:
+                self.send_json({"error": existing_rows}, existing_status)
+                return
+            if not isinstance(existing_rows, list) or not existing_rows:
+                self.send_json({"error": "Account not found."}, 404)
+                return
+            existing = existing_rows[0]
+            existing_username = str(existing.get("username", "")).lower()
+            existing_level = str(existing.get("user_level", "")).upper()
+            existing_role = str(existing.get("role", ""))
+            if existing_username in SYSTEM_ACCOUNT_USERNAMES or existing_level == "C7" or existing_role == "developer":
+                self.send_json({"error": "C7/developer account cannot be edited."}, 403)
+                return
+            account = account_from_payload(payload, include_password=bool(str(payload.get("password", ""))))
+            if account.get("user_level") == "C7" or account.get("role") == "developer":
+                self.send_json({"error": "C7/developer accounts can only be managed by the system."}, 403)
+                return
+            if not account["username"] or not account["fullname"]:
+                self.send_json({"error": "Username and fullname are required."}, 400)
+                return
+            account["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            status, body = supabase_request(
+                "PATCH",
+                f"account_users?id=eq.{quote(str(account_id))}",
+                account,
+                prefer="return=representation",
+            )
+            data = [account_to_client(item) for item in body] if status < 400 and isinstance(body, list) else None
+            self.send_json({"data": data, "error": body if status >= 400 else None}, status)
+            return
+
         if parsed.path == "/api/time-employees":
             employee_id = payload.get("id")
             if employee_id in [None, ""]:
