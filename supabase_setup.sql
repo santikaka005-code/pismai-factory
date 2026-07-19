@@ -5,6 +5,7 @@ create table if not exists public.account_users (
   username citext not null unique,
   password_hash text not null,
   fullname text not null,
+  phone text not null default '',
   role text not null default 'operator',
   user_level text not null default 'C1',
   status text not null default 'Active',
@@ -13,6 +14,9 @@ create table if not exists public.account_users (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.account_users
+  add column if not exists phone text not null default '';
 
 create table if not exists public.employees (
   id bigserial primary key,

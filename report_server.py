@@ -250,6 +250,7 @@ def account_from_payload(payload: dict, include_password: bool = True) -> dict:
     account = {
         "username": str(payload.get("username", "")).strip(),
         "fullname": str(payload.get("fullname", "")).strip(),
+        "phone": str(payload.get("phone", "")).strip(),
         "role": str(payload.get("role_key") or payload.get("role") or "general_staff").strip(),
         "user_level": str(payload.get("level") or payload.get("user_level") or "C1").strip().upper(),
         "status": status,
@@ -270,7 +271,7 @@ def account_to_client(account: dict) -> dict:
         "id": account.get("id"),
         "username": username,
         "fullname": account.get("fullname", ""),
-        "phone": "0943913997" if username.lower() == "santi" else "",
+        "phone": account.get("phone") or ("0943913997" if username.lower() == "santi" else ""),
         "role_key": role_key,
         "level": account.get("user_level") or "C1",
         "isActive": account.get("status", "Active") == "Active",
@@ -574,6 +575,45 @@ def supabase_request(
         return error.code, body
     except Exception as error:
         return 500, {"error": str(error)}
+
+
+def account_phone_column_missing(body: dict | list | str | None) -> bool:
+    text = json.dumps(body, ensure_ascii=False).lower() if isinstance(body, (dict, list)) else str(body or "").lower()
+    return "phone" in text and ("column" in text or "schema cache" in text or "pgrst" in text)
+
+
+def supabase_account_write(
+    method: str,
+    path: str,
+    account: dict,
+    prefer: str = "return=representation",
+) -> tuple[int, dict | list | str | None]:
+    status, body = supabase_request(method, path, account, prefer=prefer)
+    if status >= 400 and "phone" in account and account_phone_column_missing(body):
+        fallback_account = {key: value for key, value in account.items() if key != "phone"}
+        status, body = supabase_request(method, path, fallback_account, prefer=prefer)
+        if status < 400:
+            if isinstance(body, list):
+                body = [{**row, "phone": account.get("phone", "")} if isinstance(row, dict) else row for row in body]
+            elif isinstance(body, dict):
+                body = {**body, "phone": account.get("phone", "")}
+    return status, body
+
+
+def supabase_account_bulk_write(
+    method: str,
+    path: str,
+    accounts: list[dict],
+    prefer: str,
+) -> tuple[int, dict | list | str | None]:
+    status, body = supabase_request(method, path, accounts, prefer=prefer)
+    if status >= 400 and accounts and account_phone_column_missing(body):
+        fallback_accounts = [
+            {key: value for key, value in account.items() if key != "phone"}
+            for account in accounts
+        ]
+        status, body = supabase_request(method, path, fallback_accounts, prefer=prefer)
+    return status, body
 
 
 def backup_authorized(handler: BaseHTTPRequestHandler) -> bool:
@@ -3929,7 +3969,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             if not cloud_accounts:
                 self.send_json({"data": []})
                 return
-            status, body = supabase_request(
+            status, body = supabase_account_bulk_write(
                 "POST",
                 "account_users?on_conflict=username",
                 cloud_accounts,
@@ -3946,7 +3986,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             if account.get("user_level") == "C7" or account.get("role") == "developer":
                 self.send_json({"error": "C7/developer accounts can only be managed by the system."}, 403)
                 return
-            status, body = supabase_request(
+            status, body = supabase_account_write(
                 "POST",
                 "account_users",
                 account,
@@ -4388,7 +4428,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Username and fullname are required."}, 400)
                 return
             account["updated_at"] = datetime.utcnow().isoformat() + "Z"
-            status, body = supabase_request(
+            status, body = supabase_account_write(
                 "PATCH",
                 f"account_users?id=eq.{quote(str(account_id))}",
                 account,
