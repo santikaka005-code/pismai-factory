@@ -5653,32 +5653,56 @@ function renderAuditLog(moduleItem) {
 }
 
 function renderAuditLogPasswordGate(moduleItem) {
+  const currentUser = getSession()?.user;
+  const fullname = currentUser?.fullname || currentUser?.username || "ผู้ดูแลระบบ";
+  const initial = String(fullname).trim().charAt(0).toLocaleUpperCase("th-TH") || "-";
   return `
-    <section class="panel">
-      <div class="panel-head">
-        <div>
+    <section class="audit-gate-shell">
+      <div class="audit-gate-security">
+        <div class="audit-gate-classification"><span></span> SECURITY CHECKPOINT</div>
+        <div class="audit-gate-lock" aria-hidden="true"></div>
+        <div class="audit-gate-security-copy">
+          <p>ข้อมูลควบคุมภายใน</p>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>กรอกรหัสตัวเลข 4 หลักก่อนดูประวัติการใช้งานระบบ</p>
+          <span>พื้นที่ตรวจสอบประวัติการดำเนินงานและการเปลี่ยนแปลงข้อมูลสำคัญของระบบ</span>
         </div>
-        <span class="badge badge-warning">C6/C7 only</span>
+        <div class="audit-gate-clearance">
+          <div><span>ระดับสิทธิ์</span><strong>C6-C7</strong></div>
+          <div><span>การป้องกัน</span><strong>PIN 4 หลัก</strong></div>
+        </div>
       </div>
-      ${auditLogMessage ? `<div class="alert alert-error">${escapeHtml(auditLogMessage)}</div>` : ""}
-      <form class="settings-security-form" id="auditLogPasswordForm">
-        <label class="field">
-          <span>รหัสผ่าน 4 หลัก</span>
-          <input
-            id="auditLogPassword"
-            name="auditLogPassword"
-            type="password"
-            inputmode="numeric"
-            pattern="[0-9]{4}"
-            maxlength="4"
-            autocomplete="off"
-            required
-          />
-        </label>
-        <button class="btn btn-primary form-submit" type="submit">ยืนยัน</button>
-      </form>
+      <div class="audit-gate-auth">
+        <div class="audit-gate-auth-status"><span></span> PROTECTED AREA</div>
+        <h3>ยืนยันก่อนเปิด Audit Log</h3>
+        <p class="audit-gate-intro">กรอกรหัสรักษาความปลอดภัยเพื่อเปิดดูประวัติการใช้งาน</p>
+        ${auditLogMessage ? `<div class="audit-gate-error" role="alert"><strong>ไม่สามารถยืนยันได้</strong><span>${escapeHtml(auditLogMessage)} กรุณาตรวจสอบแล้วลองอีกครั้ง</span></div>` : ""}
+        <form class="audit-gate-form" id="auditLogPasswordForm">
+          <label for="auditLogPassword">รหัสรักษาความปลอดภัย</label>
+          <div class="audit-pin-input-wrap">
+            <span class="audit-pin-icon" aria-hidden="true">PIN</span>
+            <input
+              id="auditLogPassword"
+              name="auditLogPassword"
+              type="password"
+              inputmode="numeric"
+              pattern="[0-9]{4}"
+              maxlength="4"
+              autocomplete="off"
+              aria-describedby="auditPinHelp"
+              placeholder="กรอกรหัส 4 หลัก"
+              autofocus
+              required
+            />
+          </div>
+          <small id="auditPinHelp">รองรับตัวเลขเท่านั้น และจำกัดไม่เกิน 4 หลัก</small>
+          <button class="btn audit-gate-submit" type="submit">ยืนยันและเปิด Audit Log</button>
+        </form>
+        <div class="audit-gate-user">
+          <span class="audit-gate-user-initial">${escapeHtml(initial)}</span>
+          <div><span>กำลังยืนยันสิทธิ์ในชื่อ</span><strong>${escapeHtml(fullname)}</strong></div>
+          <span class="audit-gate-user-level">${escapeHtml(getUserLevel(currentUser))}</span>
+        </div>
+      </div>
     </section>
   `;
 }

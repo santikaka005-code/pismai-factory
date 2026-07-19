@@ -2880,7 +2880,12 @@ tr:last-child td {
 
 .settings-back-bar {
   display: flex;
+  align-items: flex-start;
   justify-content: flex-start;
+}
+
+.settings-back-bar .btn {
+  align-self: flex-start;
 }
 
 .settings-tile {
@@ -2924,6 +2929,316 @@ tr:last-child td {
 
 .settings-backup-form {
   grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+}
+
+.audit-gate-shell {
+  display: grid;
+  min-height: 520px;
+  grid-template-columns: minmax(300px, 0.9fr) minmax(380px, 1.1fr);
+  overflow: hidden;
+  border: 1px solid #b9c7c4;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 44px rgba(16, 42, 37, 0.12);
+}
+
+.main-stack:has(.audit-gate-shell) {
+  align-content: start;
+}
+
+.audit-gate-security {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 38px;
+  color: #ffffff;
+  background:
+    linear-gradient(145deg, rgba(3, 48, 39, 0.97), rgba(10, 30, 39, 0.98)),
+    #0a3028;
+}
+
+.audit-gate-classification,
+.audit-gate-auth-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.audit-gate-classification {
+  color: #e7ca78;
+}
+
+.audit-gate-classification span,
+.audit-gate-auth-status span {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: #d4a83d;
+  box-shadow: 0 0 0 4px rgba(212, 168, 61, 0.16);
+}
+
+.audit-gate-lock {
+  position: relative;
+  width: 78px;
+  height: 66px;
+  margin: 72px 0 30px;
+  border: 2px solid #e1bd5f;
+  border-radius: 8px;
+  background: rgba(212, 168, 61, 0.12);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2);
+}
+
+.audit-gate-lock::before {
+  position: absolute;
+  left: 17px;
+  bottom: 62px;
+  width: 40px;
+  height: 35px;
+  border: 5px solid #e1bd5f;
+  border-bottom: 0;
+  border-radius: 22px 22px 0 0;
+  content: "";
+}
+
+.audit-gate-lock::after {
+  position: absolute;
+  top: 22px;
+  left: 34px;
+  width: 8px;
+  height: 20px;
+  border-radius: 4px;
+  background: #e1bd5f;
+  content: "";
+}
+
+.audit-gate-security-copy {
+  position: relative;
+  z-index: 1;
+}
+
+.audit-gate-security-copy p {
+  margin: 0 0 8px;
+  color: #a9c8c1;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.audit-gate-security-copy h2 {
+  margin: 0 0 14px;
+  color: #ffffff;
+  font-size: 30px;
+}
+
+.audit-gate-security-copy > span {
+  display: block;
+  max-width: 390px;
+  color: #c9d9d5;
+  line-height: 1.7;
+}
+
+.audit-gate-clearance {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 30px;
+}
+
+.audit-gate-clearance > div {
+  border-top: 1px solid rgba(212, 168, 61, 0.35);
+  padding-top: 12px;
+}
+
+.audit-gate-clearance span,
+.audit-gate-clearance strong {
+  display: block;
+}
+
+.audit-gate-clearance span {
+  color: #91aaa5;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.audit-gate-clearance strong {
+  margin-top: 5px;
+  color: #f4dd9d;
+  font-size: 14px;
+}
+
+.audit-gate-auth {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 46px;
+}
+
+.audit-gate-auth-status {
+  color: #16705d;
+}
+
+.audit-gate-auth-status span {
+  background: #199473;
+  box-shadow: 0 0 0 4px rgba(25, 148, 115, 0.12);
+}
+
+.audit-gate-auth h3 {
+  margin: 18px 0 8px;
+  color: #102a25;
+  font-size: 27px;
+}
+
+.audit-gate-intro {
+  margin: 0 0 26px;
+  color: #667085;
+  line-height: 1.65;
+}
+
+.audit-gate-error {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 18px;
+  border: 1px solid #f6b8b3;
+  border-left: 4px solid #b42318;
+  border-radius: 6px;
+  padding: 12px 14px;
+  color: #7a271a;
+  background: #fff3f2;
+}
+
+.audit-gate-error span {
+  font-size: 13px;
+}
+
+.audit-gate-form {
+  display: grid;
+}
+
+.audit-gate-form > label {
+  margin-bottom: 9px;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.audit-pin-input-wrap {
+  position: relative;
+}
+
+.audit-pin-input-wrap input {
+  width: 100%;
+  height: 68px;
+  border: 2px solid #b9c8c5;
+  border-radius: 8px;
+  padding: 0 18px 0 74px;
+  color: #102a25;
+  background: #f8fbfa;
+  font-size: 24px;
+  font-weight: 800;
+  text-align: center;
+  outline: none;
+}
+
+.audit-pin-input-wrap input:focus {
+  border-color: #0f766e;
+  background: #ffffff;
+  box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12);
+}
+
+.audit-pin-input-wrap input::placeholder {
+  color: #98a6a2;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.audit-pin-icon {
+  position: absolute;
+  top: 50%;
+  left: 14px;
+  z-index: 1;
+  display: inline-flex;
+  width: 45px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid #c9d5d2;
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 900;
+  transform: translateY(-50%);
+}
+
+.audit-gate-form > small {
+  margin: 8px 0 18px;
+  color: #7b8986;
+  font-size: 12px;
+}
+
+.audit-gate-submit {
+  width: 100%;
+  min-height: 52px;
+  border-color: #0c665d;
+  color: #ffffff;
+  background: #0f766e;
+  box-shadow: 0 8px 20px rgba(15, 118, 110, 0.18);
+}
+
+.audit-gate-submit:hover {
+  background: #0b5f59;
+}
+
+.audit-gate-user {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  margin-top: 24px;
+  border-top: 1px solid #e2e8e6;
+  padding-top: 18px;
+}
+
+.audit-gate-user-initial {
+  display: inline-flex;
+  width: 38px;
+  height: 38px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #ffffff;
+  background: #214f47;
+  font-weight: 800;
+}
+
+.audit-gate-user div span,
+.audit-gate-user div strong {
+  display: block;
+}
+
+.audit-gate-user div span {
+  color: #7a8985;
+  font-size: 11px;
+}
+
+.audit-gate-user div strong {
+  margin-top: 2px;
+  color: #1d2939;
+  font-size: 14px;
+}
+
+.audit-gate-user-level {
+  border: 1px solid #d2b052;
+  border-radius: 999px;
+  padding: 4px 9px;
+  color: #735b15;
+  background: #fff8df;
+  font-size: 12px;
+  font-weight: 900;
 }
 
 .audit-log-header {
@@ -3727,6 +4042,73 @@ tr:last-child td {
 
   .audit-log-table .audit-empty-cell::before {
     content: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .audit-gate-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-gate-security {
+    min-height: 300px;
+    padding: 30px;
+  }
+
+  .audit-gate-lock {
+    width: 62px;
+    height: 54px;
+    margin: 58px 0 24px;
+  }
+
+  .audit-gate-lock::before {
+    left: 13px;
+    bottom: 50px;
+    width: 32px;
+    height: 29px;
+  }
+
+  .audit-gate-lock::after {
+    top: 17px;
+    left: 26px;
+  }
+
+  .audit-gate-auth {
+    padding: 36px 30px;
+  }
+}
+
+@media (max-width: 560px) {
+  .audit-gate-security,
+  .audit-gate-auth {
+    padding: 26px 20px;
+  }
+
+  .audit-gate-security {
+    min-height: 275px;
+  }
+
+  .audit-gate-security-copy h2 {
+    font-size: 26px;
+  }
+
+  .audit-gate-auth h3 {
+    font-size: 23px;
+  }
+
+  .audit-gate-clearance {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .audit-pin-input-wrap input {
+    height: 62px;
+    padding-left: 64px;
+    font-size: 21px;
+  }
+
+  .audit-pin-icon {
+    left: 10px;
+    width: 40px;
   }
 }
 
