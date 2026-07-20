@@ -1321,7 +1321,8 @@ input:disabled {
   font-weight: 700;
 }
 
-.summary-date-field input {
+.summary-date-field input,
+.summary-date-field select {
   height: 42px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;

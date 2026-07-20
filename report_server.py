@@ -522,6 +522,7 @@ def live_state_row(table: str, payload: dict) -> dict:
     elif table == "production_records":
         water = payload.get("water_weight", payload.get("water", 0)) or 0
         flower = payload.get("flower_weight", payload.get("flower", 0)) or 0
+        pile_number = production_pile_number(payload)
         row = {
             "record_date": payload.get("record_date") or payload.get("date"),
             # Legacy browser ids belong to a different local database. Keep
@@ -533,7 +534,7 @@ def live_state_row(table: str, payload: dict) -> dict:
             "employee_name": payload.get("employee_name") or payload.get("fullname"),
             "pay_group": payload.get("pay_group"),
             "fruit_type": payload.get("fruit_type") or "mangosteen",
-            "pile_no": str(payload.get("pile_no", payload.get("pile", ""))) or None,
+            "pile_no": str(pile_number) if pile_number is not None else None,
             "item_type": payload.get("item_type"),
             "water_weight": water,
             "flower_weight": flower,
@@ -857,9 +858,10 @@ def range_records(
 
 
 def pile_summary_rows(records: list[dict]) -> list[dict]:
-    summaries: dict[str, dict] = {}
+    summaries: dict[object, dict] = {}
     for record in records:
-        pile = str(record.get("pile_no") or record.get("pile") or "-")
+        pile = production_pile_number(record)
+        pile = pile if pile is not None else "-"
         is_durian = (record.get("fruit_type") or "mangosteen") == "durian"
         incoming = 0.0 if is_durian else float(record.get("water_weight", record.get("water", 0)) or 0)
         outgoing = 0.0 if is_durian else float(record.get("flower_weight", record.get("flower", 0)) or 0)
@@ -2001,7 +2003,7 @@ def build_summary_by_pile_excel(data: dict, payload: dict) -> bytes:
     row_index = header_row + 1
     for item in rows:
         values = [
-            f"กอง {item['pile']}",
+            item["pile"],
             item["incoming"],
             item["outgoing"],
             item["balance"],
@@ -2605,6 +2607,45 @@ def safe_float(value: float | int | str | None) -> float:
         return 0.0
 
 
+def production_pile_number(record: dict) -> int | None:
+    value = record.get("pile_no")
+    if value in [None, ""]:
+        value = record.get("pile")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(numeric) if numeric.is_integer() and numeric > 0 else None
+
+
+def selected_production_fruit(payload: dict) -> str:
+    fruit_id = str(payload.get("fruit_type") or "all").strip().lower()
+    return fruit_id if fruit_id in {"all", "mangosteen", "durian", "mango"} else "all"
+
+
+def selected_production_fruit_label(payload: dict) -> str:
+    return {
+        "all": "ทุกผลไม้",
+        "mangosteen": "มังคุด",
+        "durian": "ทุเรียน",
+        "mango": "มะม่วง",
+    }[selected_production_fruit(payload)]
+
+
+def production_report_field_visibility(payload: dict) -> tuple[bool, bool]:
+    fruit_id = selected_production_fruit(payload)
+    return fruit_id != "durian", fruit_id in {"all", "durian"}
+
+
+def production_report_weight_labels(payload: dict) -> tuple[str, str]:
+    fruit_id = selected_production_fruit(payload)
+    if fruit_id == "mango":
+        return "มะม่วงฝา", "มะม่วงหั่นเต๋า"
+    if fruit_id == "all":
+        return "น้ำหนักช่อง 1", "น้ำหนักช่อง 2"
+    return "น้ำหนักน้ำ", "น้ำหนักดอก"
+
+
 def production_grade_weights(record: dict) -> dict[str, float]:
     source = record.get("grade_weights") if isinstance(record.get("grade_weights"), dict) else {}
     return {grade: safe_float(source.get(grade, source.get(grade.lower(), 0))) for grade in DURIAN_GRADES}
@@ -2661,16 +2702,18 @@ def is_early_out_time(value: str | None) -> bool:
 
 def filtered_production_records(payload: dict) -> list[dict]:
     start_date, end_date = normalized_range(payload)
+    fruit_id = selected_production_fruit(payload)
     return sorted(
         [
             record
             for record in payload.get("production_records", [])
             if start_date <= (record.get("record_date") or record.get("date") or "") <= end_date
+            and (fruit_id == "all" or (record.get("fruit_type") or "mangosteen") == fruit_id)
         ],
         key=lambda record: (
             record.get("record_date") or record.get("date") or "",
             record.get("record_time", ""),
-            str(record.get("pile_no") or record.get("pile") or ""),
+            production_pile_number(record) or 0,
             str(record.get("emp_code") or ""),
         ),
     )
@@ -2767,7 +2810,7 @@ def build_production_summary_excel(payload: dict) -> bytes:
     overview["A2"] = "รายงานสรุปผลผลิตและน้ำหนัก"
     overview["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
     overview.merge_cells("A3:G3")
-    overview["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
+    overview["A3"] = f"ผลไม้ {selected_production_fruit_label(payload)} | ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
     overview.merge_cells("A4:G4")
     overview["A4"] = export_meta_text(payload)
     add_excel_logo(overview, "H1")
@@ -2893,7 +2936,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
     )
     story = report_header_story(
         "รายงานสรุปผลผลิตและน้ำหนัก",
-        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}",
+        f"ผลไม้ {selected_production_fruit_label(payload)} | ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}",
         payload,
     )
     overview = Table(
@@ -2955,6 +2998,13 @@ def selected_export_sections(payload: dict) -> dict:
 
 
 def selected_export_fields(payload: dict, section: str, definitions: list[tuple[str, str, object]]) -> list[tuple[str, str, object]]:
+    show_standard_weights, show_grades = production_report_field_visibility(payload)
+    definitions = [
+        definition
+        for definition in definitions
+        if (show_standard_weights or definition[0] not in {"water", "flower"})
+        and (show_grades or definition[0] != "grades")
+    ]
     fields = payload.get("export_fields") or {}
     section_fields = fields.get(section) or {}
     if not section_fields:
@@ -2989,6 +3039,7 @@ def production_summary_context(payload: dict) -> tuple[str, str, list[dict], lis
 def build_production_summary_excel(payload: dict) -> bytes:
     start_date, end_date, records, pile_rows, totals, employee_count = production_summary_context(payload)
     sections = selected_export_sections(payload)
+    water_label, flower_label = production_report_weight_labels(payload)
     workbook = Workbook()
     overview = workbook.active
     overview.title = "Production Summary"
@@ -2999,7 +3050,7 @@ def build_production_summary_excel(payload: dict) -> bytes:
     overview["A2"] = "รายงานสรุปผลผลิตและน้ำหนัก"
     overview["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
     overview.merge_cells("A3:G3")
-    overview["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
+    overview["A3"] = f"ผลไม้ {selected_production_fruit_label(payload)} | ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
     overview.merge_cells("A4:G4")
     overview["A4"] = export_meta_text(payload)
     add_excel_logo(overview, "H1")
@@ -3009,8 +3060,8 @@ def build_production_summary_excel(payload: dict) -> bytes:
         "overview",
         [
             ("totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", totals["total_weight"]),
-            ("water", "น้ำหนักน้ำ (กก.)", totals["incoming"]),
-            ("flower", "น้ำหนักดอก (กก.)", totals["outgoing"]),
+            ("water", f"{water_label} (กก.)", totals["incoming"]),
+            ("flower", f"{flower_label} (กก.)", totals["outgoing"]),
             ("grades", "ทุเรียนเกรด A-E", grade_totals_text(totals.get("grades"))),
             ("amount", "ยอดเงินรวม", totals["amount"]),
             ("employees", "พนักงานที่มีรายการ", employee_count),
@@ -3030,8 +3081,8 @@ def build_production_summary_excel(payload: dict) -> bytes:
             "piles",
             [
                 ("pile", "กอง", lambda row: row["pile"]),
-                ("water", "น้ำหนักน้ำ (กก.)", lambda row: row["incoming"]),
-                ("flower", "น้ำหนักดอก (กก.)", lambda row: row["outgoing"]),
+                ("water", f"{water_label} (กก.)", lambda row: row["incoming"]),
+                ("flower", f"{flower_label} (กก.)", lambda row: row["outgoing"]),
                 ("grades", "ทุเรียนเกรด A-E", lambda row: grade_totals_text(row.get("grades"))),
                 ("total", "รวม (กก.)", lambda row: row.get("total_weight", row["incoming"] + row["outgoing"])),
                 ("amount", "รวมเงิน", lambda row: row["amount"]),
@@ -3062,9 +3113,9 @@ def build_production_summary_excel(payload: dict) -> bytes:
                 ("time", "เวลา", lambda record: record.get("record_time", "")),
                 ("empCode", "รหัสพนักงาน", lambda record: record.get("emp_code", "")),
                 ("employeeName", "ชื่อพนักงาน", lambda record: employee_name_for_record(payload, record)),
-                ("pile", "กอง", lambda record: record.get("pile_no") or record.get("pile", "")),
-                ("water", "น้ำหนักน้ำ (กก.)", lambda record: safe_float(record.get("water_weight", record.get("water", 0)))),
-                ("flower", "น้ำหนักดอก (กก.)", lambda record: safe_float(record.get("flower_weight", record.get("flower", 0)))),
+                ("pile", "กอง", lambda record: production_pile_number(record) or "-"),
+                ("water", f"{water_label} (กก.)", lambda record: safe_float(record.get("water_weight", record.get("water", 0)))),
+                ("flower", f"{flower_label} (กก.)", lambda record: safe_float(record.get("flower_weight", record.get("flower", 0)))),
                 ("grades", "ทุเรียนเกรด A-E", lambda record: production_grade_text(record) if (record.get("fruit_type") or "mangosteen") == "durian" else "-"),
                 ("total", "น้ำหนักรวม (กก.)", lambda record: production_total_weight(record)),
                 ("amount", "รวมเงิน", lambda record: safe_float(record.get("total_amount", record.get("grand_total", 0)))),
@@ -3086,6 +3137,7 @@ def build_production_summary_excel(payload: dict) -> bytes:
 def build_production_summary_pdf(payload: dict) -> bytes:
     start_date, end_date, records, pile_rows, totals, employee_count = production_summary_context(payload)
     sections = selected_export_sections(payload)
+    water_label, flower_label = production_report_weight_labels(payload)
     _, _, _, section = pdf_styles()
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -3098,7 +3150,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
     )
     story = report_header_story(
         "รายงานสรุปผลผลิตและน้ำหนัก",
-        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}",
+        f"ผลไม้ {selected_production_fruit_label(payload)} | ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}",
         payload,
     )
 
@@ -3107,8 +3159,8 @@ def build_production_summary_pdf(payload: dict) -> bytes:
         "overview",
         [
             ("totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", report_number(totals["total_weight"])),
-            ("water", "น้ำหนักน้ำ (กก.)", report_number(totals["incoming"])),
-            ("flower", "น้ำหนักดอก (กก.)", report_number(totals["outgoing"])),
+            ("water", f"{water_label} (กก.)", report_number(totals["incoming"])),
+            ("flower", f"{flower_label} (กก.)", report_number(totals["outgoing"])),
             ("grades", "ทุเรียนเกรด A-E", grade_totals_text(totals.get("grades"))),
             ("amount", "ยอดเงินรวม", money(totals["amount"])),
             ("employees", "พนักงานที่มีรายการ", report_number(employee_count, 0)),
@@ -3129,8 +3181,8 @@ def build_production_summary_pdf(payload: dict) -> bytes:
             "piles",
             [
                 ("pile", "กอง", lambda row: row["pile"]),
-                ("water", "น้ำหนักน้ำ (กก.)", lambda row: report_number(row["incoming"])),
-                ("flower", "น้ำหนักดอก (กก.)", lambda row: report_number(row["outgoing"])),
+                ("water", f"{water_label} (กก.)", lambda row: report_number(row["incoming"])),
+                ("flower", f"{flower_label} (กก.)", lambda row: report_number(row["outgoing"])),
                 ("grades", "ทุเรียนเกรด A-E", lambda row: grade_totals_text(row.get("grades"))),
                 ("total", "รวม (กก.)", lambda row: report_number(row.get("total_weight", row["incoming"] + row["outgoing"]))),
                 ("amount", "รวมเงิน", lambda row: money(row["amount"])),
@@ -3145,7 +3197,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
             col_width = (267 / len(pile_defs)) * mm
             pile_table = Table(pile_table_rows, repeatRows=1, colWidths=[col_width] * len(pile_defs))
             set_pdf_table_style(pile_table, 1)
-            story += [Paragraph("สรุปตามกอง", section), pile_table, Spacer(1, 7 * mm)]
+            story += [Paragraph("สรุปตามกอง", section), pile_table, Spacer(1, 4 * mm)]
 
     if sections["details"]:
         detail_defs = selected_export_fields(
@@ -3156,9 +3208,9 @@ def build_production_summary_pdf(payload: dict) -> bytes:
                 ("time", "เวลา", lambda record: record.get("record_time", "")),
                 ("empCode", "รหัสพนักงาน", lambda record: record.get("emp_code", "")),
                 ("employeeName", "ชื่อพนักงาน", lambda record: employee_name_for_record(payload, record)),
-                ("pile", "กอง", lambda record: record.get("pile_no") or record.get("pile", "")),
-                ("water", "น้ำหนักน้ำ (กก.)", lambda record: report_number(record.get("water_weight", record.get("water", 0)))),
-                ("flower", "น้ำหนักดอก (กก.)", lambda record: report_number(record.get("flower_weight", record.get("flower", 0)))),
+                ("pile", "กอง", lambda record: production_pile_number(record) or "-"),
+                ("water", f"{water_label} (กก.)", lambda record: report_number(record.get("water_weight", record.get("water", 0)))),
+                ("flower", f"{flower_label} (กก.)", lambda record: report_number(record.get("flower_weight", record.get("flower", 0)))),
                 ("grades", "ทุเรียนเกรด A-E", lambda record: production_grade_text(record) if (record.get("fruit_type") or "mangosteen") == "durian" else "-"),
                 ("total", "น้ำหนักรวม (กก.)", lambda record: report_number(production_total_weight(record))),
                 ("amount", "รวมเงิน", lambda record: money(record.get("total_amount", record.get("grand_total", 0)))),

@@ -511,6 +511,7 @@ let pileManagementMessageType = "success";
 let summaryDate = "";
 let summaryExportStartDate = "";
 let summaryExportEndDate = "";
+let summaryFruitFilter = "mangosteen";
 let summaryExportOptions = {
   overview: true,
   piles: true,
@@ -741,6 +742,16 @@ function wageRateTypeLabel(itemType) {
 
 function productionFruitTypeForRecord(record) {
   return record.fruit_type || "mangosteen";
+}
+
+function filterProductionRecordsByFruit(records, fruitId = "all") {
+  if (!fruitId || fruitId === "all") return records;
+  return records.filter((record) => productionFruitTypeForRecord(record) === fruitId);
+}
+
+function normalizeProductionPileNumber(value) {
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
 }
 
 function getSelectedProductionFruitId() {
@@ -2806,7 +2817,7 @@ function getPileSummaries(records) {
   const summaries = new Map();
 
   records.forEach((record) => {
-    const pile = Number(record.pile_no || record.pile || 1);
+    const pile = normalizeProductionPileNumber(record.pile_no ?? record.pile) ?? "-";
     const existing =
       summaries.get(pile) || { pile, water: 0, flower: 0, grades: createEmptyDurianGradeWeights(0), gradeTotal: 0, total: 0, amount: 0, count: 0 };
     const water = Number(record.water_weight || record.water || 0);
@@ -2823,7 +2834,11 @@ function getPileSummaries(records) {
     summaries.set(pile, existing);
   });
 
-  return Array.from(summaries.values()).sort((a, b) => a.pile - b.pile);
+  return Array.from(summaries.values()).sort((a, b) => {
+    if (a.pile === "-") return 1;
+    if (b.pile === "-") return -1;
+    return a.pile - b.pile;
+  });
 }
 
 function renderDashboardBars(pileSummaries) {
@@ -3412,6 +3427,8 @@ function buildProductionRecord(payload, user, existingRecord = null) {
   const fruitType = payload.fruit_type || existingRecord?.fruit_type || "mangosteen";
   const labels = getProductionFieldLabels(fruitType);
   const base = existingRecord || {};
+  const pileNo = normalizeProductionPileNumber(payload.pile_no ?? existingRecord?.pile_no);
+  if (pileNo === null) throw new Error("เลขกองต้องเป็นจำนวนเต็มตั้งแต่ 1 ขึ้นไป");
 
   if (isDurianFruit(fruitType)) {
     const gradeWeights = normalizeDurianGradeWeights(payload.grade_weights || existingRecord?.grade_weights);
@@ -3440,8 +3457,8 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       fruit_type: fruitType,
       employee_id: payload.employee.id,
       emp_code: payload.employee.emp_code,
-      pile_no: Number(payload.pile_no || existingRecord?.pile_no || 1),
-      pile: Number(payload.pile_no || existingRecord?.pile_no || 1),
+      pile_no: pileNo,
+      pile: pileNo,
       date: recordDate,
       record_date: recordDate,
       record_time: recordTime,
@@ -3500,10 +3517,10 @@ function buildProductionRecord(payload, user, existingRecord = null) {
     fruit_type: fruitType,
     employee_id: payload.employee.id,
     emp_code: payload.employee.emp_code,
-    pile_no: Number(payload.pile_no || existingRecord?.pile_no || 1),
+    pile_no: pileNo,
     date: recordDate,
     shift: payload.shift || existingRecord?.shift || "",
-    pile: Number(payload.pile_no || existingRecord?.pile_no || 1),
+    pile: pileNo,
     water_weight: waterWeight,
     flower_weight: flowerWeight,
     water: waterWeight,
@@ -9572,7 +9589,9 @@ function renderDashboard(moduleItem) {
   `;
 }
 
-function renderDashboardBars(pileSummaries) {
+function renderDashboardBars(pileSummaries, fruitFilter = summaryFruitFilter) {
+  const showGrades = fruitFilter === "all" || fruitFilter === "durian";
+  const showStandardWeights = fruitFilter !== "durian";
   const maxValue = Math.max(
     1,
     ...pileSummaries.map((item) => Math.max(item.water, item.flower, item.gradeTotal || 0))
@@ -9583,13 +9602,13 @@ function renderDashboardBars(pileSummaries) {
       (item) => `
         <div class="summary-bar-group">
           <div class="summary-bars">
-            <div class="summary-bar water" style="height:${Math.max(8, (item.water / maxValue) * 100)}%">
+            ${showStandardWeights ? `<div class="summary-bar water" style="height:${Math.max(8, (item.water / maxValue) * 100)}%">
               <span>${numberText(item.water)}</span>
             </div>
             <div class="summary-bar flower" style="height:${Math.max(8, (item.flower / maxValue) * 100)}%">
               <span>${numberText(item.flower)}</span>
-            </div>
-            ${(item.gradeTotal || 0) > 0 ? `<div class="summary-bar durian" style="height:${Math.max(8, ((item.gradeTotal || 0) / maxValue) * 100)}%"><span>${numberText(item.gradeTotal)}</span></div>` : ""}
+            </div>` : ""}
+            ${showGrades && (item.gradeTotal || 0) > 0 ? `<div class="summary-bar durian" style="height:${Math.max(8, ((item.gradeTotal || 0) / maxValue) * 100)}%"><span>${numberText(item.gradeTotal)}</span></div>` : ""}
           </div>
           <strong>กอง ${item.pile}</strong>
         </div>`
@@ -9597,31 +9616,37 @@ function renderDashboardBars(pileSummaries) {
     .join("");
 }
 
-function renderPileSummaryRow(item) {
+function renderPileSummaryRow(item, fruitFilter = summaryFruitFilter) {
+  const showGrades = fruitFilter === "all" || fruitFilter === "durian";
+  const showStandardWeights = fruitFilter !== "durian";
   return `
     <tr>
       <td>กอง ${item.pile}</td>
-      <td>${numberText(item.water)}</td>
-      <td>${numberText(item.flower)}</td>
-      <td><strong>${numberText(item.total)}</strong>${(item.gradeTotal || 0) > 0 ? `<small class="grade-breakdown">${DURIAN_GRADES.map((grade) => `${grade} ${numberText(item.grades[grade])}`).join(" · ")}</small>` : ""}</td>
+      ${showStandardWeights ? `<td>${numberText(item.water)}</td><td>${numberText(item.flower)}</td>` : ""}
+      ${showGrades ? DURIAN_GRADES.map((grade) => `<td>${numberText(item.grades[grade])}</td>`).join("") : ""}
+      <td><strong>${numberText(item.total)}</strong></td>
       <td><strong>${money(item.amount)}</strong></td>
     </tr>
   `;
 }
 
-function renderDashboardDetailRow(record) {
+function renderDashboardDetailRow(record, fruitFilter = summaryFruitFilter) {
   const employee = getEmployees().find((item) => item.id === record.employee_id);
-  const isDurian = isDurianFruit(record.fruit_type);
+  const isDurian = isDurianFruit(productionFruitTypeForRecord(record));
+  const showFruit = fruitFilter === "all";
+  const showGrades = fruitFilter === "all" || fruitFilter === "durian";
+  const showStandardWeights = fruitFilter !== "durian";
+  const pile = normalizeProductionPileNumber(record.pile_no ?? record.pile);
 
   return `
     <tr>
       <td>${escapeHtml(record.record_time || "")}</td>
       <td><strong>${escapeHtml(record.emp_code || "")}</strong></td>
       <td>${escapeHtml(record.employee_name || employee?.fullname || "")}</td>
-      <td>กอง ${escapeHtml(record.pile_no || record.pile || "")}</td>
-      <td>${isDurian ? "-" : numberText(record.water_weight || record.water)}</td>
-      <td>${isDurian ? "-" : numberText(record.flower_weight || record.flower)}</td>
-      <td>${isDurian ? escapeHtml(formatDurianGradeBreakdown(record)) : "-"}</td>
+      ${showFruit ? `<td>${escapeHtml(getProductionFruitLabel(productionFruitTypeForRecord(record)))}</td>` : ""}
+      <td>${pile === null ? "-" : pile}</td>
+      ${showStandardWeights ? `<td>${isDurian ? "-" : numberText(record.water_weight || record.water)}</td><td>${isDurian ? "-" : numberText(record.flower_weight || record.flower)}</td>` : ""}
+      ${showGrades ? DURIAN_GRADES.map((grade) => `<td>${isDurian ? numberText(getRecordGradeWeights(record)[grade]) : "-"}</td>`).join("") : ""}
       <td><strong>${numberText(getRecordTotalWeight(record))}</strong></td>
       <td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td>
       <td>${escapeHtml(record.created_by || "")}</td>
@@ -11538,7 +11563,9 @@ const summaryExportFieldGroups = {
 };
 
 function hasSelectedSummaryExportFields(section) {
-  return Object.values(summaryExportFields[section] || {}).some(Boolean);
+  return getSummaryExportFieldsForFruit(section).some(
+    (field) => summaryExportFields[section]?.[field.key]
+  );
 }
 
 function getSelectedSummaryExportSections() {
@@ -11548,7 +11575,7 @@ function getSelectedSummaryExportSections() {
 }
 
 function renderSummaryFieldOptions(section, title) {
-  const fields = summaryExportFieldGroups[section] || [];
+  const fields = getSummaryExportFieldsForFruit(section);
   return `
     <div class="summary-field-group">
       <strong>${escapeHtml(title)}</strong>
@@ -11572,18 +11599,48 @@ function renderSummaryFieldOptions(section, title) {
   `;
 }
 
+function getSummaryExportFieldsForFruit(section, fruitId = summaryFruitFilter) {
+  const fields = summaryExportFieldGroups[section] || [];
+  const labels = fruitId === "all"
+    ? { water: "น้ำหนักช่อง 1", flower: "น้ำหนักช่อง 2" }
+    : getProductionFieldLabels(fruitId);
+  const visibleFields = fruitId === "durian"
+    ? fields.filter((field) => !["water", "flower"].includes(field.key))
+    : fruitId !== "all"
+      ? fields.filter((field) => field.key !== "grades")
+      : fields;
+
+  return visibleFields.map((field) => {
+    if (field.key === "water") return { ...field, label: labels.water || field.label };
+    if (field.key === "flower") return { ...field, label: labels.flower || field.label };
+    return field;
+  });
+}
+
+function getSummaryExportFieldSelection() {
+  const selection = JSON.parse(JSON.stringify(summaryExportFields));
+  Object.keys(selection).forEach((section) => {
+    const allowed = new Set(getSummaryExportFieldsForFruit(section).map((field) => field.key));
+    Object.keys(selection[section]).forEach((field) => {
+      if (!allowed.has(field)) selection[section][field] = false;
+    });
+  });
+  return selection;
+}
+
 function getSummaryExportPayload(user, format) {
   const exportRange = getSummaryExportRange();
   return {
     start_date: exportRange.startDate,
     end_date: exportRange.endDate,
+    fruit_type: summaryFruitFilter,
     printed_by: user?.fullname || "System Admin",
     printed_by_position: getExportPositionLabel(user),
     employees: getEmployees(),
     production_records: getProductionRecords(),
     deduction_records: getReportAdjustmentRecords(),
     export_sections: { ...summaryExportOptions },
-    export_fields: JSON.parse(JSON.stringify(summaryExportFields)),
+    export_fields: getSummaryExportFieldSelection(),
     export_format: format
   };
 }
@@ -11593,10 +11650,21 @@ function renderSummaryAll(moduleItem) {
   const selectedDate = getSelectedSummaryDate();
   summaryDate = selectedDate;
 
-  const records = getDashboardRecordsForDate(selectedDate);
+  const records = filterProductionRecordsByFruit(
+    getDashboardRecordsForDate(selectedDate),
+    summaryFruitFilter
+  );
   const totals = getProductionTotals(records);
   const pileSummaries = getPileSummaries(records);
   const exportRange = getSummaryExportRange();
+  const showGrades = summaryFruitFilter === "all" || summaryFruitFilter === "durian";
+  const showStandardWeights = summaryFruitFilter !== "durian";
+  const showFruitColumn = summaryFruitFilter === "all";
+  const fruitLabels = summaryFruitFilter === "all"
+    ? { water: "น้ำหนักช่อง 1", flower: "น้ำหนักช่อง 2", waterShort: "ช่อง 1", flowerShort: "ช่อง 2" }
+    : getProductionFieldLabels(summaryFruitFilter);
+  const detailColumnCount = 7 + (showFruitColumn ? 1 : 0) + (showStandardWeights ? 2 : 0) + (showGrades ? DURIAN_GRADES.length : 0);
+  const pileColumnCount = 3 + (showStandardWeights ? 2 : 0) + (showGrades ? DURIAN_GRADES.length : 0);
 
   return `
     <section class="summary-page">
@@ -11609,6 +11677,16 @@ function renderSummaryAll(moduleItem) {
           <label class="summary-date-field">
             <span>วันที่</span>
             <input id="summaryDate" type="date" value="${escapeHtml(selectedDate)}" />
+          </label>
+          <label class="summary-date-field">
+            <span>ผลไม้</span>
+            <select id="summaryFruitFilter">
+              <option value="all" ${summaryFruitFilter === "all" ? "selected" : ""}>ทุกผลไม้</option>
+              ${productionFruitOptions
+                .filter((fruit) => productionFruitFieldLabels[fruit.id])
+                .map((fruit) => `<option value="${escapeHtml(fruit.id)}" ${summaryFruitFilter === fruit.id ? "selected" : ""}>${escapeHtml(fruit.label)}</option>`)
+                .join("")}
+            </select>
           </label>
           <span class="summary-mode-pill">${records.length.toLocaleString("th-TH")} รายการ</span>
         </div>
@@ -11672,7 +11750,9 @@ function renderSummaryAll(moduleItem) {
         <div class="metric-card metric-green">
           <span>น้ำหนักรวมทั้งหมด</span>
           <strong>${numberText(totals.total)} กก.</strong>
-          <small>น้ำ ${numberText(totals.water)} กก. | ดอก ${numberText(totals.flower)} กก.</small>
+          <small>${summaryFruitFilter === "durian"
+            ? DURIAN_GRADES.map((grade) => `${grade} ${numberText(totals.grades[grade])}`).join(" | ")
+            : `${escapeHtml(fruitLabels.waterShort || "น้ำ")} ${numberText(totals.water)} กก. | ${escapeHtml(fruitLabels.flowerShort || "ดอก")} ${numberText(totals.flower)} กก.${showGrades ? ` | ทุเรียน ${numberText(getDurianGradeTotal(totals.grades))} กก.` : ""}`}</small>
         </div>
         <div class="metric-card metric-blue">
           <span>ยอดเงินรวม</span>
@@ -11696,12 +11776,12 @@ function renderSummaryAll(moduleItem) {
           <div class="section-title-row">
             <h3>กราฟเปรียบเทียบน้ำหนัก</h3>
             <div class="chart-legend">
-              <span><i class="legend-water"></i>น้ำ</span>
-              <span><i class="legend-flower"></i>ดอก</span>
+              ${showStandardWeights ? `<span><i class="legend-water"></i>${escapeHtml(fruitLabels.waterShort || "น้ำ")}</span><span><i class="legend-flower"></i>${escapeHtml(fruitLabels.flowerShort || "ดอก")}</span>` : ""}
+              ${showGrades ? `<span><i class="legend-durian"></i>ทุเรียน A-E</span>` : ""}
             </div>
           </div>
           <div class="summary-chart">
-            ${pileSummaries.length ? renderDashboardBars(pileSummaries) : `<div class="empty-state">ยังไม่มีข้อมูลสำหรับวันที่เลือก</div>`}
+            ${pileSummaries.length ? renderDashboardBars(pileSummaries, summaryFruitFilter) : `<div class="empty-state">ยังไม่มีข้อมูลสำหรับวันที่เลือก</div>`}
           </div>
         </section>
 
@@ -11712,8 +11792,8 @@ function renderSummaryAll(moduleItem) {
               <thead>
                 <tr>
                   <th>กอง</th>
-                  <th>น้ำหนักน้ำ</th>
-                  <th>น้ำหนักดอก</th>
+                  ${showStandardWeights ? `<th>${escapeHtml(fruitLabels.water || "น้ำหนักน้ำ")}</th><th>${escapeHtml(fruitLabels.flower || "น้ำหนักดอก")}</th>` : ""}
+                  ${showGrades ? DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("") : ""}
                   <th>รวม</th>
                   <th>รวมเงิน</th>
                 </tr>
@@ -11721,8 +11801,8 @@ function renderSummaryAll(moduleItem) {
               <tbody>
                 ${
                   pileSummaries.length
-                    ? pileSummaries.map(renderPileSummaryRow).join("")
-                    : `<tr><td colspan="5" class="empty-cell">ยังไม่มีข้อมูลสำหรับวันที่เลือก</td></tr>`
+                    ? pileSummaries.map((item) => renderPileSummaryRow(item, summaryFruitFilter)).join("")
+                    : `<tr><td colspan="${pileColumnCount}" class="empty-cell">ยังไม่มีข้อมูลสำหรับวันที่เลือก</td></tr>`
                 }
               </tbody>
             </table>
@@ -11739,9 +11819,11 @@ function renderSummaryAll(moduleItem) {
                 <th>เวลา</th>
                 <th>รหัสพนักงาน</th>
                 <th>ชื่อพนักงาน</th>
+                ${showFruitColumn ? "<th>ผลไม้</th>" : ""}
                 <th>กอง</th>
-                <th>น้ำหนักน้ำ</th>
-                <th>น้ำหนักดอก</th>
+                ${showStandardWeights ? `<th>${escapeHtml(fruitLabels.water || "น้ำหนักน้ำ")}</th><th>${escapeHtml(fruitLabels.flower || "น้ำหนักดอก")}</th>` : ""}
+                ${showGrades ? DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("") : ""}
+                <th>น้ำหนักรวม</th>
                 <th>รวมเงิน</th>
                 <th>ผู้บันทึก</th>
               </tr>
@@ -11749,8 +11831,8 @@ function renderSummaryAll(moduleItem) {
             <tbody>
               ${
                 records.length
-                  ? records.map(renderDashboardDetailRow).join("")
-                  : `<tr><td colspan="8" class="empty-cell">ยังไม่มีข้อมูลสำหรับวันที่เลือก</td></tr>`
+                  ? records.map((record) => renderDashboardDetailRow(record, summaryFruitFilter)).join("")
+                  : `<tr><td colspan="${detailColumnCount}" class="empty-cell">ยังไม่มีข้อมูลสำหรับวันที่เลือก</td></tr>`
               }
             </tbody>
           </table>
@@ -11771,7 +11853,10 @@ function exportSummaryData() {
     return;
   }
 
-  const records = getDashboardRecordsForRange(exportRange.startDate, exportRange.endDate);
+  const records = filterProductionRecordsByFruit(
+    getDashboardRecordsForRange(exportRange.startDate, exportRange.endDate),
+    summaryFruitFilter
+  );
   if (!records.length) {
     setSummaryExportMessage("ไม่มีข้อมูลผลผลิต/น้ำหนักในช่วงวันที่เลือก จึงยัง Export ไม่ได้", "error");
     summaryMainExportMenuOpen = true;
@@ -11792,15 +11877,18 @@ function exportSummaryData() {
   ];
 
   if (selectedSections.includes("overview")) {
+    const allowedOverviewFields = new Set(
+      getSummaryExportFieldsForFruit("overview").map((field) => field.key)
+    );
     const overviewRows = [
       ["totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", totals.total],
-      ["water", "น้ำหนักน้ำ (กก.)", totals.water],
-      ["flower", "น้ำหนักดอก (กก.)", totals.flower],
+      ["water", `${fruitLabels.water || "น้ำหนักน้ำ"} (กก.)`, totals.water],
+      ["flower", `${fruitLabels.flower || "น้ำหนักดอก"} (กก.)`, totals.flower],
       ["grades", "ทุเรียนเกรด A-E", DURIAN_GRADES.map((grade) => `${grade} ${numberText(totals.grades[grade])}`).join(" | ")],
       ["amount", "ยอดเงินรวม", totals.amount],
       ["employees", "พนักงานที่มีรายการ", totals.people.size],
       ["records", "จำนวนรายการ", records.length]
-    ].filter(([key]) => summaryExportFields.overview[key]);
+    ].filter(([key]) => allowedOverviewFields.has(key) && summaryExportFields.overview[key]);
     lines.push(csvRow(["ภาพรวม"]));
     lines.push(csvRow(["หัวข้อ", "ค่า"]));
     overviewRows.forEach(([, label, value]) => lines.push(csvRow([label, value])));
@@ -11808,9 +11896,9 @@ function exportSummaryData() {
   }
 
   if (selectedSections.includes("piles")) {
-    const fields = summaryExportFieldGroups.piles.filter((field) => summaryExportFields.piles[field.key]);
+    const fields = getSummaryExportFieldsForFruit("piles").filter((field) => summaryExportFields.piles[field.key]);
     const getValue = {
-      pile: (item) => `กอง ${item.pile}`,
+      pile: (item) => item.pile,
       water: (item) => item.water,
       flower: (item) => item.flower,
       grades: (item) => DURIAN_GRADES.map((grade) => `${grade} ${numberText(item.grades?.[grade] || 0)}`).join(" | "),
@@ -11824,7 +11912,7 @@ function exportSummaryData() {
   }
 
   if (selectedSections.includes("details")) {
-    const fields = summaryExportFieldGroups.details.filter((field) => summaryExportFields.details[field.key]);
+    const fields = getSummaryExportFieldsForFruit("details").filter((field) => summaryExportFields.details[field.key]);
     const getValue = {
       date: (record) => getRecordDate(record),
       time: (record) => record.record_time || "",
@@ -11833,7 +11921,7 @@ function exportSummaryData() {
         const employee = getEmployees().find((item) => item.id === record.employee_id);
         return record.employee_name || employee?.fullname || "";
       },
-      pile: (record) => record.pile_no || record.pile || "",
+      pile: (record) => normalizeProductionPileNumber(record.pile_no ?? record.pile) ?? "-",
       water: (record) => record.water_weight || record.water || 0,
       flower: (record) => record.flower_weight || record.flower || 0,
       grades: (record) => isDurianFruit(productionFruitTypeForRecord(record)) ? formatDurianGradeBreakdown(record, " | ") : "-",
@@ -11847,7 +11935,7 @@ function exportSummaryData() {
   }
 
   downloadTextFile(
-    `summary-${exportRange.startDate}-to-${exportRange.endDate}.csv`,
+    `summary-${summaryFruitFilter}-${exportRange.startDate}-to-${exportRange.endDate}.csv`,
     `\ufeff${lines.join("\r\n")}`
   );
   setSummaryExportMessage(`Export CSV ข้อมูลช่วงวันที่ ${rangeLabel} เรียบร้อยแล้ว`);
@@ -11857,7 +11945,10 @@ function exportSummaryData() {
 
 async function exportProductionSummaryReport(user, format) {
   const exportRange = getSummaryExportRange();
-  const records = getDashboardRecordsForRange(exportRange.startDate, exportRange.endDate);
+  const records = filterProductionRecordsByFruit(
+    getDashboardRecordsForRange(exportRange.startDate, exportRange.endDate),
+    summaryFruitFilter
+  );
   const selectedSections = getSelectedSummaryExportSections();
 
   if (!selectedSections.length) {
@@ -11901,6 +11992,13 @@ function bindSummaryAllEvents() {
     summaryDate = event.target.value || new Date().toISOString().slice(0, 10);
     summaryExportStartDate = summaryDate;
     summaryExportEndDate = summaryDate;
+    summaryMainExportMenuOpen = false;
+    summaryExportMessage = "";
+    render();
+  });
+
+  document.querySelector("#summaryFruitFilter")?.addEventListener("change", (event) => {
+    summaryFruitFilter = event.target.value || "mangosteen";
     summaryMainExportMenuOpen = false;
     summaryExportMessage = "";
     render();

@@ -19,6 +19,7 @@ const testSource = `
   function apiGetCurrentProductionRate(fruitType, fieldKey) {
     return rates[fieldKey] == null ? null : { rate: rates[fieldKey] };
   }
+  ${functionBlock("normalizeProductionPileNumber", "getSelectedProductionFruitId")}
   ${functionBlock("createEmptyDurianGradeWeights", "getFastInputFruitKey")}
   ${functionBlock("createProductionClientUid", "isValidProductionRecordDate")}
   ${functionBlock("buildProductionRecord", "apiCreateProductionRecord")}
@@ -50,6 +51,14 @@ assert.deepEqual({ ...record.grade_amounts }, { A: 40, B: 15, C: 4, D: 0, E: 1 }
 assert.equal(record.water_weight, 0);
 assert.equal(record.flower_weight, 0);
 assert.equal(record.pile_no, 2);
+
+assert.throws(
+  () => context.buildProductionRecord(
+    { record_date: "2026-07-18", fruit_type: "durian", pile_no: "bad", employee, grade_weights: { A: 1 } },
+    user
+  ),
+  /เลขกอง/
+);
 
 context.rates.grade_C = undefined;
 assert.throws(
