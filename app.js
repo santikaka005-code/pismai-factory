@@ -653,11 +653,12 @@ let liveStateRefreshInFlight = false;
 let lastRenderedRoute = "";
 let batchEntryText = "";
 const DURIAN_GRADES = ["A", "B", "C", "D", "E"];
+const BATCH_WEIGHT_INPUT_COUNT = 40;
 let batchGridState = {
   emp_code: "",
   employee: null,
   flower_pile_no: "1",
-  water_pile_no: "2",
+  water_pile_no: "1",
   flower_weights_by_pile: createBatchPileWeightMap(),
   water_weights_by_pile: createBatchPileWeightMap(),
   durian_grade_piles: createDurianGradePileSelection(),
@@ -909,7 +910,7 @@ function escapeHtml(value) {
 
 function createBatchPileWeightMap() {
   return [1, 2, 3, 4, 5].reduce((weightsByPile, pileNo) => {
-    weightsByPile[String(pileNo)] = Array(20).fill("");
+    weightsByPile[String(pileNo)] = Array(BATCH_WEIGHT_INPUT_COUNT).fill("");
     return weightsByPile;
   }, {});
 }
@@ -933,7 +934,7 @@ function getDurianBatchWeights(grade, pileNo = null) {
   const selectedPile = String(pileNo || batchGridState.durian_grade_piles?.[normalizedGrade] || "1");
   batchGridState.durian_grade_weights_by_pile ||= createDurianBatchWeightMap();
   batchGridState.durian_grade_weights_by_pile[normalizedGrade] ||= createBatchPileWeightMap();
-  batchGridState.durian_grade_weights_by_pile[normalizedGrade][selectedPile] ||= Array(20).fill("");
+  batchGridState.durian_grade_weights_by_pile[normalizedGrade][selectedPile] ||= Array(BATCH_WEIGHT_INPUT_COUNT).fill("");
   return batchGridState.durian_grade_weights_by_pile[normalizedGrade][selectedPile];
 }
 
@@ -948,7 +949,7 @@ function getBatchPileWeights(type, pileNo = null) {
     batchGridState[stateKey] = createBatchPileWeightMap();
   }
   if (!batchGridState[stateKey][pileKey]) {
-    batchGridState[stateKey][pileKey] = Array(20).fill("");
+    batchGridState[stateKey][pileKey] = Array(BATCH_WEIGHT_INPUT_COUNT).fill("");
   }
 
   return batchGridState[stateKey][pileKey];
@@ -6939,7 +6940,7 @@ function renderBatchEntry() {
       <div class="panel-head">
         <div>
           <h2>กรอกแบบชุด</h2>
-          <p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักฝั่งละ 20 ช่อง</p>
+          <p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักฝั่งละ 40 ช่อง</p>
         </div>
       </div>
       <div class="batch-employee-row">
@@ -7001,7 +7002,7 @@ function renderDurianBatchEntry() {
     </label>`).join("");
   return `
     <section class="panel">
-      <div class="panel-head"><div><h2>กรอกทุเรียนแบบชุด</h2><p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักแต่ละเกรดแยกตามกอง</p></div></div>
+      <div class="panel-head"><div><h2>กรอกทุเรียนแบบชุด</h2><p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักแต่ละเกรดแยกตามกอง เกรดละ 40 ช่อง</p></div></div>
       <div class="batch-employee-row">
         <label class="field"><span>วันที่บันทึกผลผลิต</span><input id="batchRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" /></label>
         <label class="field"><span>รหัสพนักงาน</span><input id="batchEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(batchGridState.emp_code)}" autocomplete="off" /></label>
@@ -7948,6 +7949,8 @@ function clearBatchGridState(keepEmployee = false) {
     ...batchGridState,
     emp_code: keepEmployee ? batchGridState.emp_code : "",
     employee: keepEmployee ? batchGridState.employee : null,
+    flower_pile_no: "1",
+    water_pile_no: "1",
     flower_weights_by_pile: createBatchPileWeightMap(),
     water_weights_by_pile: createBatchPileWeightMap(),
     durian_grade_piles: createDurianGradePileSelection(),
