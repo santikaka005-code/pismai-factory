@@ -325,6 +325,13 @@ modules.splice(
     icon: "◉"
   },
   {
+    id: "secret-room",
+    label: "ห้องแห่งความลับ",
+    roles: ["admin", "hr", "operator", "supervisor", "developer"],
+    description: "พื้นที่เพื่อนร่วมงาน คอมมู และแชทส่วนตัวภายในองค์กร",
+    icon: "◌"
+  },
+  {
     id: "audit-log",
     label: "Audit Log",
     roles: ["admin"],
@@ -387,9 +394,9 @@ modules.forEach((moduleItem) => {
 });
 
 const levelRouteAccess = {
-  C1: ["dashboard", "production"],
-  C2: ["dashboard", "production", "summary-person"],
-  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report"],
+  C1: ["dashboard", "production", "secret-room"],
+  C2: ["dashboard", "production", "summary-person", "secret-room"],
+  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report", "secret-room"],
   C4: [
     "dashboard",
     "production",
@@ -407,7 +414,8 @@ const levelRouteAccess = {
     "production-employees",
     "time-employees",
     "wage-rates",
-    "accounting-control"
+    "accounting-control",
+    "secret-room"
   ],
   C5: modules.map((item) => item.id).filter((id) => id !== "audit-log"),
   C6: modules.map((item) => item.id),
@@ -1010,7 +1018,7 @@ function getDefaultRouteForUser(user) {
 }
 
 function visibleNavModulesForUser(user) {
-  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings", "accounting-control"];
+  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings", "accounting-control", "secret-room"];
   return navRouteIds
     .map((routeId) => modules.find((item) => item.id === routeId))
     .filter((item) => item && !item.hidden)
@@ -3799,6 +3807,7 @@ async function handleLogin(event) {
 }
 
 function renderApp(user, route) {
+  if (route !== "secret-room") window.SecretRoom?.stop?.();
   if (route === "accounting-control" && window.AccountingControl) {
     window.AccountingControl.render(app, user, {
       onExit: () => { location.hash = "#/dashboard"; },
@@ -3851,7 +3860,7 @@ function renderApp(user, route) {
 
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
   const visibleModules = visibleNavModulesForUser(user);
-  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings", "accounting-control"];
+  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings", "accounting-control", "secret-room"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
 
@@ -3999,6 +4008,9 @@ function renderModuleContent(user, moduleItem) {
   if (moduleItem.id === "settings") {
     return renderFullSettingsModule(user);
   }
+  if (moduleItem.id === "secret-room" && window.SecretRoom) {
+    return window.SecretRoom.render();
+  }
   return renderSimpleModule(moduleItem);
 }
 
@@ -4045,6 +4057,7 @@ function bindAppEvents(user, moduleItem) {
   if (moduleItem.id === "backup") bindBackupEvents(user);
   if (moduleItem.id === "pile-management") bindPileManagementEvents(user);
   if (moduleItem.id === "audit-log") bindAuditLogPasswordEvents();
+  if (moduleItem.id === "secret-room") window.SecretRoom?.bind?.();
 }
 
 function renderLegacyDashboard(moduleItem) {

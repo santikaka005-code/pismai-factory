@@ -82,6 +82,8 @@ BACKUP_TABLES = [
     "deduction_records",
     "deduction_applications",
     "audit_logs",
+    "community_posts",
+    "secret_messages",
 ]
 LIVE_STATE_TABLES = {
     "production_sessions",
@@ -138,6 +140,11 @@ def accounting_actor(handler: BaseHTTPRequestHandler, minimum_level: int = 4) ->
     actor = verify_session_token(handler.headers.get("X-Session-Token", ""))
     level = int("".join(filter(str.isdigit, str(actor.get("level", "C1")))) or "1") if actor else 0
     return actor if actor and level >= minimum_level else None
+
+
+def secret_room_actor(handler: BaseHTTPRequestHandler) -> dict | None:
+    """All signed-in website accounts may use the internal collaboration area."""
+    return verify_session_token(handler.headers.get("X-Session-Token", ""))
 
 
 def validate_accounting_workspace(workspace: object) -> str | None:
@@ -3833,6 +3840,79 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": register_online_user(payload)})
             return
 
+        if parsed.path.startswith("/api/secret-room/"):
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "Session is missing or expired."}, 401)
+                return
+
+            actor_username = str(actor.get("username") or "").strip()
+            if parsed.path == "/api/secret-room/posts":
+                content = str(payload.get("content") or "").strip()
+                if not content or len(content) > 2000:
+                    self.send_json({"error": "Post content must contain 1-2,000 characters."}, 400)
+                    return
+                account_status, accounts = supabase_request(
+                    "GET",
+                    f"account_users?username=eq.{quote(actor_username)}&select=fullname&limit=1",
+                )
+                fullname = actor_username
+                if account_status < 400 and isinstance(accounts, list) and accounts:
+                    fullname = str(accounts[0].get("fullname") or actor_username)
+                status, body = supabase_request(
+                    "POST",
+                    "community_posts",
+                    {"author_username": actor_username, "author_fullname": fullname, "content": content},
+                    prefer="return=representation",
+                )
+                self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+                return
+
+            if parsed.path == "/api/secret-room/messages":
+                recipient = str(payload.get("recipient_username") or "").strip()
+                content = str(payload.get("content") or "").strip()
+                if not recipient or recipient.lower() == actor_username.lower():
+                    self.send_json({"error": "Please choose another coworker."}, 400)
+                    return
+                if not content or len(content) > 4000:
+                    self.send_json({"error": "Message must contain 1-4,000 characters."}, 400)
+                    return
+                account_status, accounts = supabase_request(
+                    "GET",
+                    f"account_users?username=eq.{quote(recipient)}&status=eq.Active&select=username&limit=1",
+                )
+                if account_status >= 400:
+                    self.send_json({"error": accounts}, account_status)
+                    return
+                if not isinstance(accounts, list) or not accounts:
+                    self.send_json({"error": "Coworker account was not found."}, 404)
+                    return
+                status, body = supabase_request(
+                    "POST",
+                    "secret_messages",
+                    {"sender_username": actor_username, "recipient_username": recipient, "content": content},
+                    prefer="return=representation",
+                )
+                self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+                return
+
+            if parsed.path == "/api/secret-room/messages/read":
+                sender = str(payload.get("username") or "").strip()
+                if not sender:
+                    self.send_json({"error": "username is required."}, 400)
+                    return
+                status, body = supabase_request(
+                    "PATCH",
+                    f"secret_messages?sender_username=eq.{quote(sender)}&recipient_username=eq.{quote(actor_username)}&is_read=eq.false",
+                    {"is_read": True},
+                    prefer="return=minimal",
+                )
+                self.send_json({"data": {"updated": status < 400}, "error": body if status >= 400 else None}, status)
+                return
+
+            self.send_error(404, "Not found")
+            return
+
         if parsed.path == "/api/accounting/journals":
             actor = accounting_actor(self)
             if not actor:
@@ -4659,6 +4739,115 @@ class ReportHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/online-users":
             self.send_json({"data": online_user_snapshot()})
+            return
+
+        if parsed.path.startswith("/api/secret-room/"):
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "Session is missing or expired."}, 401)
+                return
+            actor_username = str(actor.get("username") or "").strip()
+
+            if parsed.path == "/api/secret-room/coworkers":
+                status, body = supabase_request(
+                    "GET",
+                    "account_users?status=eq.Active&select=id,username,fullname,role,user_level,status&order=fullname.asc",
+                )
+                if status >= 400:
+                    self.send_json({"error": body}, status)
+                    return
+                online_names = {
+                    str(item.get("username") or "").lower()
+                    for item in online_user_snapshot().get("users", [])
+                    if item.get("username")
+                }
+                coworkers = []
+                for account in body if isinstance(body, list) else []:
+                    item = account_to_client(account)
+                    item.pop("password", None)
+                    item["is_online"] = str(account.get("username") or "").lower() in online_names
+                    item["is_self"] = str(account.get("username") or "").lower() == actor_username.lower()
+                    coworkers.append(item)
+                self.send_json({"data": coworkers})
+                return
+
+            if parsed.path == "/api/secret-room/posts":
+                status, body = supabase_request(
+                    "GET",
+                    "community_posts?select=id,author_username,author_fullname,content,created_at&order=created_at.desc&limit=100",
+                )
+                self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
+                return
+
+            if parsed.path in {"/api/secret-room/chats", "/api/secret-room/messages"}:
+                status, body = supabase_request(
+                    "GET",
+                    f"secret_messages?or=(sender_username.eq.{quote(actor_username)},recipient_username.eq.{quote(actor_username)})&select=id,sender_username,recipient_username,content,is_read,created_at&order=created_at.asc&limit=1000",
+                )
+                if status >= 400:
+                    self.send_json({"error": body}, status)
+                    return
+                messages = body if isinstance(body, list) else []
+                if parsed.path == "/api/secret-room/messages":
+                    peer = query.get("with", [""])[0].strip()
+                    if not peer:
+                        self.send_json({"error": "with is required."}, 400)
+                        return
+                    selected = [
+                        {**message, "is_mine": str(message.get("sender_username", "")).lower() == actor_username.lower()}
+                        for message in messages
+                        if {str(message.get("sender_username", "")).lower(), str(message.get("recipient_username", "")).lower()}
+                        == {actor_username.lower(), peer.lower()}
+                    ]
+                    self.send_json({"data": selected})
+                    return
+
+                peer_names = sorted({
+                    str(message.get("recipient_username") if str(message.get("sender_username", "")).lower() == actor_username.lower() else message.get("sender_username") or "")
+                    for message in messages
+                } - {""})
+                account_map = {}
+                if peer_names:
+                    encoded_names = ",".join(quote(name) for name in peer_names)
+                    account_status, accounts = supabase_request(
+                        "GET",
+                        f"account_users?username=in.({encoded_names})&select=username,fullname",
+                    )
+                    if account_status < 400 and isinstance(accounts, list):
+                        account_map = {str(item.get("username")): item for item in accounts}
+                online_names = {
+                    str(item.get("username") or "").lower()
+                    for item in online_user_snapshot().get("users", [])
+                }
+                chats = []
+                for peer in peer_names:
+                    peer_messages = [
+                        message for message in messages
+                        if peer.lower() in {
+                            str(message.get("sender_username", "")).lower(),
+                            str(message.get("recipient_username", "")).lower(),
+                        }
+                    ]
+                    last = peer_messages[-1] if peer_messages else {}
+                    unread = sum(
+                        1 for message in peer_messages
+                        if str(message.get("recipient_username", "")).lower() == actor_username.lower()
+                        and not bool(message.get("is_read"))
+                    )
+                    account = account_map.get(peer, {})
+                    chats.append({
+                        "username": peer,
+                        "fullname": account.get("fullname") or peer,
+                        "last_message": last.get("content") or "",
+                        "last_message_at": last.get("created_at"),
+                        "unread_count": unread,
+                        "is_online": peer.lower() in online_names,
+                    })
+                chats.sort(key=lambda item: str(item.get("last_message_at") or ""), reverse=True)
+                self.send_json({"data": chats})
+                return
+
+            self.send_error(404, "Not found")
             return
 
         if parsed.path == "/api/accounting/workspace":
