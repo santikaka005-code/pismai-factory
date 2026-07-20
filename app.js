@@ -3353,7 +3353,10 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       gradeAmounts[grade] = gradeWeights[grade] * gradeRates[grade];
     });
     if (missingRates.length) {
-      throw new Error(`ยังไม่มีอัตราค่าจ้างทุเรียนสำหรับ ${missingRates.join(", ")} วันที่ ${recordDate}`);
+      throw new Error(
+        `ยังไม่ได้ตั้งอัตราค่าจ้างทุเรียนสำหรับ ${missingRates.join(", ")} ` +
+        `(วันที่เริ่มใช้ต้องไม่เกิน ${recordDate}) ตั้งเพียงครั้งเดียวแล้วระบบจะใช้ต่อเนื่องจนกว่าจะเปลี่ยนเรท`
+      );
     }
     const totalWeight = getDurianGradeTotal(gradeWeights);
     const totalAmount = DURIAN_GRADES.reduce((sum, grade) => sum + gradeAmounts[grade], 0);
@@ -3402,7 +3405,10 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       !waterRateRecord ? labels.water : "",
       !flowerRateRecord ? labels.flower : ""
     ].filter(Boolean).join(", ");
-    throw new Error(`ยังไม่มีอัตราค่าจ้างสำหรับ ${missing} วันที่ ${recordDate}`);
+    throw new Error(
+      `ยังไม่ได้ตั้งอัตราค่าจ้างสำหรับ ${missing} ` +
+      `(วันที่เริ่มใช้ต้องไม่เกิน ${recordDate}) ตั้งเพียงครั้งเดียวแล้วระบบจะใช้ต่อเนื่องจนกว่าจะเปลี่ยนเรท`
+    );
   }
 
   const waterRate = Number(waterRateRecord.rate);
@@ -7365,7 +7371,7 @@ function renderWageRateForm() {
     <section class="panel">
       <div class="section-title-row">
         <h3>เพิ่มอัตราใหม่</h3>
-        <p class="muted-text">รายการใหม่จะถูกใช้ตามวันที่มีผลล่าสุด</p>
+        <p class="muted-text">ตั้งหนึ่งครั้งและใช้ต่อเนื่องตั้งแต่วันที่เริ่มใช้ จนกว่าจะเพิ่มอัตราใหม่</p>
       </div>
       <form class="rate-form" id="wageRateForm">
         <label class="field">
@@ -7383,7 +7389,7 @@ function renderWageRateForm() {
         </label>
 
         <label class="field">
-          <span>วันที่เริ่มใช้</span>
+          <span>วันที่เริ่มใช้ (ใช้ต่อเนื่อง)</span>
           <input name="effective_date" type="date" value="${escapeHtml(currentRateDate)}" required />
         </label>
 
