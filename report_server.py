@@ -4200,6 +4200,24 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"deleted": results})
             return
 
+        if parsed.path == "/api/production-records/delete-by-date":
+            record_date = str(payload.get("record_date", "")).strip()
+            try:
+                datetime.strptime(record_date, "%Y-%m-%d")
+            except ValueError:
+                self.send_json({"error": "record_date must be YYYY-MM-DD"}, 400)
+                return
+            status, body = supabase_request(
+                "DELETE",
+                f"production_records?record_date=eq.{quote(record_date)}",
+                prefer="return=representation",
+            )
+            if status >= 400:
+                self.send_json({"error": body}, status)
+                return
+            self.send_json({"deleted": len(body) if isinstance(body, list) else 0, "record_date": record_date})
+            return
+
         if parsed.path == "/api/admin/remove-superseded-production-records":
             if not backup_authorized(self):
                 self.send_json({"error": "Backup code is required."}, 403)
