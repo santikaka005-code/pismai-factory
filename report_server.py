@@ -702,6 +702,32 @@ def supabase_request(
         return 500, {"error": str(error)}
 
 
+def insert_audit_log_compatible(audit_row: dict) -> tuple[int, dict | list | str | None]:
+    """Write audit rows against both current and legacy Supabase schemas."""
+    variants = [
+        audit_row,
+        {key: value for key, value in audit_row.items() if key != "ip_address"},
+        {key: value for key, value in audit_row.items() if key not in {"ip_address", "user_fullname"}},
+    ]
+    last_status: int = 500
+    last_result: dict | list | str | None = {"error": "Audit log insert failed."}
+    attempted_shapes: set[tuple[str, ...]] = set()
+    for candidate in variants:
+        shape = tuple(sorted(candidate))
+        if shape in attempted_shapes:
+            continue
+        attempted_shapes.add(shape)
+        last_status, last_result = supabase_request(
+            "POST",
+            "audit_logs",
+            candidate,
+            prefer="return=representation",
+        )
+        if last_status < 400:
+            return last_status, last_result
+    return last_status, last_result
+
+
 def account_phone_column_missing(body: dict | list | str | None) -> bool:
     text = json.dumps(body, ensure_ascii=False).lower() if isinstance(body, (dict, list)) else str(body or "").lower()
     return "phone" in text and ("column" in text or "schema cache" in text or "pgrst" in text)
@@ -4316,12 +4342,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                     "actor_level": actor.get("level", "C4"),
                 },
             }
-            audit_status, audit_result = supabase_request(
-                "POST",
-                "audit_logs",
-                audit_row,
-                prefer="return=representation",
-            )
+            audit_status, audit_result = insert_audit_log_compatible(audit_row)
             if audit_status >= 400:
                 restore_status, restore_result = supabase_request(
                     "POST",
@@ -4335,7 +4356,13 @@ class ReportHandler(BaseHTTPRequestHandler):
                         500,
                     )
                     return
-                self.send_json({"error": "Audit log failed; deleted production record was restored."}, 500)
+                self.send_json(
+                    {
+                        "error": "Audit log failed; deleted production record was restored.",
+                        "audit_error": audit_result,
+                    },
+                    500,
+                )
                 return
 
             self.send_json({"deleted": before, "audit": audit_result})
@@ -4511,12 +4538,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                     "actor_level": actor.get("level", "C4"),
                 },
             }
-            audit_status, audit_result = supabase_request(
-                "POST",
-                "audit_logs",
-                audit_row,
-                prefer="return=representation",
-            )
+            audit_status, audit_result = insert_audit_log_compatible(audit_row)
             if audit_status >= 400:
                 rollback = {key: value for key, value in existing_row.items() if key != "id"}
                 supabase_request(

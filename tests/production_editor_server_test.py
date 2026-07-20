@@ -1,6 +1,7 @@
 import unittest
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import report_server
@@ -44,6 +45,25 @@ class ProductionEditorServerTest(unittest.TestCase):
         self.assertIn("expected_updated_at", route)
         self.assertIn('"POST",\n                    "production_records"', route)
         self.assertIn("deleted production record was restored", route)
+
+    def test_audit_insert_retries_without_legacy_missing_columns(self):
+        responses = [
+            (400, {"message": "ip_address column missing"}),
+            (201, [{"id": 12}]),
+        ]
+        with patch.object(report_server, "supabase_request", side_effect=responses) as request:
+            status, result = report_server.insert_audit_log_compatible({
+                "action": "DELETE_PRODUCTION",
+                "metadata": {"before": {"id": 5}},
+                "ip_address": "127.0.0.1",
+                "user_fullname": "Admin",
+            })
+
+        self.assertEqual(status, 201)
+        self.assertEqual(result[0]["id"], 12)
+        self.assertEqual(request.call_count, 2)
+        self.assertNotIn("ip_address", request.call_args_list[1].args[2])
+        self.assertIn("metadata", request.call_args_list[1].args[2])
 
 
 if __name__ == "__main__":
