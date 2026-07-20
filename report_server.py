@@ -93,6 +93,7 @@ LIVE_STATE_TABLES = {
 }
 ONLINE_USER_TIMEOUT_SECONDS = 45
 online_user_lock = threading.Lock()
+live_state_sync_lock = threading.Lock()
 online_user_sessions: dict[str, dict] = {}
 SYSTEM_ACCOUNT_PROFILES = {
     "Santi": {
@@ -467,9 +468,11 @@ def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
                 and incoming_identity != existing_identity
             )
             if uid_collision or legacy_collision:
-                # Two browsers can allocate the same local numeric id. Let
-                # Supabase issue a fresh id instead of overwriting the other row.
-                clean_row.pop("id", None)
+                # Two browsers can allocate the same local numeric id. Allocate
+                # the next central id explicitly because legacy identity
+                # sequences may lag behind rows inserted with browser ids.
+                clean_row["id"] = next_table_id(table)
+                row_id = clean_row["id"]
                 has_existing = False
         method = "PATCH" if has_existing else "POST"
         path = f"{table}?id=eq.{quote(str(row_id))}" if method == "PATCH" else table
@@ -4081,7 +4084,8 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Invalid live-state table or rows."}, 400)
                 return
             converted = [live_state_row(table, row) for row in rows if isinstance(row, dict)]
-            status, body = sync_rows_by_id(table, converted)
+            with live_state_sync_lock:
+                status, body = sync_rows_by_id(table, converted)
             if status < 400:
                 # Never delete rows missing from one browser's local snapshot.
                 # Multiple stations submit concurrently and each may only know
