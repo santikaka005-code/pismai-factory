@@ -785,14 +785,17 @@ def employee_range_records(
     start_date: str,
     end_date: str,
     employee_id: int,
+    fruit_type: str = "all",
 ) -> list[dict]:
     start, end = sorted([start_date, end_date])
+    selected_fruit = str(fruit_type or "all").strip().lower()
     return sorted(
         [
             record
             for record in data.get("production_records", [])
             if record.get("employee_id") == employee_id
             and start <= (record.get("record_date") or record.get("date") or "") <= end
+            and (selected_fruit == "all" or (record.get("fruit_type") or "mangosteen") == selected_fruit)
         ],
         key=lambda record: (
             record.get("record_date") or record.get("date") or "",
@@ -1198,9 +1201,10 @@ def build_employee_range_pdf(
     start_date: str,
     end_date: str,
     employee_id: int,
+    fruit_type: str = "all",
 ) -> bytes:
     employee = find_employee(data, employee_id)
-    records = employee_range_records(data, start_date, end_date, employee_id)
+    records = employee_range_records(data, start_date, end_date, employee_id, fruit_type)
     daily_summaries = employee_daily_summaries(records)
     total_water = sum(item["water_weight"] for item in daily_summaries)
     total_flower = sum(item["flower_weight"] for item in daily_summaries)
@@ -1244,7 +1248,7 @@ def build_employee_range_pdf(
     )
     story = report_header_story(
         "รายงานสรุปผลผลิตรายบุคคล",
-        f"ช่วงวันที่ {format_report_date(start_date)} ถึง {format_report_date(end_date)}",
+        f"ผลไม้ {selected_production_fruit_label({'fruit_type': fruit_type})} | ช่วงวันที่ {format_report_date(start_date)} ถึง {format_report_date(end_date)}",
         payload,
     )
     story[-1] = Spacer(1, 3 * mm)
@@ -1305,28 +1309,46 @@ def build_employee_range_pdf(
         story.extend([Paragraph("รายการปรับยอด", section), adjustment_table, Spacer(1, 4 * mm)])
     story.extend([Paragraph("สรุปผลผลิตรายวัน", section)])
 
-    rows = [["วันที่", "น้ำหนักน้ำ (กก.)", "น้ำหนักดอก (กก.)", "ทุเรียนเกรด A-E", "น้ำหนักรวม (กก.)", "รายได้รวม (บาท)"]]
-    for item in daily_summaries:
-        rows.append([
-            format_report_date(item["date"]),
-            number(item["water_weight"]),
-            number(item["flower_weight"]),
-            grade_totals_text(item.get("grade_weights")),
-            number(item.get("total_weight", item["water_weight"] + item["flower_weight"])),
-            money(item["total_amount"]),
-        ])
-    if len(rows) == 1:
-        rows.append(["-", "0.00", "0.00", "-", "0.00", "0.00"])
     total_grades = {grade: sum(item.get("grade_weights", {}).get(grade, 0) for item in daily_summaries) for grade in DURIAN_GRADES}
-    rows.append(["รวมทั้งสิ้น", number(total_water), number(total_flower), grade_totals_text(total_grades), number(total_weight), money(total_amount)])
-    if bonus_amount:
-        rows.append(["เบี้ยขยัน", "", "", "", "", money(bonus_amount)])
-    if deduction_amount:
-        rows.append(["หัก", "", "", "", "", money(deduction_amount)])
-    if bonus_amount or deduction_amount:
-        rows.append(["สุทธิ", "", "", "", "", money(net_amount)])
+    is_durian = str(fruit_type or "all").lower() == "durian"
+    water_label, flower_label = production_report_weight_labels({"fruit_type": fruit_type})
+    if is_durian:
+        rows = [["วันที่", *[f"เกรด {grade} (กก.)" for grade in DURIAN_GRADES], "น้ำหนักรวม (กก.)", "รายได้รวม (บาท)"]]
+        for item in daily_summaries:
+            rows.append([
+                format_report_date(item["date"]),
+                *[number(item.get("grade_weights", {}).get(grade, 0)) for grade in DURIAN_GRADES],
+                number(item.get("total_weight", 0)),
+                money(item["total_amount"]),
+            ])
+        if len(rows) == 1:
+            rows.append(["-", *["0.00" for _ in DURIAN_GRADES], "0.00", "0.00"])
+        rows.append(["รวมทั้งสิ้น", *[number(total_grades[grade]) for grade in DURIAN_GRADES], number(total_weight), money(total_amount)])
+        column_widths = [38 * mm, *[27 * mm for _ in DURIAN_GRADES], 42 * mm, 52 * mm]
+    else:
+        rows = [["วันที่", f"{water_label} (กก.)", f"{flower_label} (กก.)", "น้ำหนักรวม (กก.)", "รายได้รวม (บาท)"]]
+        for item in daily_summaries:
+            rows.append([
+                format_report_date(item["date"]),
+                number(item["water_weight"]),
+                number(item["flower_weight"]),
+                number(item.get("total_weight", item["water_weight"] + item["flower_weight"])),
+                money(item["total_amount"]),
+            ])
+        if len(rows) == 1:
+            rows.append(["-", "0.00", "0.00", "0.00", "0.00"])
+        rows.append(["รวมทั้งสิ้น", number(total_water), number(total_flower), number(total_weight), money(total_amount)])
+        column_widths = [45 * mm, 52 * mm, 52 * mm, 52 * mm, 66 * mm]
 
-    table = Table(rows, repeatRows=1, colWidths=[38 * mm, 35 * mm, 35 * mm, 70 * mm, 40 * mm, 49 * mm])
+    adjustment_blanks = ["" for _ in range(len(rows[0]) - 2)]
+    if bonus_amount:
+        rows.append(["เบี้ยขยัน", *adjustment_blanks, money(bonus_amount)])
+    if deduction_amount:
+        rows.append(["หัก", *adjustment_blanks, money(deduction_amount)])
+    if bonus_amount or deduction_amount:
+        rows.append(["สุทธิ", *adjustment_blanks, money(net_amount)])
+
+    table = Table(rows, repeatRows=1, colWidths=column_widths)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(BRAND_GREEN)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -1620,9 +1642,10 @@ def build_employee_range_excel(
     start_date: str,
     end_date: str,
     employee_id: int,
+    fruit_type: str = "all",
 ) -> bytes:
     employee = find_employee(data, employee_id) or {}
-    records = employee_range_records(data, start_date, end_date, employee_id)
+    records = employee_range_records(data, start_date, end_date, employee_id, fruit_type)
     daily_summaries = employee_daily_summaries(records)
     deduction_rows = deduction_records_for(
         data,
@@ -1650,51 +1673,60 @@ def build_employee_range_excel(
 
     sheet["A1"] = f"{COMPANY_NAME} - รายงานสรุปรายบุคคล"
     sheet["A2"] = f"ชื่อ: {employee.get('emp_code', '-')} - {employee.get('fullname', '-')}"
-    sheet["A3"] = f"ช่วงวันที่: {start_date} ถึง {end_date}"
+    sheet["A3"] = f"ผลไม้: {selected_production_fruit_label({'fruit_type': fruit_type})} | ช่วงวันที่: {start_date} ถึง {end_date}"
     for cell_ref in ["A1", "A2", "A3"]:
         sheet[cell_ref].font = Font(bold=True, size=14 if cell_ref == "A1" else 11)
 
-    headers = [
-        "วันที่",
-        "น้ำหนักดอก",
-        "น้ำหนักน้ำ",
-        "ทุเรียนเกรด A-E",
-        "น้ำหนักรวม",
-        "รวมเป็นเงิน",
-    ]
+    is_durian = str(fruit_type or "all").lower() == "durian"
+    water_label, flower_label = production_report_weight_labels({"fruit_type": fruit_type})
+    headers = (
+        ["วันที่", *[f"เกรด {grade}" for grade in DURIAN_GRADES], "น้ำหนักรวม", "รวมเป็นเงิน"]
+        if is_durian
+        else ["วันที่", water_label, flower_label, "น้ำหนักรวม", "รวมเป็นเงิน"]
+    )
+    amount_column = len(headers)
     sheet.append([])
     sheet.append(headers)
     header_row = 5
 
     for summary in daily_summaries:
-        sheet.append(
-            [
+        if is_durian:
+            sheet.append([
                 summary["date"],
-                summary["flower_weight"],
+                *[summary.get("grade_weights", {}).get(grade, 0) for grade in DURIAN_GRADES],
+                summary.get("total_weight", 0),
+                summary["total_amount"],
+            ])
+        else:
+            sheet.append([
+                summary["date"],
                 summary["water_weight"],
-                grade_totals_text(summary.get("grade_weights")),
+                summary["flower_weight"],
                 summary.get("total_weight", summary["flower_weight"] + summary["water_weight"]),
                 summary["total_amount"],
-            ]
-        )
+            ])
 
     total_row = sheet.max_row + 1
     sheet.cell(total_row, 1, "รวม")
-    sheet.cell(total_row, 2, sum(summary["flower_weight"] for summary in daily_summaries))
-    sheet.cell(total_row, 3, sum(summary["water_weight"] for summary in daily_summaries))
     total_grades = {grade: sum(summary.get("grade_weights", {}).get(grade, 0) for summary in daily_summaries) for grade in DURIAN_GRADES}
-    sheet.cell(total_row, 4, grade_totals_text(total_grades))
-    sheet.cell(total_row, 5, sum(summary.get("total_weight", summary["flower_weight"] + summary["water_weight"]) for summary in daily_summaries))
-    sheet.cell(total_row, 6, gross_amount)
+    if is_durian:
+        for offset, grade in enumerate(DURIAN_GRADES, 2):
+            sheet.cell(total_row, offset, total_grades[grade])
+        sheet.cell(total_row, 7, sum(summary.get("total_weight", 0) for summary in daily_summaries))
+    else:
+        sheet.cell(total_row, 2, sum(summary["water_weight"] for summary in daily_summaries))
+        sheet.cell(total_row, 3, sum(summary["flower_weight"] for summary in daily_summaries))
+        sheet.cell(total_row, 4, sum(summary.get("total_weight", summary["flower_weight"] + summary["water_weight"]) for summary in daily_summaries))
+    sheet.cell(total_row, amount_column, gross_amount)
     bonus_row = total_row + 1
     sheet.cell(bonus_row, 1, "เบี้ยขยัน")
-    sheet.cell(bonus_row, 6, bonus_amount)
+    sheet.cell(bonus_row, amount_column, bonus_amount)
     deduct_row = total_row + 2
     sheet.cell(deduct_row, 1, "หัก")
-    sheet.cell(deduct_row, 6, deduction_amount)
+    sheet.cell(deduct_row, amount_column, deduction_amount)
     net_row = total_row + 3
     sheet.cell(net_row, 1, "สุทธิ")
-    sheet.cell(net_row, 6, net_amount)
+    sheet.cell(net_row, amount_column, net_amount)
 
     if deduction_rows:
         detail_start = net_row + 2
@@ -4393,11 +4425,13 @@ class ReportHandler(BaseHTTPRequestHandler):
             data = {
                 "employees": payload.get("employees", []),
                 "production_records": payload.get("production_records", []),
+                "deduction_records": payload.get("deduction_records", []),
             }
             start_date = payload.get("start_date", datetime.now().date().isoformat())
             end_date = payload.get("end_date", start_date)
             employee_id = int(payload.get("employee_id", 0))
-            content = build_employee_range_pdf(data, start_date, end_date, employee_id)
+            fruit_type = payload.get("fruit_type", "all")
+            content = build_employee_range_pdf(data, start_date, end_date, employee_id, fruit_type)
             self.send_file(
                 content,
                 "application/pdf",
@@ -4409,11 +4443,13 @@ class ReportHandler(BaseHTTPRequestHandler):
             data = {
                 "employees": payload.get("employees", []),
                 "production_records": payload.get("production_records", []),
+                "deduction_records": payload.get("deduction_records", []),
             }
             start_date = payload.get("start_date", datetime.now().date().isoformat())
             end_date = payload.get("end_date", start_date)
             employee_id = int(payload.get("employee_id", 0))
-            content = build_employee_range_excel(data, start_date, end_date, employee_id)
+            fruit_type = payload.get("fruit_type", "all")
+            content = build_employee_range_excel(data, start_date, end_date, employee_id, fruit_type)
             self.send_file(
                 content,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -584,6 +584,7 @@ let personalReportMessage = "";
 let personalReportMessageType = "success";
 let personalReportActiveTab = "production";
 let personalReportExportMenuOpen = false;
+let personalReportFruitFilter = "mangosteen";
 let timeRecordDate = new Date().toISOString().slice(0, 10);
 let timeSummaryStartDate = new Date().toISOString().slice(0, 10);
 let timeSummaryEndDate = new Date().toISOString().slice(0, 10);
@@ -7632,7 +7633,7 @@ function normalizeDateRange(startDate, endDate) {
     : { startDate: end, endDate: start };
 }
 
-function recordsForPersonalReport(employeeId, startDate, endDate) {
+function recordsForPersonalReport(employeeId, startDate, endDate, fruitId = "all") {
   const range = normalizeDateRange(startDate, endDate);
   return getProductionRecords()
     .filter((record) => {
@@ -7640,7 +7641,8 @@ function recordsForPersonalReport(employeeId, startDate, endDate) {
       return (
         Number(record.employee_id) === Number(employeeId) &&
         recordDate >= range.startDate &&
-        recordDate <= range.endDate
+        recordDate <= range.endDate &&
+        (fruitId === "all" || productionFruitTypeForRecord(record) === fruitId)
       );
     })
     .sort((a, b) => {
@@ -7692,8 +7694,8 @@ function getPilePersonalSummaries(records) {
   const summaries = new Map();
 
   records.forEach((record) => {
-    const pile = Number(record.pile_no || record.pile || 0);
-    const pileKey = String(pile || "-");
+    const pile = normalizeProductionPileNumber(record.pile_no ?? record.pile);
+    const pileKey = pile ?? "-";
     const water = Number(record.water_weight || record.water || 0);
     const flower = Number(record.flower_weight || record.flower || 0);
     const existing = summaries.get(pileKey) || { pile: pileKey, water: 0, flower: 0, grades: createEmptyDurianGradeWeights(0), total: 0, amount: 0, count: 0 };
@@ -7706,7 +7708,11 @@ function getPilePersonalSummaries(records) {
     summaries.set(pileKey, existing);
   });
 
-  return Array.from(summaries.values()).sort((a, b) => Number(a.pile) - Number(b.pile));
+  return Array.from(summaries.values()).sort((a, b) => {
+    if (a.pile === "-") return 1;
+    if (b.pile === "-") return -1;
+    return a.pile - b.pile;
+  });
 }
 
 function renderPersonalReport(moduleItem) {
@@ -7870,27 +7876,29 @@ function renderPersonalReport(moduleItem) {
   `;
 }
 
-function renderPersonalDailyRow(item) {
+function renderPersonalDailyRow(item, fruitId = personalReportFruitFilter) {
+  const isDurian = fruitId === "durian";
   return `
     <tr>
       <td><strong>${escapeHtml(item.date)}</strong></td>
-      <td>${numberText(item.flower)}</td>
-      <td>${numberText(item.water)}</td>
-      <td>${escapeHtml(formatDurianGradeBreakdown(item))}</td>
+      ${isDurian
+        ? DURIAN_GRADES.map((grade) => `<td>${numberText(item.grades[grade])}</td>`).join("")
+        : `<td>${numberText(item.water)}</td><td>${numberText(item.flower)}</td>`}
       <td><strong>${numberText(item.total)}</strong></td>
       <td><strong>${money(item.amount)}</strong></td>
     </tr>
   `;
 }
 
-function renderPersonalPileRow(item) {
+function renderPersonalPileRow(item, fruitId = personalReportFruitFilter) {
+  const isDurian = fruitId === "durian";
   return `
     <tr>
       <td><strong>กอง ${escapeHtml(item.pile)}</strong></td>
       <td>${item.count.toLocaleString("th-TH")}</td>
-      <td>${numberText(item.flower)}</td>
-      <td>${numberText(item.water)}</td>
-      <td>${escapeHtml(formatDurianGradeBreakdown(item))}</td>
+      ${isDurian
+        ? DURIAN_GRADES.map((grade) => `<td>${numberText(item.grades[grade])}</td>`).join("")
+        : `<td>${numberText(item.water)}</td><td>${numberText(item.flower)}</td>`}
       <td><strong>${numberText(item.total)}</strong></td>
       <td><strong>${money(item.amount)}</strong></td>
     </tr>
@@ -7903,6 +7911,7 @@ function buildPersonalReportPayload() {
     employee_id: Number(personalReportEmployeeId),
     start_date: range.startDate,
     end_date: range.endDate,
+    fruit_type: personalReportFruitFilter,
     employees: getEmployees(),
     production_records: getProductionRecords(),
     deduction_records: getAdjustmentRecordsForRange("production", range.startDate, range.endDate)
@@ -7927,6 +7936,9 @@ function bindPersonalReportEvents() {
     const target = event.target;
     if (target.id === "personalReportEmployee") {
       personalReportEmployeeId = target.value;
+    }
+    if (target.id === "personalReportFruit") {
+      personalReportFruitFilter = target.value || "mangosteen";
     }
     if (target.id === "personalReportStartDate") {
       personalReportStartDate = target.value || new Date().toISOString().slice(0, 10);
@@ -11084,6 +11096,7 @@ function renderPersonalReportTabs() {
 }
 
 function renderPersonalReportFilter(context) {
+  const selectedFruit = productionFruitOptions.find((fruit) => fruit.id === personalReportFruitFilter);
   return `
     <section class="panel">
       <form class="personal-report-form" id="personalReportForm">
@@ -11103,6 +11116,21 @@ function renderPersonalReportFilter(context) {
           </select>
         </label>
 
+        ${
+          personalReportActiveTab === "production"
+            ? `
+              <label class="field compact-field">
+                <span>ผลไม้</span>
+                <select id="personalReportFruit" name="fruit_type">
+                  ${productionFruitOptions
+                    .filter((fruit) => productionFruitFieldLabels[fruit.id])
+                    .map((fruit) => `<option value="${escapeHtml(fruit.id)}" ${personalReportFruitFilter === fruit.id ? "selected" : ""}>${escapeHtml(fruit.label)}</option>`)
+                    .join("")}
+                </select>
+              </label>`
+            : ""
+        }
+
         <label class="field compact-field">
           <span>วันที่เริ่ม</span>
           <input id="personalReportStartDate" name="start_date" type="date" value="${escapeHtml(context.range.startDate)}" />
@@ -11113,25 +11141,27 @@ function renderPersonalReportFilter(context) {
           <input id="personalReportEndDate" name="end_date" type="date" value="${escapeHtml(context.range.endDate)}" />
         </label>
 
-        ${
-          personalReportActiveTab === "production"
-            ? `
+        <div class="personal-report-actions">
+          ${
+            personalReportActiveTab === "production"
+              ? `
               <button class="btn btn-outline" id="exportPersonalExcel" type="button" ${context.selectedEmployee ? "" : "disabled"}>
-                Export Excel
+                Export Excel ${escapeHtml(selectedFruit?.label || "ผลผลิต")}
               </button>
               <button class="btn btn-primary report-primary-button" id="exportPersonalPdf" type="button" ${context.selectedEmployee ? "" : "disabled"}>
-                Export PDF รายงานน้ำหนัก
+                Export PDF ${escapeHtml(selectedFruit?.label || "ผลผลิต")}
               </button>
-            `
-            : `
+              `
+              : `
               <button class="btn btn-primary report-primary-button" id="exportPersonalTime" type="button" ${context.selectedEmployee ? "" : "disabled"}>
                 Export
               </button>
-            `
-        }
-        <button class="btn btn-outline" id="togglePersonalExportMenu" type="button" ${context.selectedEmployee ? "" : "disabled"}>
-          Export เพิ่มเติม
-        </button>
+              `
+          }
+          <button class="btn btn-outline" id="togglePersonalExportMenu" type="button" ${context.selectedEmployee ? "" : "disabled"}>
+            Export เพิ่มเติม
+          </button>
+        </div>
       </form>
       ${
         personalReportExportMenuOpen && context.selectedEmployee
@@ -11166,11 +11196,16 @@ function renderPersonalReportFilter(context) {
 
 function renderPersonalProductionSummaryTab(context) {
   const records = context.selectedEmployee
-    ? recordsForPersonalReport(context.selectedEmployee.id, context.range.startDate, context.range.endDate)
+    ? recordsForPersonalReport(context.selectedEmployee.id, context.range.startDate, context.range.endDate, personalReportFruitFilter)
     : [];
   const totals = summarizePersonalRecords(records);
   const dailySummaries = getDailyPersonalSummaries(records);
   const pileSummaries = getPilePersonalSummaries(records);
+  const isDurian = personalReportFruitFilter === "durian";
+  const labels = getProductionFieldLabels(personalReportFruitFilter);
+  const selectedFruitLabel = getProductionFruitLabel(personalReportFruitFilter);
+  const dailyColumnCount = isDurian ? 8 : 5;
+  const pileColumnCount = isDurian ? 9 : 6;
 
   return `
     ${
@@ -11183,12 +11218,14 @@ function renderPersonalProductionSummaryTab(context) {
       <div class="metric-card metric-green">
         <span>น้ำหนักรวม</span>
         <strong>${numberText(totals.total)} กก.</strong>
-        <small>น้ำ ${numberText(totals.water)} | ดอก ${numberText(totals.flower)}</small>
+        <small>${isDurian
+          ? DURIAN_GRADES.map((grade) => `${grade} ${numberText(totals.grades[grade])}`).join(" | ")
+          : `${escapeHtml(labels.waterShort)} ${numberText(totals.water)} | ${escapeHtml(labels.flowerShort)} ${numberText(totals.flower)}`}</small>
       </div>
       <div class="metric-card metric-blue">
         <span>ยอดเงินรวม</span>
         <strong>${money(totals.amount)}</strong>
-        <small>จากรายการของพนักงานที่เลือก</small>
+        <small>${escapeHtml(selectedFruitLabel)}ของพนักงานที่เลือก</small>
       </div>
       <div class="metric-card metric-purple">
         <span>วันที่มีผลงาน</span>
@@ -11210,9 +11247,9 @@ function renderPersonalProductionSummaryTab(context) {
             <thead>
               <tr>
                 <th>วันที่</th>
-                <th>น้ำหนักดอก</th>
-                <th>น้ำหนักน้ำ</th>
-                <th>ทุเรียน A-E</th>
+                ${isDurian
+                  ? DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("")
+                  : `<th>${escapeHtml(labels.water)}</th><th>${escapeHtml(labels.flower)}</th>`}
                 <th>น้ำหนักรวม</th>
                 <th>รวมเป็นเงิน</th>
               </tr>
@@ -11220,8 +11257,8 @@ function renderPersonalProductionSummaryTab(context) {
             <tbody>
               ${
                 dailySummaries.length
-                  ? dailySummaries.map(renderPersonalDailyRow).join("")
-                  : `<tr><td colspan="6" class="empty-cell">ยังไม่มีข้อมูลในช่วงวันที่นี้</td></tr>`
+                  ? dailySummaries.map((item) => renderPersonalDailyRow(item, personalReportFruitFilter)).join("")
+                  : `<tr><td colspan="${dailyColumnCount}" class="empty-cell">ยังไม่มีข้อมูล${escapeHtml(selectedFruitLabel)}ในช่วงวันที่นี้</td></tr>`
               }
             </tbody>
           </table>
@@ -11236,9 +11273,9 @@ function renderPersonalProductionSummaryTab(context) {
               <tr>
                 <th>กอง</th>
                 <th>จำนวนรายการ</th>
-                <th>น้ำหนักดอก</th>
-                <th>น้ำหนักน้ำ</th>
-                <th>ทุเรียน A-E</th>
+                ${isDurian
+                  ? DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("")
+                  : `<th>${escapeHtml(labels.water)}</th><th>${escapeHtml(labels.flower)}</th>`}
                 <th>น้ำหนักรวม</th>
                 <th>รวมเป็นเงิน</th>
               </tr>
@@ -11246,8 +11283,8 @@ function renderPersonalProductionSummaryTab(context) {
             <tbody>
               ${
                 pileSummaries.length
-                  ? pileSummaries.map(renderPersonalPileRow).join("")
-                  : `<tr><td colspan="7" class="empty-cell">ยังไม่มีข้อมูลตามกองในช่วงวันที่นี้</td></tr>`
+                  ? pileSummaries.map((item) => renderPersonalPileRow(item, personalReportFruitFilter)).join("")
+                  : `<tr><td colspan="${pileColumnCount}" class="empty-cell">ยังไม่มีข้อมูล${escapeHtml(selectedFruitLabel)}ตามกองในช่วงวันที่นี้</td></tr>`
               }
             </tbody>
           </table>
@@ -11402,6 +11439,9 @@ function bindPersonalReportEvents() {
     if (target.id === "personalReportEmployee") {
       personalReportEmployeeId = target.value;
     }
+    if (target.id === "personalReportFruit") {
+      personalReportFruitFilter = target.value || "mangosteen";
+    }
     if (target.id === "personalReportStartDate") {
       personalReportStartDate = target.value || new Date().toISOString().slice(0, 10);
     }
@@ -11431,7 +11471,8 @@ function bindPersonalReportEvents() {
       productionRecords: recordsForPersonalReport(
         context.selectedEmployee.id,
         context.range.startDate,
-        context.range.endDate
+        context.range.endDate,
+        personalReportActiveTab === "production" ? personalReportFruitFilter : "all"
       ),
       timeRecords: recordsForPersonalTimeReport(
         context.selectedEmployee.id,
@@ -11463,7 +11504,8 @@ function bindPersonalReportEvents() {
       productionRecords: recordsForPersonalReport(
         context.selectedEmployee.id,
         context.range.startDate,
-        context.range.endDate
+        context.range.endDate,
+        "all"
       ),
       menu: "personal",
       messageSetter: setPersonalReportMessage

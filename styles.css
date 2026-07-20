@@ -1962,9 +1962,21 @@ tr:last-child td {
 
 .personal-report-form {
   display: grid;
-  grid-template-columns: minmax(260px, 1.4fr) 180px 180px auto auto;
+  grid-template-columns: minmax(240px, 1.4fr) minmax(150px, 0.8fr) 170px 170px;
   gap: 14px;
   align-items: end;
+}
+
+.personal-report-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.personal-report-actions .btn {
+  min-width: 150px;
+  white-space: nowrap;
 }
 
 .time-entry-form {
