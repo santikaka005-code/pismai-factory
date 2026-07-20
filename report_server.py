@@ -7,6 +7,7 @@ import base64
 import math
 import mimetypes
 import os
+import re
 import secrets
 import threading
 import time
@@ -589,6 +590,18 @@ def live_state_row(table: str, payload: dict) -> dict:
 def live_state_to_client(table: str, row: dict) -> dict:
     raw = row.get("raw_payload") if table != "audit_logs" else row.get("metadata")
     if isinstance(raw, dict):
+        if table == "audit_logs":
+            return {
+                **raw,
+                "id": row.get("id", raw.get("id")),
+                "action": row.get("action") or raw.get("action"),
+                "module": row.get("module") or raw.get("module"),
+                "detail": row.get("description") or raw.get("detail") or raw.get("description"),
+                "description": row.get("description") or raw.get("description") or raw.get("detail"),
+                "created_by": row.get("created_by") or raw.get("created_by"),
+                "user_fullname": row.get("user_fullname") or raw.get("user_fullname"),
+                "created_at": row.get("created_at") or raw.get("created_at"),
+            }
         return {**raw, "id": row.get("id", raw.get("id"))}
     return row
 
@@ -4220,6 +4233,195 @@ class ReportHandler(BaseHTTPRequestHandler):
                     "record_ids": record_ids,
                 }
             )
+            return
+
+        production_record_match = re.fullmatch(r"/api/production-records/(\d+)", parsed.path)
+        if production_record_match:
+            actor = accounting_actor(self, 4)
+            if not actor:
+                self.send_json({"error": "C4 or higher session is required."}, 403)
+                return
+            record_id = int(production_record_match.group(1))
+            incoming = payload.get("record")
+            reason = str(payload.get("reason", "")).strip()
+            if not isinstance(incoming, dict) or len(reason) < 3:
+                self.send_json({"error": "Record and edit reason are required."}, 400)
+                return
+
+            status, existing_rows = supabase_request(
+                "GET",
+                f"production_records?id=eq.{record_id}&select=*&limit=1",
+            )
+            if status >= 400:
+                self.send_json({"error": existing_rows}, status)
+                return
+            if not isinstance(existing_rows, list) or not existing_rows:
+                self.send_json({"error": "Production record was not found."}, 404)
+                return
+
+            existing_row = existing_rows[0]
+            before = live_state_to_client("production_records", existing_row)
+            expected_updated_at = str(payload.get("expected_updated_at") or "")
+            current_updated_at = str(before.get("updated_at") or before.get("created_at") or "")
+            if expected_updated_at and expected_updated_at != current_updated_at:
+                self.send_json(
+                    {"error": "ข้อมูลรายการนี้ถูกแก้ไขจากเครื่องอื่นแล้ว กรุณาโหลดข้อมูลใหม่ก่อนแก้ไขอีกครั้ง"},
+                    409,
+                )
+                return
+            actor_status, actor_rows = supabase_request(
+                "GET",
+                f"account_users?id=eq.{quote(str(actor.get('sub', '')))}&select=username,fullname,user_level&limit=1",
+            )
+            actor_account = actor_rows[0] if actor_status < 400 and isinstance(actor_rows, list) and actor_rows else {}
+            actor_name = str(actor_account.get("fullname") or actor.get("username") or "System")
+            actor_username = str(actor_account.get("username") or actor.get("username") or "")
+
+            protected_record = {
+                **incoming,
+                "id": record_id,
+                "fruit_type": before.get("fruit_type") or "mangosteen",
+                "created_by": before.get("created_by"),
+                "created_at": before.get("created_at"),
+                "updated_by": actor_name,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            }
+            record_date = str(protected_record.get("record_date") or protected_record.get("date") or "")
+            pile_number = production_pile_number(protected_record)
+            if (
+                not re.fullmatch(r"\d{4}-\d{2}-\d{2}", record_date)
+                or record_date > datetime.utcnow().date().isoformat()
+                or not str(protected_record.get("emp_code") or "").strip()
+                or pile_number not in [1, 2, 3, 4, 5]
+            ):
+                self.send_json({"error": "Invalid production date, employee, or pile."}, 400)
+                return
+
+            def valid_edit_weight(value) -> bool:
+                numeric = safe_float(value)
+                return numeric >= 0 and abs(numeric * 10 - round(numeric * 10)) < 0.000001
+
+            if protected_record["fruit_type"] == "durian":
+                grade_weights = protected_record.get("grade_weights") or {}
+                if not all(valid_edit_weight(grade_weights.get(grade)) for grade in ["A", "B", "C", "D", "E"]):
+                    self.send_json({"error": "Durian grade weights must be non-negative with one decimal place."}, 400)
+                    return
+                grade_rates = before.get("grade_rates") or {}
+                grade_amounts = {
+                    grade: round(safe_float(grade_weights.get(grade)) * safe_float(grade_rates.get(grade)), 2)
+                    for grade in ["A", "B", "C", "D", "E"]
+                }
+                protected_record.update({
+                    "grade_rates": grade_rates,
+                    "grade_amounts": grade_amounts,
+                    "total_weight": round(sum(safe_float(grade_weights.get(grade)) for grade in grade_amounts), 2),
+                    "total_amount": round(sum(grade_amounts.values()), 2),
+                    "grand_total": round(sum(grade_amounts.values()), 2),
+                    "water_weight": 0,
+                    "flower_weight": 0,
+                })
+            else:
+                water_weight = safe_float(protected_record.get("water_weight", protected_record.get("water")))
+                flower_weight = safe_float(protected_record.get("flower_weight", protected_record.get("flower")))
+                if not valid_edit_weight(water_weight) or not valid_edit_weight(flower_weight):
+                    self.send_json({"error": "Production weights must be non-negative with one decimal place."}, 400)
+                    return
+                water_rate = safe_float(before.get("water_rate"))
+                flower_rate = safe_float(before.get("flower_rate"))
+                water_amount = round(water_weight * water_rate, 2)
+                flower_amount = round(flower_weight * flower_rate, 2)
+                protected_record.update({
+                    "water_weight": water_weight,
+                    "flower_weight": flower_weight,
+                    "water": water_weight,
+                    "flower": flower_weight,
+                    "water_rate": water_rate,
+                    "flower_rate": flower_rate,
+                    "water_amount": water_amount,
+                    "flower_amount": flower_amount,
+                    "water_total": water_amount,
+                    "flower_total": flower_amount,
+                    "total_weight": round(water_weight + flower_weight, 2),
+                    "total_amount": round(water_amount + flower_amount, 2),
+                    "grand_total": round(water_amount + flower_amount, 2),
+                })
+            converted = live_state_row("production_records", protected_record)
+            converted.pop("id", None)
+            status, updated_rows = supabase_request(
+                "PATCH",
+                f"production_records?id=eq.{record_id}",
+                converted,
+                prefer="return=representation",
+            )
+            if status >= 400:
+                self.send_json({"error": updated_rows}, status)
+                return
+            updated_row = updated_rows[0] if isinstance(updated_rows, list) and updated_rows else None
+            if not updated_row:
+                self.send_json({"error": "Production record update returned no row."}, 500)
+                return
+            after = live_state_to_client("production_records", updated_row)
+            tracked_fields = [
+                "record_date", "emp_code", "employee_name", "fruit_type", "pile_no",
+                "water_weight", "flower_weight", "grade_weights", "total_weight", "total_amount",
+            ]
+            changed_fields = [field for field in tracked_fields if before.get(field) != after.get(field)]
+            if not changed_fields:
+                rollback = {key: value for key, value in existing_row.items() if key != "id"}
+                supabase_request(
+                    "PATCH",
+                    f"production_records?id=eq.{record_id}",
+                    rollback,
+                    prefer="return=minimal",
+                )
+                self.send_json({"error": "No production values were changed."}, 400)
+                return
+
+            audit_created_at = datetime.utcnow().isoformat() + "Z"
+            audit_description = f"แก้ไขผลผลิต #{record_id} รหัส {after.get('emp_code', '-')} เหตุผล: {reason}"
+            audit_row = {
+                "action": "UPDATE_PRODUCTION",
+                "module": "production",
+                "description": audit_description,
+                "created_by": actor_username,
+                "user_fullname": actor_name,
+                "ip_address": self.client_address[0] if self.client_address else None,
+                "created_at": audit_created_at,
+                "metadata": {
+                    "action": "UPDATE_PRODUCTION",
+                    "module": "production",
+                    "detail": audit_description,
+                    "description": audit_description,
+                    "created_by": actor_username,
+                    "user_fullname": actor_name,
+                    "username": actor_username,
+                    "role": actor_account.get("user_level") or actor.get("level", "C4"),
+                    "created_at": audit_created_at,
+                    "record_id": record_id,
+                    "reason": reason,
+                    "changed_fields": changed_fields,
+                    "before": before,
+                    "after": after,
+                    "actor_level": actor.get("level", "C4"),
+                },
+            }
+            audit_status, audit_result = supabase_request(
+                "POST",
+                "audit_logs",
+                audit_row,
+                prefer="return=representation",
+            )
+            if audit_status >= 400:
+                rollback = {key: value for key, value in existing_row.items() if key != "id"}
+                supabase_request(
+                    "PATCH",
+                    f"production_records?id=eq.{record_id}",
+                    rollback,
+                    prefer="return=minimal",
+                )
+                self.send_json({"error": "Audit log failed; production change was rolled back."}, 500)
+                return
+            self.send_json({"data": after, "audit": audit_result})
             return
 
         if parsed.path == "/api/state":

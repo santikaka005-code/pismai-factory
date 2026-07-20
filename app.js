@@ -628,6 +628,14 @@ let selectedProductionFruit = "";
 let productionRecordDate = new Date().toISOString().slice(0, 10);
 let productionMessage = "";
 let productionMessageType = "success";
+let productionEditorOpen = false;
+let productionEditorDate = new Date().toISOString().slice(0, 10);
+let productionEditorFruit = "mangosteen";
+let productionEditorEmployeeSearch = "";
+let editingProductionRecordId = null;
+let productionEditorSaving = false;
+let productionEditorMessage = "";
+let productionEditorMessageType = "success";
 let auditLogUnlocked = false;
 let auditLogMessage = "";
 let auditLogSearch = "";
@@ -1068,6 +1076,11 @@ function canManageEmployees(user) {
 
 function canDeleteEmployees(user) {
   return ["C5", "C6", "C7"].includes(getUserLevel(user)) || isTopLevelUser(user);
+}
+
+function canEditProductionRecords(user) {
+  const levelNumber = Number(String(getUserLevel(user)).replace(/\D/g, "")) || 1;
+  return levelNumber >= 4;
 }
 
 function canExportFullDetails(user) {
@@ -3438,7 +3451,7 @@ function isValidProductionRecordDate(value) {
 function buildProductionRecord(payload, user, existingRecord = null) {
   const now = new Date();
   const recordDate = payload.record_date || existingRecord?.record_date || now.toISOString().slice(0, 10);
-  const recordTime = now.toTimeString().slice(0, 8);
+  const recordTime = existingRecord?.record_time || now.toTimeString().slice(0, 8);
   const fruitType = payload.fruit_type || existingRecord?.fruit_type || "mangosteen";
   const labels = getProductionFieldLabels(fruitType);
   const base = existingRecord || {};
@@ -3452,8 +3465,10 @@ function buildProductionRecord(payload, user, existingRecord = null) {
     const missingRates = [];
     DURIAN_GRADES.forEach((grade) => {
       const rateRecord = apiGetCurrentProductionRate(fruitType, `grade_${grade}`, recordDate);
-      if (gradeWeights[grade] > 0 && !rateRecord) missingRates.push(`เกรด ${grade}`);
-      gradeRates[grade] = Number(rateRecord?.rate || 0);
+      const preservedRate = Number(existingRecord?.grade_rates?.[grade]);
+      const rate = rateRecord ? Number(rateRecord.rate) : preservedRate;
+      if (gradeWeights[grade] > 0 && (!Number.isFinite(rate) || rate <= 0)) missingRates.push(`เกรด ${grade}`);
+      gradeRates[grade] = Number.isFinite(rate) ? rate : 0;
       gradeAmounts[grade] = gradeWeights[grade] * gradeRates[grade];
     });
     if (missingRates.length) {
@@ -3472,6 +3487,9 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       fruit_type: fruitType,
       employee_id: payload.employee.id,
       emp_code: payload.employee.emp_code,
+      employee_name: payload.employee.fullname,
+      fullname: payload.employee.fullname,
+      pay_group: payload.employee.pay_group || existingRecord?.pay_group || "",
       pile_no: pileNo,
       pile: pileNo,
       date: recordDate,
@@ -3505,19 +3523,21 @@ function buildProductionRecord(payload, user, existingRecord = null) {
   const waterRateRecord = apiGetCurrentProductionRate(fruitType, "water", recordDate);
   const flowerRateRecord = apiGetCurrentProductionRate(fruitType, "flower", recordDate);
 
-  if (!waterRateRecord || !flowerRateRecord) {
+  const waterRate = waterRateRecord ? Number(waterRateRecord.rate) : Number(existingRecord?.water_rate);
+  const flowerRate = flowerRateRecord ? Number(flowerRateRecord.rate) : Number(existingRecord?.flower_rate);
+  const hasWaterRate = Number.isFinite(waterRate) && waterRate > 0;
+  const hasFlowerRate = Number.isFinite(flowerRate) && flowerRate > 0;
+
+  if (!hasWaterRate || !hasFlowerRate) {
     const missing = [
-      !waterRateRecord ? labels.water : "",
-      !flowerRateRecord ? labels.flower : ""
+      !hasWaterRate ? labels.water : "",
+      !hasFlowerRate ? labels.flower : ""
     ].filter(Boolean).join(", ");
     throw new Error(
       `ยังไม่ได้ตั้งอัตราค่าจ้างสำหรับ ${missing} ` +
       `(วันที่เริ่มใช้ต้องไม่เกิน ${recordDate}) ตั้งเพียงครั้งเดียวแล้วระบบจะใช้ต่อเนื่องจนกว่าจะเปลี่ยนเรท`
     );
   }
-
-  const waterRate = Number(waterRateRecord.rate);
-  const flowerRate = Number(flowerRateRecord.rate);
 
   const waterWeight = Number(payload.water_weight);
   const flowerWeight = Number(payload.flower_weight);
@@ -3532,6 +3552,9 @@ function buildProductionRecord(payload, user, existingRecord = null) {
     fruit_type: fruitType,
     employee_id: payload.employee.id,
     emp_code: payload.employee.emp_code,
+    employee_name: payload.employee.fullname,
+    fullname: payload.employee.fullname,
+    pay_group: payload.employee.pay_group || existingRecord?.pay_group || "",
     pile_no: pileNo,
     date: recordDate,
     shift: payload.shift || existingRecord?.shift || "",
@@ -6025,6 +6048,7 @@ function getAuditLogActionLabel(action) {
     UPDATE_ACCOUNT: "แก้ไขบัญชีเข้าใช้งาน",
     DELETE_ACCOUNT: "ลบบัญชีเข้าใช้งาน",
     START_SESSION: "เริ่มกองงาน",
+    UPDATE_PRODUCTION: "แก้ไขข้อมูลผลผลิต",
     UPDATE_TIME_RECORD: "แก้ไขเวลาทำงาน",
     DELETE_TIME_RECORD: "ลบเวลาทำงาน",
     EXPORT_DATABASE_BACKUP: "ส่งออกข้อมูลสำรอง",
@@ -6521,10 +6545,13 @@ function bindPileManagementEvents(user) {
   });
 }
 function renderProductionManagement(user, moduleItem) {
+  if (productionEditorOpen) {
+    return renderProductionEditor(user, moduleItem);
+  }
   const selectedFruit = productionFruitOptions.find((fruit) => fruit.id === selectedProductionFruit);
 
   if (!selectedFruit) {
-    return renderProductionFruitMenu();
+    return renderProductionFruitMenu(user);
   }
 
   if (!productionFruitFieldLabels[selectedFruit.id]) {
@@ -6571,7 +6598,7 @@ function renderProductionManagement(user, moduleItem) {
   `;
 }
 
-function renderProductionFruitMenu() {
+function renderProductionFruitMenu(user) {
   return `
     <section class="panel">
       <div class="panel-head">
@@ -6579,6 +6606,7 @@ function renderProductionFruitMenu() {
           <h2>เลือกผลไม้สำหรับบันทึกผลผลิต</h2>
           <p>แต่ละผลไม้สามารถมีฟอร์มและข้อมูลที่ต้องเก็บต่างกัน เลือกผลไม้ก่อนเริ่มบันทึก</p>
         </div>
+        ${canEditProductionRecords(user) ? `<button class="btn btn-outline" data-open-production-editor type="button">แก้ไขข้อมูลผลผลิต</button>` : ""}
       </div>
       <div class="production-fruit-grid">
         ${productionFruitOptions
@@ -6595,6 +6623,206 @@ function renderProductionFruitMenu() {
       </div>
     </section>
   `;
+}
+
+function getProductionEditorRecords() {
+  const search = productionEditorEmployeeSearch.trim().toLocaleLowerCase("th-TH");
+  return getProductionRecords()
+    .filter((record) => {
+      if (getRecordDate(record) !== productionEditorDate) return false;
+      if (productionFruitTypeForRecord(record) !== productionEditorFruit) return false;
+      if (!search) return true;
+      const employee = getEmployees().find((item) => Number(item.id) === Number(record.employee_id));
+      return [record.emp_code, record.employee_name, employee?.fullname, record.created_by]
+        .some((value) => String(value || "").toLocaleLowerCase("th-TH").includes(search));
+    })
+    .sort((a, b) => {
+      const timeCompare = String(a.record_time || "").localeCompare(String(b.record_time || ""));
+      if (timeCompare) return timeCompare;
+      const codeCompare = String(a.emp_code || "").localeCompare(String(b.emp_code || ""), undefined, { numeric: true });
+      if (codeCompare) return codeCompare;
+      return (normalizeProductionPileNumber(a.pile_no ?? a.pile) || 0) - (normalizeProductionPileNumber(b.pile_no ?? b.pile) || 0);
+    });
+}
+
+function renderProductionEditor(user, moduleItem) {
+  if (!canEditProductionRecords(user)) {
+    return `<section class="panel"><div class="alert alert-error">หน้านี้อนุญาตเฉพาะบัญชีระดับ C4 ขึ้นไป</div></section>`;
+  }
+
+  const records = getProductionEditorRecords();
+  const editingRecord = getProductionRecords().find((record) => Number(record.id) === Number(editingProductionRecordId));
+  const labels = getProductionFieldLabels(productionEditorFruit);
+  const isDurian = productionEditorFruit === "durian";
+  const employees = getEmployees().slice().sort((a, b) => String(a.emp_code).localeCompare(String(b.emp_code), undefined, { numeric: true }));
+  const editEmployeeId = editingRecord
+    ? employees.find((employee) => String(employee.emp_code) === String(editingRecord.emp_code))?.id || editingRecord.employee_id
+    : "";
+
+  return `
+    <section class="summary-page production-editor-page">
+      <div class="summary-header">
+        <div>
+          <h2>แก้ไขข้อมูลผลผลิต</h2>
+          <p>สิทธิ์ C4 ขึ้นไป ทุกการแก้ไขต้องระบุเหตุผลและถูกบันทึกค่าเดิมกับค่าใหม่ใน Audit Log</p>
+        </div>
+        <button class="btn btn-outline" data-close-production-editor type="button">กลับหน้าเลือกผลไม้</button>
+      </div>
+
+      ${productionEditorMessage ? `<div class="alert ${productionEditorMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(productionEditorMessage)}</div>` : ""}
+
+      <section class="panel production-editor-filters">
+        <label class="field compact-field">
+          <span>วันที่</span>
+          <input id="productionEditorDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionEditorDate)}" />
+        </label>
+        <label class="field compact-field">
+          <span>ผลไม้</span>
+          <select id="productionEditorFruit">
+            ${productionFruitOptions.filter((fruit) => productionFruitFieldLabels[fruit.id]).map((fruit) => `<option value="${escapeHtml(fruit.id)}" ${fruit.id === productionEditorFruit ? "selected" : ""}>${escapeHtml(fruit.label)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="field compact-field production-editor-search">
+          <span>ค้นหาพนักงานหรือผู้บันทึก</span>
+          <input id="productionEditorSearch" type="search" value="${escapeHtml(productionEditorEmployeeSearch)}" placeholder="รหัส ชื่อ หรือผู้บันทึก" autocomplete="off" />
+        </label>
+        <span class="summary-mode-pill">${records.length.toLocaleString("th-TH")} รายการ</span>
+      </section>
+
+      ${editingRecord ? `
+        <section class="panel production-edit-panel">
+          <div class="panel-head">
+            <div>
+              <h3>แก้ไขรายการ #${editingRecord.id}</h3>
+              <p>ข้อมูลเดิมบันทึกโดย ${escapeHtml(editingRecord.created_by || "-")} เวลา ${escapeHtml(editingRecord.record_time || "-")}</p>
+            </div>
+            <button class="btn btn-outline btn-small" data-cancel-production-edit type="button">ยกเลิก</button>
+          </div>
+          <form id="productionEditForm" class="production-edit-form">
+            <label class="field compact-field"><span>วันที่ผลผลิต</span><input name="record_date" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(getRecordDate(editingRecord))}" required /></label>
+            <label class="field compact-field"><span>พนักงาน</span><select name="employee_id" required>${employees.map((employee) => `<option value="${employee.id}" ${Number(employee.id) === Number(editEmployeeId) ? "selected" : ""}>${escapeHtml(employee.emp_code)} - ${escapeHtml(employee.fullname)}</option>`).join("")}</select></label>
+            <label class="field compact-field"><span>กอง</span><select name="pile_no">${[1,2,3,4,5].map((pile) => `<option value="${pile}" ${Number(editingRecord.pile_no ?? editingRecord.pile) === pile ? "selected" : ""}>กอง ${pile}</option>`).join("")}</select></label>
+            ${isDurian
+              ? DURIAN_GRADES.map((grade) => `<label class="field compact-field"><span>เกรด ${grade} (กก.)</span><input name="grade_${grade}" type="number" min="0" step="0.1" value="${Number(getRecordGradeWeights(editingRecord)[grade] || 0)}" required /></label>`).join("")
+              : `<label class="field compact-field"><span>${escapeHtml(labels.water)} (กก.)</span><input name="water_weight" type="number" min="0" step="0.1" value="${Number(editingRecord.water_weight || editingRecord.water || 0)}" required /></label><label class="field compact-field"><span>${escapeHtml(labels.flower)} (กก.)</span><input name="flower_weight" type="number" min="0" step="0.1" value="${Number(editingRecord.flower_weight || editingRecord.flower || 0)}" required /></label>`}
+            <label class="field production-edit-reason"><span>เหตุผลการแก้ไข</span><textarea name="reason" rows="2" minlength="3" placeholder="ระบุสาเหตุเพื่อบันทึกใน Log" required></textarea></label>
+            <button class="btn btn-primary production-edit-submit" type="submit" ${productionEditorSaving ? "disabled" : ""}>${productionEditorSaving ? "กำลังบันทึก..." : "บันทึกการแก้ไข"}</button>
+          </form>
+        </section>` : ""}
+
+      <section class="table-card">
+        <div class="table-heading">รายการ${escapeHtml(getProductionFruitLabel(productionEditorFruit))} วันที่ ${escapeHtml(productionEditorDate)}</div>
+        <div class="table-scroll">
+          <table class="production-editor-table">
+            <thead><tr><th>เวลา</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th><th>${isDurian ? "น้ำหนักเกรด A-E" : `${escapeHtml(labels.water)} / ${escapeHtml(labels.flower)}`}</th><th>รวมเงิน</th><th>ผู้บันทึก</th><th>จัดการ</th></tr></thead>
+            <tbody>${records.length ? records.map((record) => {
+              const employee = employees.find((item) => Number(item.id) === Number(record.employee_id));
+              const weights = isDurian
+                ? DURIAN_GRADES.map((grade) => `${grade} ${numberText(getRecordGradeWeights(record)[grade])}`).join(" · ")
+                : `${numberText(record.water_weight || record.water || 0)} / ${numberText(record.flower_weight || record.flower || 0)}`;
+              return `<tr class="${Number(record.id) === Number(editingProductionRecordId) ? "is-editing" : ""}"><td>${escapeHtml(record.record_time || "-")}</td><td><strong>${escapeHtml(record.emp_code || "-")}</strong></td><td>${escapeHtml(record.employee_name || employee?.fullname || "-")}</td><td>${normalizeProductionPileNumber(record.pile_no ?? record.pile) || "-"}</td><td>${escapeHtml(weights)}</td><td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td><td>${escapeHtml(record.created_by || "-")}</td><td><button class="btn btn-small btn-outline" data-select-production-edit="${record.id}" type="button">แก้ไข</button></td></tr>`;
+            }).join("") : `<tr><td colspan="8" class="empty-cell">ไม่พบข้อมูลตามตัวกรอง</td></tr>`}</tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  `;
+}
+
+async function saveProductionEditorRecord(user, formElement) {
+  if (!canEditProductionRecords(user)) {
+    productionEditorMessage = "บัญชีนี้ไม่มีสิทธิ์แก้ไขข้อมูลผลผลิต";
+    productionEditorMessageType = "error";
+    render();
+    return;
+  }
+  const existingRecord = getProductionRecords().find((record) => Number(record.id) === Number(editingProductionRecordId));
+  if (!existingRecord) {
+    productionEditorMessage = "ไม่พบรายการที่ต้องการแก้ไข กรุณาโหลดข้อมูลใหม่";
+    productionEditorMessageType = "error";
+    render();
+    return;
+  }
+
+  const form = new FormData(formElement);
+  const employee = getEmployees().find((item) => Number(item.id) === Number(form.get("employee_id")));
+  const reason = String(form.get("reason") || "").trim();
+  const recordDate = String(form.get("record_date") || "");
+  const pileNo = Number(form.get("pile_no"));
+  if (!employee || !isValidProductionRecordDate(recordDate) || !Number.isInteger(pileNo) || pileNo < 1 || pileNo > 5 || reason.length < 3) {
+    productionEditorMessage = "กรุณาตรวจสอบวันที่ พนักงาน กอง และระบุเหตุผลอย่างน้อย 3 ตัวอักษร";
+    productionEditorMessageType = "error";
+    render();
+    return;
+  }
+
+  const fruitType = productionFruitTypeForRecord(existingRecord);
+  const payload = { employee, fruit_type: fruitType, record_date: recordDate, pile_no: pileNo };
+  if (fruitType === "durian") {
+    const gradeWeights = {};
+    for (const grade of DURIAN_GRADES) {
+      const raw = String(form.get(`grade_${grade}`) ?? "").trim();
+      if (!isOneDecimalWeightInput(raw) || Number(raw) < 0) {
+        productionEditorMessage = `น้ำหนักเกรด ${grade} ต้องเป็นเลขไม่ติดลบและมีทศนิยมไม่เกิน 1 ตำแหน่ง`;
+        productionEditorMessageType = "error";
+        render();
+        return;
+      }
+      gradeWeights[grade] = Number(raw);
+    }
+    if (getDurianGradeTotal(gradeWeights) <= 0) {
+      productionEditorMessage = "ทุเรียนต้องมีน้ำหนักอย่างน้อย 1 เกรด";
+      productionEditorMessageType = "error";
+      render();
+      return;
+    }
+    payload.grade_weights = gradeWeights;
+  } else {
+    const waterRaw = String(form.get("water_weight") ?? "").trim();
+    const flowerRaw = String(form.get("flower_weight") ?? "").trim();
+    if (!isOneDecimalWeightInput(waterRaw) || !isOneDecimalWeightInput(flowerRaw) || Number(waterRaw) < 0 || Number(flowerRaw) < 0) {
+      productionEditorMessage = "น้ำหนักต้องเป็นเลขไม่ติดลบและมีทศนิยมไม่เกิน 1 ตำแหน่ง";
+      productionEditorMessageType = "error";
+      render();
+      return;
+    }
+    payload.water_weight = Number(waterRaw);
+    payload.flower_weight = Number(flowerRaw);
+  }
+
+  try {
+    const updatedRecord = buildProductionRecord(payload, user, existingRecord);
+    productionEditorSaving = true;
+    productionEditorMessage = `กำลังบันทึกการแก้ไขรายการ #${existingRecord.id}...`;
+    productionEditorMessageType = "success";
+    render();
+    const response = await cloudApiRequest(`/api/production-records/${existingRecord.id}`, {
+      method: "POST",
+      body: JSON.stringify({
+        record: updatedRecord,
+        reason,
+        expected_updated_at: existingRecord.updated_at || existingRecord.created_at,
+        actor_fullname: user.fullname
+      })
+    });
+    const merged = getProductionRecords().map((record) => Number(record.id) === Number(existingRecord.id) ? response.data : record);
+    applyingCloudState = true;
+    localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
+    applyingCloudState = false;
+    await refreshLiveStateFromCloud({ renderWhenIdle: false });
+    productionEditorDate = getRecordDate(response.data);
+    productionEditorFruit = productionFruitTypeForRecord(response.data);
+    editingProductionRecordId = null;
+    productionEditorMessage = `บันทึกการแก้ไขรายการ #${existingRecord.id} และ Audit Log แล้ว`;
+    productionEditorMessageType = "success";
+  } catch (error) {
+    productionEditorMessage = error instanceof Error ? error.message : "บันทึกการแก้ไขไม่สำเร็จ";
+    productionEditorMessageType = "error";
+  } finally {
+    productionEditorSaving = false;
+    applyingCloudState = false;
+    render();
+  }
 }
 
 function renderProductionFruitPlaceholder(fruit) {
@@ -6614,7 +6842,7 @@ function renderProductionFruitPlaceholder(fruit) {
 
 function renderProductionView(user, view) {
   if (view === "batch-entry") return renderBatchEntry();
-  if (view === "summary") return renderProductionSummary();
+  if (view === "summary") return renderProductionSummary(user);
   return renderProductionFast(user, {
     label: "กรอกเร็ว",
     description: "บันทึกผลผลิตประจำวัน"
@@ -6727,7 +6955,7 @@ function renderDurianBatchEntry() {
     </section>`;
 }
 
-function renderProductionSummary() {
+function renderProductionSummary(user) {
   const labels = getProductionFieldLabels();
   const records = productionRecordsForActiveSession();
   const totals = getProductionTotals(records);
@@ -6754,7 +6982,7 @@ function renderProductionSummary() {
         ...record,
         employee_name: employeeMap.get(record.employee_id)?.fullname || ""
       })),
-      true
+      canEditProductionRecords(user)
     )}
   `;
 }
@@ -7294,6 +7522,80 @@ function setProductionMessage(message, type = "success") {
 }
 
 function bindProductionManagementEvents(user) {
+  document.querySelector("[data-open-production-editor]")?.addEventListener("click", () => {
+    if (!canEditProductionRecords(user)) {
+      setProductionMessage("หน้านี้อนุญาตเฉพาะบัญชีระดับ C4 ขึ้นไป", "error");
+      render();
+      return;
+    }
+    productionEditorOpen = true;
+    productionEditorDate = productionRecordDate || new Date().toISOString().slice(0, 10);
+    productionEditorFruit = selectedProductionFruit || "mangosteen";
+    editingProductionRecordId = null;
+    productionEditorMessage = "";
+    render();
+  });
+
+  document.querySelector("[data-close-production-editor]")?.addEventListener("click", () => {
+    productionEditorOpen = false;
+    editingProductionRecordId = null;
+    productionEditorMessage = "";
+    setSelectedProductionFruit("");
+    render();
+  });
+
+  document.querySelector("#productionEditorDate")?.addEventListener("change", (event) => {
+    productionEditorDate = event.target.value || new Date().toISOString().slice(0, 10);
+    editingProductionRecordId = null;
+    productionEditorMessage = "";
+    render();
+  });
+
+  document.querySelector("#productionEditorFruit")?.addEventListener("change", (event) => {
+    productionEditorFruit = event.target.value || "mangosteen";
+    editingProductionRecordId = null;
+    productionEditorMessage = "";
+    render();
+  });
+
+  const productionEditorSearchInput = document.querySelector("#productionEditorSearch");
+  productionEditorSearchInput?.addEventListener("input", (event) => {
+    productionEditorEmployeeSearch = event.target.value;
+  });
+  productionEditorSearchInput?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    editingProductionRecordId = null;
+    render();
+  });
+  productionEditorSearchInput?.addEventListener("change", () => {
+    editingProductionRecordId = null;
+    render();
+  });
+
+  document.querySelectorAll("[data-select-production-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!canEditProductionRecords(user)) return;
+      editingProductionRecordId = Number(button.dataset.selectProductionEdit);
+      productionEditorMessage = "";
+      render();
+      window.setTimeout(() => document.querySelector("#productionEditForm")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+    });
+  });
+
+  document.querySelector("[data-cancel-production-edit]")?.addEventListener("click", () => {
+    editingProductionRecordId = null;
+    productionEditorMessage = "";
+    render();
+  });
+
+  document.querySelector("#productionEditForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveProductionEditorRecord(user, event.currentTarget);
+  });
+
+  if (productionEditorOpen) return;
+
   if (productionView === "fast-entry" && document.querySelector("#productionFastForm")) {
     bindProductionFastEvents(user);
   }
@@ -7453,7 +7755,19 @@ function bindProductionManagementEvents(user) {
 
   document.querySelectorAll("[data-edit-production]").forEach((button) => {
     button.addEventListener("click", () => {
-      editProductionRecord(Number(button.dataset.editProduction), user);
+      if (!canEditProductionRecords(user)) {
+        setProductionMessage("แก้ไขข้อมูลผลผลิตได้ตั้งแต่ระดับ C4 ขึ้นไป", "error");
+        render();
+        return;
+      }
+      const record = getProductionRecords().find((item) => Number(item.id) === Number(button.dataset.editProduction));
+      if (!record) return;
+      productionEditorOpen = true;
+      productionEditorDate = getRecordDate(record);
+      productionEditorFruit = productionFruitTypeForRecord(record);
+      editingProductionRecordId = record.id;
+      productionEditorMessage = "";
+      render();
     });
   });
 
