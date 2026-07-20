@@ -2674,7 +2674,7 @@ def production_report_weight_labels(payload: dict) -> tuple[str, str]:
     if fruit_id == "mango":
         return "มะม่วงฝา", "มะม่วงหั่นเต๋า"
     if fruit_id == "all":
-        return "น้ำหนักช่อง 1", "น้ำหนักช่อง 2"
+        return "น้ำหนักน้ำ / มะม่วงฝา", "น้ำหนักดอก / มะม่วงหั่นเต๋า"
     return "น้ำหนักน้ำ", "น้ำหนักดอก"
 
 

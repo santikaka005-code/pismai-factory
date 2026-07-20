@@ -5370,6 +5370,7 @@ function getDetailedSettingsPileSummaries(records) {
         pile,
         water: 0,
         flower: 0,
+        fieldTotalsByFruit: {},
         grades: createEmptyDurianGradeWeights(0),
         gradeTotal: 0,
         total: 0,
@@ -5387,6 +5388,7 @@ function getDetailedSettingsPileSummaries(records) {
       pile,
       water: 0,
       flower: 0,
+      fieldTotalsByFruit: {},
       grades: createEmptyDurianGradeWeights(0),
       gradeTotal: 0,
       total: 0,
@@ -5396,8 +5398,16 @@ function getDetailedSettingsPileSummaries(records) {
       fruits: new Set()
     };
     const gradeWeights = getRecordGradeWeights(record);
-    summary.water += Number(record.water_weight || record.water || 0);
-    summary.flower += Number(record.flower_weight || record.flower || 0);
+    const fruitId = productionFruitTypeForRecord(record);
+    const waterWeight = Number(record.water_weight || record.water || 0);
+    const flowerWeight = Number(record.flower_weight || record.flower || 0);
+    summary.water += waterWeight;
+    summary.flower += flowerWeight;
+    if (!isDurianFruit(fruitId)) {
+      summary.fieldTotalsByFruit[fruitId] ||= { water: 0, flower: 0 };
+      summary.fieldTotalsByFruit[fruitId].water += waterWeight;
+      summary.fieldTotalsByFruit[fruitId].flower += flowerWeight;
+    }
     DURIAN_GRADES.forEach((grade) => {
       summary.grades[grade] += gradeWeights[grade];
     });
@@ -5422,7 +5432,24 @@ function settingsPileFruitLabel(fruitId) {
   return productionFruitOptions.find((fruit) => fruit.id === fruitId)?.label || fruitId;
 }
 
-function renderSettingsPileCard(summary) {
+function renderSettingsPileWeightRows(summary, selectedFruit) {
+  const fruitIds = Object.keys(summary.fieldTotalsByFruit);
+  if (!fruitIds.length && selectedFruit !== "all" && !isDurianFruit(selectedFruit)) {
+    fruitIds.push(selectedFruit);
+  }
+  if (!fruitIds.length && selectedFruit === "all") fruitIds.push("mangosteen");
+
+  return fruitIds.flatMap((fruitId) => {
+    const labels = getProductionFieldLabels(fruitId);
+    const totals = summary.fieldTotalsByFruit[fruitId] || { water: 0, flower: 0 };
+    return [
+      `<div><span>${escapeHtml(labels.water)}</span><strong>${numberText(totals.water)} กก.</strong></div>`,
+      `<div><span>${escapeHtml(labels.flower)}</span><strong>${numberText(totals.flower)} กก.</strong></div>`
+    ];
+  }).join("");
+}
+
+function renderSettingsPileCard(summary, selectedFruit) {
   const hasGrades = summary.gradeTotal > 0;
   return `
     <article class="settings-pile-card ${summary.count ? "" : "is-empty"}">
@@ -5435,9 +5462,8 @@ function renderSettingsPileCard(summary) {
         <strong>${numberText(summary.total)} <small>กก.</small></strong>
       </div>
       <div class="settings-pile-breakdown">
-        <div><span>ช่องน้ำหนัก 1</span><strong>${numberText(summary.water)} กก.</strong></div>
-        <div><span>ช่องน้ำหนัก 2</span><strong>${numberText(summary.flower)} กก.</strong></div>
-        <div><span>ทุเรียน A-E</span><strong>${numberText(summary.gradeTotal)} กก.</strong></div>
+        ${renderSettingsPileWeightRows(summary, selectedFruit)}
+        ${hasGrades || isDurianFruit(selectedFruit) ? `<div><span>ทุเรียน A-E</span><strong>${numberText(summary.gradeTotal)} กก.</strong></div>` : ""}
         <div><span>พนักงาน</span><strong>${summary.count ? summary.employees.size : 0} คน</strong></div>
       </div>
       ${hasGrades ? `<div class="settings-pile-grades">${DURIAN_GRADES.map((grade) => `<span>${grade} <strong>${numberText(summary.grades[grade])}</strong></span>`).join("")}</div>` : ""}
@@ -5455,10 +5481,58 @@ function settingsPileRecordBreakdown(record) {
   return `${labels.water}: ${numberText(record.water_weight || record.water || 0)} กก. · ${labels.flower}: ${numberText(record.flower_weight || record.flower || 0)} กก.`;
 }
 
+function repairLegacyThaiText(value) {
+  const text = String(value || "");
+  if (!/(?:à¸|à¹|Ã|Â)/.test(text) || ![...text].every((character) => character.charCodeAt(0) <= 255)) return text;
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
+      Uint8Array.from([...text], (character) => character.charCodeAt(0))
+    );
+    return /[ก-๙]/.test(decoded) ? decoded : text;
+  } catch (_error) {
+    return text;
+  }
+}
+
+function getSettingsPileAbsenceGroups(employees, dayRecords) {
+  const presentEmployeeIds = new Set(dayRecords.map((record) => String(record.employee_id || "")).filter(Boolean));
+  const presentEmployeeCodes = new Set(dayRecords.map((record) => String(record.emp_code || "").trim()).filter(Boolean));
+
+  return primaryPayGroups.map((payGroup) => {
+    const groupEmployees = employees.filter(
+      (employee) => employee.status === "Active" && getEmployeePayGroup(employee) === payGroup
+    );
+    const absentCodes = groupEmployees
+      .filter((employee) => {
+        const id = String(employee.id || "");
+        const code = String(employee.emp_code || "").trim();
+        return !(id && presentEmployeeIds.has(id)) && !(code && presentEmployeeCodes.has(code));
+      })
+      .map((employee) => String(employee.emp_code || "-").trim() || "-")
+      .sort((a, b) => a.localeCompare(b, "th", { numeric: true }));
+    return { payGroup, employeeCount: groupEmployees.length, absentCodes };
+  });
+}
+
+function renderSettingsPileAbsenceGroup(group) {
+  const status = !group.employeeCount
+    ? `<span class="settings-pile-roster-empty">ยังไม่มีรายชื่อ</span>`
+    : group.absentCodes.length
+      ? `<div class="settings-pile-absent-codes">${group.absentCodes.map((code) => `<span>${escapeHtml(code)}</span>`).join("")}</div>`
+      : `<span class="settings-pile-complete">ครบ</span>`;
+  return `
+    <div class="settings-pile-absence-group">
+      <div><strong>${escapeHtml(group.payGroup)}</strong><small>${group.employeeCount.toLocaleString("th-TH")} คน</small></div>
+      ${status}
+    </div>
+  `;
+}
+
 function renderSettingsPileSummary(user, moduleItem) {
   const allRecords = getProductionRecords();
+  const dayRecords = allRecords.filter((record) => getRecordDate(record) === settingsPileSummaryDate);
   const records = filterProductionRecordsByFruit(
-    allRecords.filter((record) => getRecordDate(record) === settingsPileSummaryDate),
+    dayRecords,
     settingsPileSummaryFruit
   ).sort((a, b) => {
     const pileCompare = Number(a.pile_no || a.pile || 0) - Number(b.pile_no || b.pile || 0);
@@ -5468,7 +5542,10 @@ function renderSettingsPileSummary(user, moduleItem) {
   const totalWeight = records.reduce((sum, record) => sum + getRecordTotalWeight(record), 0);
   const totalAmount = records.reduce((sum, record) => sum + Number(record.total_amount || record.grand_total || 0), 0);
   const employeeCount = new Set(records.map((record) => record.employee_id || record.emp_code || record.employee_name).filter(Boolean)).size;
-  const employeeById = new Map(getEmployees().map((employee) => [String(employee.id), employee]));
+  const employees = getEmployees();
+  const employeeById = new Map(employees.map((employee) => [String(employee.id), employee]));
+  const employeeByCode = new Map(employees.map((employee) => [String(employee.emp_code || "").trim(), employee]));
+  const absenceGroups = getSettingsPileAbsenceGroups(employees, dayRecords);
   const fruitOptions = [
     { id: "all", label: "ทุกผลไม้" },
     ...productionFruitOptions
@@ -5523,9 +5600,10 @@ function renderSettingsPileSummary(user, moduleItem) {
           <div><h3>ยอดรวมแต่ละกอง</h3><p class="muted-text">แสดงกอง 1-5 เสมอเพื่อเปรียบเทียบได้ทันที</p></div>
           <span class="badge badge-success">${summaries.filter((summary) => summary.count).length} กองมีข้อมูล</span>
         </div>
-        <div class="settings-pile-grid">${summaries.map(renderSettingsPileCard).join("")}</div>
+        <div class="settings-pile-grid">${summaries.map((summary) => renderSettingsPileCard(summary, settingsPileSummaryFruit)).join("")}</div>
       </section>
 
+      <section class="settings-pile-bottom-grid">
       <section class="table-card settings-pile-detail-card">
         <div class="table-heading">
           <div><strong>รายละเอียดรายการตามกอง</strong><span>${records.length.toLocaleString("th-TH")} รายการ</span></div>
@@ -5539,13 +5617,14 @@ function renderSettingsPileSummary(user, moduleItem) {
               ${
                 records.length
                   ? records.map((record) => {
-                      const employee = employeeById.get(String(record.employee_id));
+                      const employee = employeeById.get(String(record.employee_id)) || employeeByCode.get(String(record.emp_code || "").trim());
+                      const employeeName = repairLegacyThaiText(employee?.fullname || record.employee_name || "");
                       return `
                         <tr>
                           <td data-label="กอง"><span class="settings-pile-number">กอง ${escapeHtml(record.pile_no || record.pile || "-")}</span></td>
                           <td data-label="เวลา">${escapeHtml(record.record_time || "-")}</td>
                           <td data-label="ผลไม้">${escapeHtml(settingsPileFruitLabel(productionFruitTypeForRecord(record)))}</td>
-                          <td data-label="พนักงาน"><strong>${escapeHtml(record.emp_code || "-")}</strong><span class="settings-pile-employee-name">${escapeHtml(record.employee_name || employee?.fullname || "")}</span></td>
+                          <td data-label="พนักงาน"><strong>${escapeHtml(record.emp_code || "-")}</strong><span class="settings-pile-employee-name">${escapeHtml(employeeName)}</span></td>
                           <td class="settings-pile-weight-detail" data-label="รายละเอียดน้ำหนัก">${escapeHtml(settingsPileRecordBreakdown(record))}</td>
                           <td data-label="รวม"><strong>${numberText(getRecordTotalWeight(record))} กก.</strong></td>
                           <td data-label="ยอดเงิน"><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td>
@@ -5558,6 +5637,16 @@ function renderSettingsPileSummary(user, moduleItem) {
             </tbody>
           </table>
         </div>
+      </section>
+      <aside class="panel settings-pile-absence-panel">
+        <div class="settings-pile-absence-head">
+          <span>ตรวจสอบการมา</span>
+          <h3>ผู้ที่ยังไม่มีรายการวันนี้</h3>
+          <p>อ้างอิงรายการทุกผลไม้ วันที่ ${escapeHtml(settingsPileSummaryDate)}</p>
+        </div>
+        <div class="settings-pile-absence-list">${absenceGroups.map(renderSettingsPileAbsenceGroup).join("")}</div>
+        <p class="settings-pile-absence-note">แสดงเฉพาะพนักงานสถานะ Active ที่ยังไม่มีรายการบันทึกในวันนี้</p>
+      </aside>
       </section>
     </section>
   `;

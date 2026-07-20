@@ -3234,6 +3234,110 @@ tr:last-child td {
   border-top: 3px solid #b9d7d1;
 }
 
+.settings-pile-bottom-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-pile-absence-panel {
+  overflow: hidden;
+  border-top: 3px solid #d4a83d;
+  padding: 0;
+}
+
+.settings-pile-absence-head {
+  padding: 20px 20px 16px;
+  background: #fbfaf5;
+}
+
+.settings-pile-absence-head > span {
+  color: #8a6810;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.settings-pile-absence-head h3 {
+  margin: 4px 0 5px;
+  color: #24322f;
+  font-size: 17px;
+}
+
+.settings-pile-absence-head p,
+.settings-pile-absence-note {
+  margin: 0;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.settings-pile-absence-group {
+  padding: 16px 20px;
+  border-top: 1px solid #e7ebe9;
+}
+
+.settings-pile-absence-group > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-pile-absence-group strong {
+  color: #263b36;
+  font-size: 14px;
+}
+
+.settings-pile-absence-group small {
+  color: #7a8985;
+  font-size: 10px;
+}
+
+.settings-pile-absent-codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 11px;
+}
+
+.settings-pile-absent-codes span {
+  min-width: 34px;
+  border: 1px solid #efb7b1;
+  border-radius: 5px;
+  padding: 5px 8px;
+  color: #a5281d;
+  background: #fff3f1;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.settings-pile-complete,
+.settings-pile-roster-empty {
+  display: inline-flex;
+  margin-top: 11px;
+  border-radius: 5px;
+  padding: 6px 9px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.settings-pile-complete {
+  color: #087443;
+  background: #e9f8ef;
+}
+
+.settings-pile-roster-empty {
+  color: #667085;
+  background: #f1f4f3;
+}
+
+.settings-pile-absence-note {
+  border-top: 1px solid #e7ebe9;
+  padding: 14px 20px 17px;
+}
+
 .settings-pile-detail-card .table-heading {
   display: flex;
   align-items: center;
@@ -4454,6 +4558,10 @@ tr:last-child td {
 }
 
 @media (max-width: 900px) {
+  .settings-pile-bottom-grid {
+    grid-template-columns: 1fr;
+  }
+
   .settings-pile-title-row {
     align-items: stretch;
     flex-direction: column;
