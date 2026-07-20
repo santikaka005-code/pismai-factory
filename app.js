@@ -311,6 +311,14 @@ modules.splice(
     hidden: true
   },
   {
+    id: "settings-pile-summary",
+    label: "สรุปตามกอง",
+    roles: ["admin"],
+    description: "ตรวจสอบน้ำหนักและยอดเงินแยกตามกอง พร้อม Export PDF และ Excel",
+    icon: "▦",
+    hidden: true
+  },
+  {
     id: "settings",
     label: "ตั้งค่า",
     roles: ["admin"],
@@ -382,6 +390,7 @@ const adminSettingsModuleIds = new Set([
   "time-employees",
   "wage-rates",
   "pile-management",
+  "settings-pile-summary",
   "account-management",
   "audit-log",
   "backup"
@@ -414,6 +423,7 @@ const levelRouteAccess = {
     "production-employees",
     "time-employees",
     "wage-rates",
+    "settings-pile-summary",
     "accounting-control",
     "secret-room"
   ],
@@ -508,6 +518,10 @@ let wageRateFilter = "all";
 let currentRateDate = new Date().toISOString().slice(0, 10);
 let pileManagementMessage = "";
 let pileManagementMessageType = "success";
+let settingsPileSummaryDate = new Date().toISOString().slice(0, 10);
+let settingsPileSummaryFruit = "all";
+let settingsPileSummaryMessage = "";
+let settingsPileSummaryMessageType = "success";
 let summaryDate = "";
 let summaryExportStartDate = "";
 let summaryExportEndDate = "";
@@ -4063,7 +4077,7 @@ function renderApp(user, route) {
   bindAppEvents(user, moduleItem);
 }
 function renderModuleContent(user, moduleItem) {
-  const settingsSubpageIds = new Set(["employees", "production-employees", "time-employees", "wage-rates", "account-management", "audit-log", "backup"]);
+  const settingsSubpageIds = new Set(["employees", "production-employees", "time-employees", "wage-rates", "settings-pile-summary", "account-management", "audit-log", "backup"]);
   const wrapSettingsSubpage = (content) =>
     settingsSubpageIds.has(moduleItem.id) ? `${renderSettingsBackBar()}${content}` : content;
 
@@ -4111,6 +4125,9 @@ function renderModuleContent(user, moduleItem) {
   }
   if (moduleItem.id === "wage-rates") {
     return wrapSettingsSubpage(renderWageRateForm());
+  }
+  if (moduleItem.id === "settings-pile-summary") {
+    return wrapSettingsSubpage(renderSettingsPileSummary(user, moduleItem));
   }
   if (moduleItem.id === "account-management") {
     return wrapSettingsSubpage(renderAccountManagement(user, moduleItem));
@@ -4172,6 +4189,7 @@ function bindAppEvents(user, moduleItem) {
   if (moduleItem.id === "production-employees") bindEmployeeEvents(user);
   if (moduleItem.id === "time-employees") bindTimeEmployeeEvents(user);
   if (moduleItem.id === "wage-rates") bindWageRateEvents(user);
+  if (moduleItem.id === "settings-pile-summary") bindSettingsPileSummaryEvents(user);
   if (moduleItem.id === "account-management") bindAccountManagementEvents(user);
   if (moduleItem.id === "backup") bindBackupEvents(user);
   if (moduleItem.id === "pile-management") bindPileManagementEvents(user);
@@ -5344,6 +5362,268 @@ function renderSettingsBackBar() {
   `;
 }
 
+function getDetailedSettingsPileSummaries(records) {
+  const summaries = new Map(
+    [1, 2, 3, 4, 5].map((pile) => [
+      pile,
+      {
+        pile,
+        water: 0,
+        flower: 0,
+        grades: createEmptyDurianGradeWeights(0),
+        gradeTotal: 0,
+        total: 0,
+        amount: 0,
+        count: 0,
+        employees: new Set(),
+        fruits: new Set()
+      }
+    ])
+  );
+
+  records.forEach((record) => {
+    const pile = normalizeProductionPileNumber(record.pile_no ?? record.pile) ?? "-";
+    const summary = summaries.get(pile) || {
+      pile,
+      water: 0,
+      flower: 0,
+      grades: createEmptyDurianGradeWeights(0),
+      gradeTotal: 0,
+      total: 0,
+      amount: 0,
+      count: 0,
+      employees: new Set(),
+      fruits: new Set()
+    };
+    const gradeWeights = getRecordGradeWeights(record);
+    summary.water += Number(record.water_weight || record.water || 0);
+    summary.flower += Number(record.flower_weight || record.flower || 0);
+    DURIAN_GRADES.forEach((grade) => {
+      summary.grades[grade] += gradeWeights[grade];
+    });
+    summary.gradeTotal += getDurianGradeTotal(gradeWeights);
+    summary.total += getRecordTotalWeight(record);
+    summary.amount += Number(record.total_amount || record.grand_total || 0);
+    summary.count += 1;
+    summary.employees.add(record.employee_id || record.emp_code || record.employee_name || "-");
+    summary.fruits.add(productionFruitTypeForRecord(record));
+    summaries.set(pile, summary);
+  });
+
+  return [...summaries.values()].sort((a, b) => {
+    if (a.pile === "-") return 1;
+    if (b.pile === "-") return -1;
+    return Number(a.pile) - Number(b.pile);
+  });
+}
+
+function settingsPileFruitLabel(fruitId) {
+  if (!fruitId || fruitId === "all") return "ทุกผลไม้";
+  return productionFruitOptions.find((fruit) => fruit.id === fruitId)?.label || fruitId;
+}
+
+function renderSettingsPileCard(summary) {
+  const hasGrades = summary.gradeTotal > 0;
+  return `
+    <article class="settings-pile-card ${summary.count ? "" : "is-empty"}">
+      <div class="settings-pile-card-head">
+        <div><span>PILE</span><h3>กอง ${escapeHtml(summary.pile)}</h3></div>
+        <span class="settings-pile-count">${summary.count.toLocaleString("th-TH")} รายการ</span>
+      </div>
+      <div class="settings-pile-total">
+        <span>น้ำหนักรวม</span>
+        <strong>${numberText(summary.total)} <small>กก.</small></strong>
+      </div>
+      <div class="settings-pile-breakdown">
+        <div><span>ช่องน้ำหนัก 1</span><strong>${numberText(summary.water)} กก.</strong></div>
+        <div><span>ช่องน้ำหนัก 2</span><strong>${numberText(summary.flower)} กก.</strong></div>
+        <div><span>ทุเรียน A-E</span><strong>${numberText(summary.gradeTotal)} กก.</strong></div>
+        <div><span>พนักงาน</span><strong>${summary.count ? summary.employees.size : 0} คน</strong></div>
+      </div>
+      ${hasGrades ? `<div class="settings-pile-grades">${DURIAN_GRADES.map((grade) => `<span>${grade} <strong>${numberText(summary.grades[grade])}</strong></span>`).join("")}</div>` : ""}
+      <div class="settings-pile-amount"><span>ยอดเงินกองนี้</span><strong>${money(summary.amount)}</strong></div>
+    </article>
+  `;
+}
+
+function settingsPileRecordBreakdown(record) {
+  const fruitId = productionFruitTypeForRecord(record);
+  if (isDurianFruit(fruitId)) {
+    return formatDurianGradeBreakdown(record);
+  }
+  const labels = getProductionFieldLabels(fruitId);
+  return `${labels.water}: ${numberText(record.water_weight || record.water || 0)} กก. · ${labels.flower}: ${numberText(record.flower_weight || record.flower || 0)} กก.`;
+}
+
+function renderSettingsPileSummary(user, moduleItem) {
+  const allRecords = getProductionRecords();
+  const records = filterProductionRecordsByFruit(
+    allRecords.filter((record) => getRecordDate(record) === settingsPileSummaryDate),
+    settingsPileSummaryFruit
+  ).sort((a, b) => {
+    const pileCompare = Number(a.pile_no || a.pile || 0) - Number(b.pile_no || b.pile || 0);
+    return pileCompare || String(a.record_time || "").localeCompare(String(b.record_time || ""));
+  });
+  const summaries = getDetailedSettingsPileSummaries(records);
+  const totalWeight = records.reduce((sum, record) => sum + getRecordTotalWeight(record), 0);
+  const totalAmount = records.reduce((sum, record) => sum + Number(record.total_amount || record.grand_total || 0), 0);
+  const employeeCount = new Set(records.map((record) => record.employee_id || record.emp_code || record.employee_name).filter(Boolean)).size;
+  const employeeById = new Map(getEmployees().map((employee) => [String(employee.id), employee]));
+  const fruitOptions = [
+    { id: "all", label: "ทุกผลไม้" },
+    ...productionFruitOptions
+      .filter((fruit) => productionFruitFieldLabels[fruit.id])
+      .map((fruit) => ({ id: fruit.id, label: fruit.label }))
+  ];
+
+  return `
+    <section class="settings-pile-page">
+      <section class="panel settings-pile-header">
+        <div class="settings-pile-title-row">
+          <div>
+            <p class="eyebrow">SETTINGS / PILE SUMMARY</p>
+            <h2>${escapeHtml(moduleItem.label)}</h2>
+            <p>ตรวจสอบยอดรวมและรายละเอียดของแต่ละกองจากข้อมูลผลผลิตจริง</p>
+          </div>
+          <div class="settings-pile-export-actions">
+            <button class="btn btn-outline" id="settingsPileExportExcel" type="button" ${records.length ? "" : "disabled"}>Export Excel</button>
+            <button class="btn btn-primary" id="settingsPileExportPdf" type="button" ${records.length ? "" : "disabled"}>Export PDF</button>
+          </div>
+        </div>
+        <div class="settings-pile-controls">
+          <label class="field">
+            <span>วันที่ต้องการดู</span>
+            <input id="settingsPileDate" type="date" value="${escapeHtml(settingsPileSummaryDate)}" />
+          </label>
+          <label class="field">
+            <span>ผลไม้</span>
+            <select id="settingsPileFruit">
+              ${fruitOptions.map((fruit) => `<option value="${escapeHtml(fruit.id)}" ${settingsPileSummaryFruit === fruit.id ? "selected" : ""}>${escapeHtml(fruit.label)}</option>`).join("")}
+            </select>
+          </label>
+          <div class="settings-pile-current-filter">
+            <span>กำลังแสดง</span>
+            <strong>${escapeHtml(settingsPileSummaryDate)}</strong>
+            <small>${escapeHtml(settingsPileFruitLabel(settingsPileSummaryFruit))}</small>
+          </div>
+        </div>
+      </section>
+
+      ${settingsPileSummaryMessage ? `<div class="alert ${settingsPileSummaryMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(settingsPileSummaryMessage)}</div>` : ""}
+
+      <section class="settings-pile-metrics">
+        <div><span>น้ำหนักรวม</span><strong>${numberText(totalWeight)} กก.</strong><small>รวมทุกกองตามตัวกรอง</small></div>
+        <div><span>ยอดเงินรวม</span><strong>${money(totalAmount)}</strong><small>คำนวณจากรายการจริง</small></div>
+        <div><span>จำนวนรายการ</span><strong>${records.length.toLocaleString("th-TH")}</strong><small>รายการในวันที่เลือก</small></div>
+        <div><span>พนักงาน</span><strong>${employeeCount.toLocaleString("th-TH")} คน</strong><small>ไม่นับรหัสซ้ำ</small></div>
+      </section>
+
+      <section>
+        <div class="section-title-row settings-pile-section-title">
+          <div><h3>ยอดรวมแต่ละกอง</h3><p class="muted-text">แสดงกอง 1-5 เสมอเพื่อเปรียบเทียบได้ทันที</p></div>
+          <span class="badge badge-success">${summaries.filter((summary) => summary.count).length} กองมีข้อมูล</span>
+        </div>
+        <div class="settings-pile-grid">${summaries.map(renderSettingsPileCard).join("")}</div>
+      </section>
+
+      <section class="table-card settings-pile-detail-card">
+        <div class="table-heading">
+          <div><strong>รายละเอียดรายการตามกอง</strong><span>${records.length.toLocaleString("th-TH")} รายการ</span></div>
+        </div>
+        <div class="table-scroll">
+          <table class="settings-pile-table">
+            <thead>
+              <tr><th>กอง</th><th>เวลา</th><th>ผลไม้</th><th>พนักงาน</th><th>รายละเอียดน้ำหนัก</th><th>รวม</th><th>ยอดเงิน</th><th>ผู้บันทึก</th></tr>
+            </thead>
+            <tbody>
+              ${
+                records.length
+                  ? records.map((record) => {
+                      const employee = employeeById.get(String(record.employee_id));
+                      return `
+                        <tr>
+                          <td data-label="กอง"><span class="settings-pile-number">กอง ${escapeHtml(record.pile_no || record.pile || "-")}</span></td>
+                          <td data-label="เวลา">${escapeHtml(record.record_time || "-")}</td>
+                          <td data-label="ผลไม้">${escapeHtml(settingsPileFruitLabel(productionFruitTypeForRecord(record)))}</td>
+                          <td data-label="พนักงาน"><strong>${escapeHtml(record.emp_code || "-")}</strong><span class="settings-pile-employee-name">${escapeHtml(record.employee_name || employee?.fullname || "")}</span></td>
+                          <td class="settings-pile-weight-detail" data-label="รายละเอียดน้ำหนัก">${escapeHtml(settingsPileRecordBreakdown(record))}</td>
+                          <td data-label="รวม"><strong>${numberText(getRecordTotalWeight(record))} กก.</strong></td>
+                          <td data-label="ยอดเงิน"><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td>
+                          <td data-label="ผู้บันทึก">${escapeHtml(record.created_by || "-")}</td>
+                        </tr>
+                      `;
+                    }).join("")
+                  : `<tr><td colspan="8" class="empty-cell">ยังไม่มีข้อมูลผลผลิตในวันที่และผลไม้ที่เลือก</td></tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  `;
+}
+
+async function exportSettingsPileSummary(user, format) {
+  const records = filterProductionRecordsByFruit(
+    getProductionRecords().filter((record) => getRecordDate(record) === settingsPileSummaryDate),
+    settingsPileSummaryFruit
+  );
+  if (!records.length) {
+    settingsPileSummaryMessage = "ไม่มีข้อมูลในวันที่และผลไม้ที่เลือก จึงยัง Export ไม่ได้";
+    settingsPileSummaryMessageType = "error";
+    render();
+    return;
+  }
+
+  const endpoint = format === "excel" ? "production-summary-excel" : "production-summary-pdf";
+  settingsPileSummaryMessage = `กำลังสร้างไฟล์ ${format === "excel" ? "Excel" : "PDF"}...`;
+  settingsPileSummaryMessageType = "success";
+  render();
+
+  try {
+    await downloadReport(`${REPORT_API_BASE}/reports/${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        start_date: settingsPileSummaryDate,
+        end_date: settingsPileSummaryDate,
+        fruit_type: settingsPileSummaryFruit,
+        printed_by: user?.fullname || "System Admin",
+        printed_by_position: getExportPositionLabel(user),
+        employees: getEmployees(),
+        production_records: getProductionRecords(),
+        export_sections: { overview: true, piles: true, details: true }
+      })
+    });
+    settingsPileSummaryMessage = `Export ${format === "excel" ? "Excel" : "PDF"} สรุปตามกองวันที่ ${settingsPileSummaryDate} เรียบร้อยแล้ว`;
+    settingsPileSummaryMessageType = "success";
+    addAuditLog(user, format === "excel" ? "EXPORT_PILE_SUMMARY_EXCEL" : "EXPORT_PILE_SUMMARY_PDF", `Exported pile summary for ${settingsPileSummaryDate}`);
+  } catch (error) {
+    settingsPileSummaryMessage = `${error instanceof Error ? error.message : "Export ไม่สำเร็จ"} (${REPORT_API_BASE})`;
+    settingsPileSummaryMessageType = "error";
+  }
+  render();
+}
+
+function bindSettingsPileSummaryEvents(user) {
+  document.querySelector("#settingsPileDate")?.addEventListener("change", (event) => {
+    settingsPileSummaryDate = event.target.value || new Date().toISOString().slice(0, 10);
+    settingsPileSummaryMessage = "";
+    render();
+  });
+  document.querySelector("#settingsPileFruit")?.addEventListener("change", (event) => {
+    settingsPileSummaryFruit = event.target.value || "all";
+    settingsPileSummaryMessage = "";
+    render();
+  });
+  document.querySelector("#settingsPileExportPdf")?.addEventListener("click", () => {
+    exportSettingsPileSummary(user, "pdf");
+  });
+  document.querySelector("#settingsPileExportExcel")?.addEventListener("click", () => {
+    exportSettingsPileSummary(user, "excel");
+  });
+}
+
 function renderFullSettingsModule(user) {
   const employees = getEmployees();
   const activeEmployees = employees.filter((employee) => employee.status === "Active").length;
@@ -5353,6 +5633,7 @@ function renderFullSettingsModule(user) {
   const canViewAuditLog = canOpen(user, "audit-log");
   const settingsTiles = [
     ["employees", "จัดการพนักงาน", "เลือกจัดการพนักงานเหมาน้ำหนักหรือพนักงานตามเวลา"],
+    ["settings-pile-summary", "สรุปตามกอง", "เลือกวันที่ ดูยอดรวมแต่ละกอง และ Export PDF หรือ Excel"],
     ["wage-rates", "ตั้งค่าอัตราค่าจ้าง", "เพิ่มอัตราใหม่และดูประวัติค่าน้ำ/ค่าดอกย้อนหลัง"],
     ["account-management", "บัญชีเข้าใช้งาน", "Register และแก้ไข ID สำหรับเข้าเว็บ"],
     ["audit-log", "Audit Log", "ดูประวัติระบบ หลังกรอกรหัส 4 หลัก"],
@@ -5659,7 +5940,9 @@ function getAuditLogActionLabel(action) {
     DELETE_TIME_RECORD: "ลบเวลาทำงาน",
     EXPORT_DATABASE_BACKUP: "ส่งออกข้อมูลสำรอง",
     IMPORT_DATABASE_BACKUP: "นำเข้าข้อมูลสำรอง",
-    EXPORT_PILE_SUMMARY: "ส่งออกสรุปกอง"
+    EXPORT_PILE_SUMMARY: "ส่งออกสรุปกอง",
+    EXPORT_PILE_SUMMARY_PDF: "ส่งออกสรุปกอง PDF",
+    EXPORT_PILE_SUMMARY_EXCEL: "ส่งออกสรุปกอง Excel"
   };
   const normalized = String(action || "").toUpperCase();
   return labels[normalized] || normalized.replaceAll("_", " ") || "ไม่ระบุเหตุการณ์";
