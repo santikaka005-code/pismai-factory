@@ -35,6 +35,16 @@ class ProductionEditorServerTest(unittest.TestCase):
         self.assertIn("expected_updated_at", route)
         self.assertIn("production change was rolled back", route)
 
+    def test_delete_route_requires_c4_logs_and_restores_on_audit_failure(self):
+        source = Path("report_server.py").read_text(encoding="utf-8")
+        route = source[source.index('production_delete_match = re.fullmatch'):source.index('production_record_match = re.fullmatch')]
+
+        self.assertIn("accounting_actor(self, 4)", route)
+        self.assertIn('"action": "DELETE_PRODUCTION"', route)
+        self.assertIn("expected_updated_at", route)
+        self.assertIn('"POST",\n                    "production_records"', route)
+        self.assertIn("deleted production record was restored", route)
+
 
 if __name__ == "__main__":
     unittest.main()

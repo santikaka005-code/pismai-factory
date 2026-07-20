@@ -633,6 +633,7 @@ let productionEditorDate = new Date().toISOString().slice(0, 10);
 let productionEditorFruit = "mangosteen";
 let productionEditorEmployeeSearch = "";
 let editingProductionRecordId = null;
+let deletingProductionRecordId = null;
 let productionEditorSaving = false;
 let productionEditorMessage = "";
 let productionEditorMessageType = "success";
@@ -6049,6 +6050,7 @@ function getAuditLogActionLabel(action) {
     DELETE_ACCOUNT: "ลบบัญชีเข้าใช้งาน",
     START_SESSION: "เริ่มกองงาน",
     UPDATE_PRODUCTION: "แก้ไขข้อมูลผลผลิต",
+    DELETE_PRODUCTION: "ลบข้อมูลผลผลิต",
     UPDATE_TIME_RECORD: "แก้ไขเวลาทำงาน",
     DELETE_TIME_RECORD: "ลบเวลาทำงาน",
     EXPORT_DATABASE_BACKUP: "ส่งออกข้อมูลสำรอง",
@@ -6652,6 +6654,7 @@ function renderProductionEditor(user, moduleItem) {
 
   const records = getProductionEditorRecords();
   const editingRecord = getProductionRecords().find((record) => Number(record.id) === Number(editingProductionRecordId));
+  const deletingRecord = getProductionRecords().find((record) => Number(record.id) === Number(deletingProductionRecordId));
   const labels = getProductionFieldLabels(productionEditorFruit);
   const isDurian = productionEditorFruit === "durian";
   const employees = getEmployees().slice().sort((a, b) => String(a.emp_code).localeCompare(String(b.emp_code), undefined, { numeric: true }));
@@ -6710,6 +6713,21 @@ function renderProductionEditor(user, moduleItem) {
           </form>
         </section>` : ""}
 
+      ${deletingRecord ? `
+        <section class="panel production-delete-panel">
+          <div class="panel-head">
+            <div>
+              <h3>ยืนยันลบรายการ #${deletingRecord.id}</h3>
+              <p>รหัส ${escapeHtml(deletingRecord.emp_code || "-")} · ${escapeHtml(deletingRecord.employee_name || "-")} · กอง ${normalizeProductionPileNumber(deletingRecord.pile_no ?? deletingRecord.pile) || "-"}</p>
+            </div>
+            <button class="btn btn-outline btn-small" data-cancel-production-delete type="button">ยกเลิก</button>
+          </div>
+          <form id="productionDeleteForm" class="production-delete-form">
+            <label class="field production-edit-reason"><span>เหตุผลที่ลบ</span><textarea name="reason" rows="2" minlength="3" placeholder="เช่น กรอกซ้ำกับรายการ #..." required></textarea></label>
+            <button class="btn btn-danger production-edit-submit" type="submit" ${productionEditorSaving ? "disabled" : ""}>${productionEditorSaving ? "กำลังลบ..." : "ยืนยันลบรายการ"}</button>
+          </form>
+        </section>` : ""}
+
       <section class="table-card">
         <div class="table-heading">รายการ${escapeHtml(getProductionFruitLabel(productionEditorFruit))} วันที่ ${escapeHtml(productionEditorDate)}</div>
         <div class="table-scroll">
@@ -6720,13 +6738,63 @@ function renderProductionEditor(user, moduleItem) {
               const weights = isDurian
                 ? DURIAN_GRADES.map((grade) => `${grade} ${numberText(getRecordGradeWeights(record)[grade])}`).join(" · ")
                 : `${numberText(record.water_weight || record.water || 0)} / ${numberText(record.flower_weight || record.flower || 0)}`;
-              return `<tr class="${Number(record.id) === Number(editingProductionRecordId) ? "is-editing" : ""}"><td>${escapeHtml(record.record_time || "-")}</td><td><strong>${escapeHtml(record.emp_code || "-")}</strong></td><td>${escapeHtml(record.employee_name || employee?.fullname || "-")}</td><td>${normalizeProductionPileNumber(record.pile_no ?? record.pile) || "-"}</td><td>${escapeHtml(weights)}</td><td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td><td>${escapeHtml(record.created_by || "-")}</td><td><button class="btn btn-small btn-outline" data-select-production-edit="${record.id}" type="button">แก้ไข</button></td></tr>`;
+              const activeClass = Number(record.id) === Number(editingProductionRecordId)
+                ? "is-editing"
+                : Number(record.id) === Number(deletingProductionRecordId) ? "is-deleting" : "";
+              return `<tr class="${activeClass}"><td>${escapeHtml(record.record_time || "-")}</td><td><strong>${escapeHtml(record.emp_code || "-")}</strong></td><td>${escapeHtml(record.employee_name || employee?.fullname || "-")}</td><td>${normalizeProductionPileNumber(record.pile_no ?? record.pile) || "-"}</td><td>${escapeHtml(weights)}</td><td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td><td>${escapeHtml(record.created_by || "-")}</td><td><div class="production-row-actions"><button class="btn btn-small btn-outline" data-select-production-edit="${record.id}" type="button">แก้ไข</button><button class="btn btn-small btn-danger" data-select-production-delete="${record.id}" type="button">ลบ</button></div></td></tr>`;
             }).join("") : `<tr><td colspan="8" class="empty-cell">ไม่พบข้อมูลตามตัวกรอง</td></tr>`}</tbody>
           </table>
         </div>
       </section>
     </section>
   `;
+}
+
+async function deleteProductionEditorRecord(user, formElement) {
+  if (!canEditProductionRecords(user)) {
+    productionEditorMessage = "บัญชีนี้ไม่มีสิทธิ์ลบข้อมูลผลผลิต";
+    productionEditorMessageType = "error";
+    render();
+    return;
+  }
+  const existingRecord = getProductionRecords().find((record) => Number(record.id) === Number(deletingProductionRecordId));
+  const reason = String(new FormData(formElement).get("reason") || "").trim();
+  if (!existingRecord || reason.length < 3) {
+    productionEditorMessage = existingRecord ? "กรุณาระบุเหตุผลที่ลบอย่างน้อย 3 ตัวอักษร" : "ไม่พบรายการที่ต้องการลบ กรุณาโหลดข้อมูลใหม่";
+    productionEditorMessageType = "error";
+    render();
+    return;
+  }
+
+  try {
+    productionEditorSaving = true;
+    productionEditorMessage = `กำลังลบรายการ #${existingRecord.id}...`;
+    productionEditorMessageType = "success";
+    render();
+    await cloudApiRequest(`/api/production-records/${existingRecord.id}/delete`, {
+      method: "POST",
+      body: JSON.stringify({
+        reason,
+        expected_updated_at: existingRecord.updated_at || existingRecord.created_at
+      })
+    });
+    applyingCloudState = true;
+    localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(
+      getProductionRecords().filter((record) => Number(record.id) !== Number(existingRecord.id))
+    ));
+    applyingCloudState = false;
+    await refreshLiveStateFromCloud({ renderWhenIdle: false });
+    deletingProductionRecordId = null;
+    productionEditorMessage = `ลบรายการ #${existingRecord.id} และบันทึก Audit Log แล้ว`;
+    productionEditorMessageType = "success";
+  } catch (error) {
+    productionEditorMessage = error instanceof Error ? error.message : "ลบรายการไม่สำเร็จ";
+    productionEditorMessageType = "error";
+  } finally {
+    productionEditorSaving = false;
+    applyingCloudState = false;
+    render();
+  }
 }
 
 async function saveProductionEditorRecord(user, formElement) {
@@ -7532,6 +7600,7 @@ function bindProductionManagementEvents(user) {
     productionEditorDate = productionRecordDate || new Date().toISOString().slice(0, 10);
     productionEditorFruit = selectedProductionFruit || "mangosteen";
     editingProductionRecordId = null;
+    deletingProductionRecordId = null;
     productionEditorMessage = "";
     render();
   });
@@ -7539,6 +7608,7 @@ function bindProductionManagementEvents(user) {
   document.querySelector("[data-close-production-editor]")?.addEventListener("click", () => {
     productionEditorOpen = false;
     editingProductionRecordId = null;
+    deletingProductionRecordId = null;
     productionEditorMessage = "";
     setSelectedProductionFruit("");
     render();
@@ -7547,6 +7617,7 @@ function bindProductionManagementEvents(user) {
   document.querySelector("#productionEditorDate")?.addEventListener("change", (event) => {
     productionEditorDate = event.target.value || new Date().toISOString().slice(0, 10);
     editingProductionRecordId = null;
+    deletingProductionRecordId = null;
     productionEditorMessage = "";
     render();
   });
@@ -7554,6 +7625,7 @@ function bindProductionManagementEvents(user) {
   document.querySelector("#productionEditorFruit")?.addEventListener("change", (event) => {
     productionEditorFruit = event.target.value || "mangosteen";
     editingProductionRecordId = null;
+    deletingProductionRecordId = null;
     productionEditorMessage = "";
     render();
   });
@@ -7566,10 +7638,12 @@ function bindProductionManagementEvents(user) {
     if (event.key !== "Enter") return;
     event.preventDefault();
     editingProductionRecordId = null;
+    deletingProductionRecordId = null;
     render();
   });
   productionEditorSearchInput?.addEventListener("change", () => {
     editingProductionRecordId = null;
+    deletingProductionRecordId = null;
     render();
   });
 
@@ -7577,6 +7651,7 @@ function bindProductionManagementEvents(user) {
     button.addEventListener("click", () => {
       if (!canEditProductionRecords(user)) return;
       editingProductionRecordId = Number(button.dataset.selectProductionEdit);
+      deletingProductionRecordId = null;
       productionEditorMessage = "";
       render();
       window.setTimeout(() => document.querySelector("#productionEditForm")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
@@ -7589,9 +7664,31 @@ function bindProductionManagementEvents(user) {
     render();
   });
 
+  document.querySelectorAll("[data-select-production-delete]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!canEditProductionRecords(user)) return;
+      deletingProductionRecordId = Number(button.dataset.selectProductionDelete);
+      editingProductionRecordId = null;
+      productionEditorMessage = "";
+      render();
+      window.setTimeout(() => document.querySelector("#productionDeleteForm")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+    });
+  });
+
+  document.querySelector("[data-cancel-production-delete]")?.addEventListener("click", () => {
+    deletingProductionRecordId = null;
+    productionEditorMessage = "";
+    render();
+  });
+
   document.querySelector("#productionEditForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     saveProductionEditorRecord(user, event.currentTarget);
+  });
+
+  document.querySelector("#productionDeleteForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    deleteProductionEditorRecord(user, event.currentTarget);
   });
 
   if (productionEditorOpen) return;
@@ -7766,6 +7863,7 @@ function bindProductionManagementEvents(user) {
       productionEditorDate = getRecordDate(record);
       productionEditorFruit = productionFruitTypeForRecord(record);
       editingProductionRecordId = record.id;
+      deletingProductionRecordId = null;
       productionEditorMessage = "";
       render();
     });

@@ -4235,6 +4235,112 @@ class ReportHandler(BaseHTTPRequestHandler):
             )
             return
 
+        production_delete_match = re.fullmatch(r"/api/production-records/(\d+)/delete", parsed.path)
+        if production_delete_match:
+            actor = accounting_actor(self, 4)
+            if not actor:
+                self.send_json({"error": "C4 or higher session is required."}, 403)
+                return
+            record_id = int(production_delete_match.group(1))
+            reason = str(payload.get("reason", "")).strip()
+            if len(reason) < 3:
+                self.send_json({"error": "Delete reason is required."}, 400)
+                return
+
+            status, existing_rows = supabase_request(
+                "GET",
+                f"production_records?id=eq.{record_id}&select=*&limit=1",
+            )
+            if status >= 400:
+                self.send_json({"error": existing_rows}, status)
+                return
+            if not isinstance(existing_rows, list) or not existing_rows:
+                self.send_json({"error": "Production record was not found."}, 404)
+                return
+
+            existing_row = existing_rows[0]
+            before = live_state_to_client("production_records", existing_row)
+            expected_updated_at = str(payload.get("expected_updated_at") or "")
+            current_updated_at = str(before.get("updated_at") or before.get("created_at") or "")
+            if expected_updated_at and expected_updated_at != current_updated_at:
+                self.send_json(
+                    {"error": "ข้อมูลรายการนี้ถูกแก้ไขจากเครื่องอื่นแล้ว กรุณาโหลดข้อมูลใหม่ก่อนลบอีกครั้ง"},
+                    409,
+                )
+                return
+
+            actor_status, actor_rows = supabase_request(
+                "GET",
+                f"account_users?id=eq.{quote(str(actor.get('sub', '')))}&select=username,fullname,user_level&limit=1",
+            )
+            actor_account = actor_rows[0] if actor_status < 400 and isinstance(actor_rows, list) and actor_rows else {}
+            actor_name = str(actor_account.get("fullname") or actor.get("username") or "System")
+            actor_username = str(actor_account.get("username") or actor.get("username") or "")
+
+            delete_status, deleted_rows = supabase_request(
+                "DELETE",
+                f"production_records?id=eq.{record_id}",
+                prefer="return=representation",
+            )
+            if delete_status >= 400:
+                self.send_json({"error": deleted_rows}, delete_status)
+                return
+            if not isinstance(deleted_rows, list) or not deleted_rows:
+                self.send_json({"error": "Production record deletion returned no row."}, 500)
+                return
+
+            audit_created_at = datetime.utcnow().isoformat() + "Z"
+            audit_description = f"ลบผลผลิต #{record_id} รหัส {before.get('emp_code', '-')} เหตุผล: {reason}"
+            audit_row = {
+                "action": "DELETE_PRODUCTION",
+                "module": "production",
+                "description": audit_description,
+                "created_by": actor_username,
+                "user_fullname": actor_name,
+                "ip_address": self.client_address[0] if self.client_address else None,
+                "created_at": audit_created_at,
+                "metadata": {
+                    "action": "DELETE_PRODUCTION",
+                    "module": "production",
+                    "detail": audit_description,
+                    "description": audit_description,
+                    "created_by": actor_username,
+                    "user_fullname": actor_name,
+                    "username": actor_username,
+                    "role": actor_account.get("user_level") or actor.get("level", "C4"),
+                    "created_at": audit_created_at,
+                    "record_id": record_id,
+                    "reason": reason,
+                    "before": before,
+                    "after": None,
+                    "actor_level": actor.get("level", "C4"),
+                },
+            }
+            audit_status, audit_result = supabase_request(
+                "POST",
+                "audit_logs",
+                audit_row,
+                prefer="return=representation",
+            )
+            if audit_status >= 400:
+                restore_status, restore_result = supabase_request(
+                    "POST",
+                    "production_records",
+                    existing_row,
+                    prefer="resolution=merge-duplicates,return=representation",
+                )
+                if restore_status >= 400:
+                    self.send_json(
+                        {"error": "Audit log and automatic restore both failed.", "restore_error": restore_result},
+                        500,
+                    )
+                    return
+                self.send_json({"error": "Audit log failed; deleted production record was restored."}, 500)
+                return
+
+            self.send_json({"deleted": before, "audit": audit_result})
+            return
+
         production_record_match = re.fullmatch(r"/api/production-records/(\d+)", parsed.path)
         if production_record_match:
             actor = accounting_actor(self, 4)

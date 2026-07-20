@@ -34,6 +34,8 @@ assert.strictEqual(context.canEditProductionRecords({ user_level: "C4" }), true)
 assert.strictEqual(context.canEditProductionRecords({ user_level: "C7" }), true);
 assert(source.includes("expected_updated_at"), "Production edits must use optimistic concurrency");
 assert(source.includes("data-open-production-editor"), "Production editor button is missing");
+assert(source.includes("data-select-production-delete"), "Production delete button is missing");
+assert(source.includes("expected_updated_at: existingRecord.updated_at"), "Production delete must use optimistic concurrency");
 assert(source.includes("Audit Log"), "Production editor must explain audit logging");
 
 console.log("Production editor permission and concurrency tests passed.");
