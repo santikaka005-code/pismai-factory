@@ -437,18 +437,28 @@ def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
         status, existing = supabase_request("GET", f"{table}?id=eq.{quote(str(row_id))}&select=id&limit=1")
         if status >= 400:
             return status, {"error": existing, "table": table}
-        if isinstance(existing, list) and existing:
+        method = "PATCH" if isinstance(existing, list) and existing else "POST"
+        path = f"{table}?id=eq.{quote(str(row_id))}" if method == "PATCH" else table
+        status, body = supabase_request(
+            method,
+            path,
+            clean_row,
+            prefer="return=representation",
+        )
+        if status >= 400 and table == "production_records" and any(
+            key in clean_row for key in ("grade_weights", "grade_rates", "grade_amounts")
+        ):
+            # Older Supabase projects may not have the dedicated durian
+            # columns yet. The complete record remains durable in raw_payload.
+            fallback_row = {
+                key: value
+                for key, value in clean_row.items()
+                if key not in ("grade_weights", "grade_rates", "grade_amounts")
+            }
             status, body = supabase_request(
-                "PATCH",
-                f"{table}?id=eq.{quote(str(row_id))}",
-                clean_row,
-                prefer="return=representation",
-            )
-        else:
-            status, body = supabase_request(
-                "POST",
-                table,
-                clean_row,
+                method,
+                path,
+                fallback_row,
                 prefer="return=representation",
             )
         if status >= 400:
@@ -490,9 +500,6 @@ def live_state_row(table: str, payload: dict) -> dict:
             "item_type": payload.get("item_type"),
             "water_weight": water,
             "flower_weight": flower,
-            "grade_weights": payload.get("grade_weights") or {},
-            "grade_rates": payload.get("grade_rates") or {},
-            "grade_amounts": payload.get("grade_amounts") or {},
             "total_weight": payload.get("total_weight", float(water) + float(flower)),
             "rate": payload.get("rate", 0) or 0,
             "amount": payload.get("amount", payload.get("total_amount", payload.get("grand_total", 0))) or 0,
@@ -503,6 +510,12 @@ def live_state_row(table: str, payload: dict) -> dict:
             "updated_at": payload.get("updated_at") or payload.get("created_at") or datetime.utcnow().isoformat() + "Z",
             "raw_payload": payload,
         }
+        if row["fruit_type"] == "durian":
+            row.update({
+                "grade_weights": payload.get("grade_weights") or {},
+                "grade_rates": payload.get("grade_rates") or {},
+                "grade_amounts": payload.get("grade_amounts") or {},
+            })
     elif table == "time_records":
         row = {
             "work_date": payload.get("work_date") or payload.get("record_date") or payload.get("date"),

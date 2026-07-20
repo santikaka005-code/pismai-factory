@@ -3468,6 +3468,27 @@ function apiCreateProductionRecord(payload, user) {
   return record;
 }
 
+function apiCreateProductionRecordsBatch(payloads, user) {
+  const records = getProductionRecords();
+  let nextId = records.length ? Math.max(...records.map((record) => Number(record.id) || 0)) + 1 : 1;
+  const createdRecords = payloads.map((payload) => ({
+    ...buildProductionRecord(payload, user),
+    id: nextId++
+  }));
+
+  saveProductionRecords([...records, ...createdRecords]);
+  createdRecords.forEach((record) => {
+    addAuditLog(
+      user,
+      "INSERT_PRODUCTION",
+      isDurianFruit(record.fruit_type)
+        ? `Added ${record.emp_code} pile ${record.pile_no} durian grades ${JSON.stringify(record.grade_weights)}`
+        : `Added ${record.emp_code} pile ${record.pile_no} water ${record.water_weight} flower ${record.flower_weight}`
+    );
+  });
+  return createdRecords;
+}
+
 function apiUpdateProductionRecord(id, payload, user) {
   const records = getProductionRecords();
   const existingRecord = records.find((record) => record.id === id);
@@ -7112,18 +7133,25 @@ function saveBatchEntries(user) {
     return;
   }
 
-  Array.from(groups.values()).forEach((group) => {
-    apiCreateProductionRecord(
-      {
+  try {
+    apiCreateProductionRecordsBatch(
+      Array.from(groups.values()).map((group) => ({
         employee,
         fruit_type: getSelectedProductionFruitId(),
         pile_no: group.pileNo,
         water_weight: group.water,
         flower_weight: group.flower
-      },
+      })),
       user
     );
-  });
+  } catch (error) {
+    setProductionMessage(
+      error instanceof Error ? error.message : "บันทึกผลผลิตแบบชุดไม่สำเร็จ",
+      "error"
+    );
+    render();
+    return;
+  }
 
   const summaryLines = Array.from(groups.values())
     .sort((a, b) => a.pileNo - b.pileNo)
@@ -7175,12 +7203,15 @@ function saveDurianBatchEntries(user) {
   const overLimit = [...groups.values()].some((group) => getDurianGradeTotal(group.grade_weights) > 500);
   if (overLimit && !window.confirm("ผลรวมน้ำหนักทุเรียนบางกองเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?")) return;
   try {
-    [...groups.values()].forEach((group) => apiCreateProductionRecord({
-      employee,
-      fruit_type: "durian",
-      pile_no: group.pileNo,
-      grade_weights: group.grade_weights
-    }, user));
+    apiCreateProductionRecordsBatch(
+      [...groups.values()].map((group) => ({
+        employee,
+        fruit_type: "durian",
+        pile_no: group.pileNo,
+        grade_weights: group.grade_weights
+      })),
+      user
+    );
   } catch (error) {
     setProductionMessage(error instanceof Error ? error.message : "บันทึกทุเรียนแบบชุดไม่สำเร็จ", "error"); render(); return;
   }
