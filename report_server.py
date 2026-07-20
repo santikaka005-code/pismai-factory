@@ -434,10 +434,44 @@ def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
             clean_row["id"] = next_id
             next_id += 1
         row_id = clean_row.get("id")
-        status, existing = supabase_request("GET", f"{table}?id=eq.{quote(str(row_id))}&select=id&limit=1")
+        select_fields = "id,raw_payload" if table == "production_records" else "id"
+        status, existing = supabase_request(
+            "GET",
+            f"{table}?id=eq.{quote(str(row_id))}&select={select_fields}&limit=1",
+        )
         if status >= 400:
             return status, {"error": existing, "table": table}
-        method = "PATCH" if isinstance(existing, list) and existing else "POST"
+        has_existing = isinstance(existing, list) and bool(existing)
+        incoming_uid = ""
+        existing_uid = ""
+        if table == "production_records":
+            incoming_raw = clean_row.get("raw_payload") if isinstance(clean_row.get("raw_payload"), dict) else {}
+            existing_raw = existing[0].get("raw_payload") if has_existing and isinstance(existing[0].get("raw_payload"), dict) else {}
+            incoming_uid = str(incoming_raw.get("client_uid") or "")
+            existing_uid = str(existing_raw.get("client_uid") or "")
+            identity_fields = (
+                "record_date",
+                "record_time",
+                "emp_code",
+                "pile_no",
+                "fruit_type",
+                "created_at",
+            )
+            incoming_identity = tuple(str(incoming_raw.get(field) or "") for field in identity_fields)
+            existing_identity = tuple(str(existing_raw.get(field) or "") for field in identity_fields)
+            uid_collision = has_existing and incoming_uid and incoming_uid != existing_uid
+            legacy_collision = (
+                has_existing
+                and not incoming_uid
+                and not existing_uid
+                and incoming_identity != existing_identity
+            )
+            if uid_collision or legacy_collision:
+                # Two browsers can allocate the same local numeric id. Let
+                # Supabase issue a fresh id instead of overwriting the other row.
+                clean_row.pop("id", None)
+                has_existing = False
+        method = "PATCH" if has_existing else "POST"
         path = f"{table}?id=eq.{quote(str(row_id))}" if method == "PATCH" else table
         status, body = supabase_request(
             method,
@@ -4049,13 +4083,17 @@ class ReportHandler(BaseHTTPRequestHandler):
             converted = [live_state_row(table, row) for row in rows if isinstance(row, dict)]
             status, body = sync_rows_by_id(table, converted)
             if status < 400:
-                ids = [str(row.get("id")) for row in converted if row.get("id") not in [None, ""]]
-                delete_path = table if not ids else f"{table}?id=not.in.({','.join(quote(value) for value in ids)})"
-                delete_status, delete_body = supabase_request("DELETE", delete_path, prefer="return=minimal")
-                if delete_status >= 400:
-                    self.send_json({"error": delete_body}, delete_status)
+                # Never delete rows missing from one browser's local snapshot.
+                # Multiple stations submit concurrently and each may only know
+                # about its own most recent records.
+                read_status, read_body = supabase_request("GET", f"{table}?select=*&order=id.asc")
+                if read_status >= 400:
+                    self.send_json({"error": read_body, "table": table}, read_status)
                     return
-            self.send_json({"data": body.get("synced", []) if status < 400 else None, "error": body if status >= 400 else None}, status)
+                client_rows = [live_state_to_client(table, row) for row in read_body]
+                self.send_json({"data": client_rows, "error": None}, status)
+                return
+            self.send_json({"data": None, "error": body}, status)
             return
 
         if parsed.path == "/api/backup/restore":

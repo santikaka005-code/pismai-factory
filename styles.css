@@ -1909,7 +1909,7 @@ tr:last-child td {
 }
 
 .fast-input-form {
-  grid-template-columns: 120px 170px 1.5fr 1fr 1fr auto;
+  grid-template-columns: 150px 110px 160px minmax(180px, 1.3fr) minmax(110px, 1fr) minmax(110px, 1fr) auto;
 }
 
 .employee-form .field,
@@ -2719,7 +2719,7 @@ tr:last-child td {
 
 .batch-employee-row {
   display: grid;
-  grid-template-columns: 220px minmax(260px, 1fr);
+  grid-template-columns: 180px 180px minmax(260px, 1fr);
   gap: 14px;
   align-items: end;
   margin-bottom: 18px;

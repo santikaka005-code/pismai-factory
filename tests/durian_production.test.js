@@ -20,6 +20,7 @@ const testSource = `
     return rates[fieldKey] == null ? null : { rate: rates[fieldKey] };
   }
   ${functionBlock("createEmptyDurianGradeWeights", "getFastInputFruitKey")}
+  ${functionBlock("createProductionClientUid", "isValidProductionRecordDate")}
   ${functionBlock("buildProductionRecord", "apiCreateProductionRecord")}
   this.buildProductionRecord = buildProductionRecord;
   this.normalizeDurianGradeWeights = normalizeDurianGradeWeights;

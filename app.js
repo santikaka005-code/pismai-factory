@@ -609,6 +609,7 @@ let deductionMessageType = "success";
 let editingDeductionId = null;
 let productionView = "fast-entry";
 let selectedProductionFruit = "";
+let productionRecordDate = new Date().toISOString().slice(0, 10);
 let productionMessage = "";
 let productionMessageType = "success";
 let auditLogUnlocked = false;
@@ -622,6 +623,8 @@ let deductionCloudBootstrapped = false;
 let liveStateCloudBootstrapped = false;
 let applyingCloudState = false;
 const liveStateSyncTimers = new Map();
+const liveStateSyncInFlight = new Set();
+let liveStateRefreshInFlight = false;
 let lastRenderedRoute = "";
 let batchEntryText = "";
 const DURIAN_GRADES = ["A", "B", "C", "D", "E"];
@@ -1250,15 +1253,68 @@ function queueLiveStateSync(table) {
   if (applyingCloudState || !liveStateConfig[table]) return;
   clearTimeout(liveStateSyncTimers.get(table));
   liveStateSyncTimers.set(table, setTimeout(async () => {
+    liveStateSyncTimers.delete(table);
+    liveStateSyncInFlight.add(table);
+    let receivedMergedRows = false;
     try {
-      await cloudApiRequest("/api/state", {
+      const response = await cloudApiRequest("/api/state", {
         method: "POST",
         body: JSON.stringify({ table, rows: liveStateConfig[table].read() })
       });
+      if (Array.isArray(response.data)) {
+        applyingCloudState = true;
+        localStorage.setItem(liveStateConfig[table].key, JSON.stringify(response.data));
+        receivedMergedRows = true;
+      }
     } catch (error) {
       console.error(`Cloud sync failed for ${table}.`, error);
+    } finally {
+      applyingCloudState = false;
+      liveStateSyncInFlight.delete(table);
     }
+    if (receivedMergedRows && !isEditingFormField()) render();
   }, 150));
+}
+
+function isEditingFormField() {
+  const active = document.activeElement;
+  return Boolean(
+    active &&
+    (active.matches?.("input, select, textarea") || active.isContentEditable)
+  );
+}
+
+async function refreshLiveStateFromCloud({ renderWhenIdle = true } = {}) {
+  if (
+    liveStateRefreshInFlight ||
+    applyingCloudState ||
+    liveStateSyncTimers.size ||
+    liveStateSyncInFlight.size ||
+    !getSession()
+  ) return;
+
+  liveStateRefreshInFlight = true;
+  let changed = false;
+  try {
+    const response = await cloudApiRequest("/api/state");
+    const state = response.data || {};
+    applyingCloudState = true;
+    for (const [table, config] of Object.entries(liveStateConfig)) {
+      const cloudRows = Array.isArray(state[table]) ? state[table] : [];
+      const serialized = JSON.stringify(cloudRows);
+      if (localStorage.getItem(config.key) !== serialized) {
+        localStorage.setItem(config.key, serialized);
+        changed = true;
+      }
+    }
+  } catch (error) {
+    console.warn("Live cloud refresh failed.", error);
+  } finally {
+    applyingCloudState = false;
+    liveStateRefreshInFlight = false;
+  }
+
+  if (changed && renderWhenIdle && !isEditingFormField()) render();
 }
 
 async function bootstrapLiveStateFromCloud() {
@@ -2621,10 +2677,9 @@ function addAuditLog(user, action, detail) {
 
 function productionRecordsForActiveSession() {
   lockExpiredProductionRecords();
-  const today = new Date().toISOString().slice(0, 10);
   const fruitId = getSelectedProductionFruitId();
   return getProductionRecords().filter(
-    (record) => record.record_date === today && productionFruitTypeForRecord(record) === fruitId
+    (record) => getRecordDate(record) === productionRecordDate && productionFruitTypeForRecord(record) === fruitId
   );
 }
 
@@ -3318,19 +3373,36 @@ function apiGetLatestProductionRecords(limit = 10) {
     .slice(0, limit);
 }
 
-function apiCheckProductionDuplicate(employeeId, now = new Date(), fruitId = getSelectedProductionFruitId()) {
+function apiCheckProductionDuplicate(
+  employeeId,
+  now = new Date(),
+  fruitId = getSelectedProductionFruitId(),
+  recordDate = productionRecordDate
+) {
   const oneMinuteAgo = now.getTime() - 60 * 1000;
 
   return (
     getProductionRecords()
       .filter(
         (record) =>
-          record.employee_id === employeeId && productionFruitTypeForRecord(record) === fruitId
+          record.employee_id === employeeId &&
+          productionFruitTypeForRecord(record) === fruitId &&
+          getRecordDate(record) === recordDate
       )
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
       .find((record) => new Date(record.created_at).getTime() >= oneMinuteAgo) ||
     null
   );
+}
+
+function createProductionClientUid() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `production-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function isValidProductionRecordDate(value) {
+  const date = String(value || "");
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) && date <= new Date().toISOString().slice(0, 10);
 }
 
 function buildProductionRecord(payload, user, existingRecord = null) {
@@ -3363,6 +3435,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
     return {
       ...base,
       id: existingRecord?.id,
+      client_uid: existingRecord?.client_uid || createProductionClientUid(),
       session_id: payload.session_id || existingRecord?.session_id || 0,
       fruit_type: fruitType,
       employee_id: payload.employee.id,
@@ -3422,6 +3495,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
   return {
     ...base,
     id: existingRecord?.id,
+    client_uid: existingRecord?.client_uid || createProductionClientUid(),
     session_id: payload.session_id || existingRecord?.session_id || 0,
     fruit_type: fruitType,
     employee_id: payload.employee.id,
@@ -6071,7 +6145,7 @@ function renderProductionManagement(user, moduleItem) {
   const visibleViews = [
     ["fast-entry", "กรอกเร็ว"],
     ["batch-entry", "กรอกแบบชุด"],
-    ["summary", "สรุปวันนี้"]
+    ["summary", "สรุปวันที่เลือก"]
   ];
   const currentView = visibleViews.some(([id]) => id === productionView)
     ? productionView
@@ -6184,6 +6258,10 @@ function renderBatchEntry() {
       </div>
       <div class="batch-employee-row">
         <label class="field">
+          <span>วันที่บันทึกผลผลิต</span>
+          <input id="batchRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" />
+        </label>
+        <label class="field">
           <span>รหัสพนักงาน</span>
           <input id="batchEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(batchGridState.emp_code)}" autocomplete="off" />
         </label>
@@ -6239,6 +6317,7 @@ function renderDurianBatchEntry() {
     <section class="panel">
       <div class="panel-head"><div><h2>กรอกทุเรียนแบบชุด</h2><p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักแต่ละเกรดแยกตามกอง</p></div></div>
       <div class="batch-employee-row">
+        <label class="field"><span>วันที่บันทึกผลผลิต</span><input id="batchRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" /></label>
         <label class="field"><span>รหัสพนักงาน</span><input id="batchEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(batchGridState.emp_code)}" autocomplete="off" /></label>
         <div class="employee-result"><span>พนักงาน</span><strong>${escapeHtml(employeeName)}</strong></div>
       </div>
@@ -6306,7 +6385,7 @@ function renderProductionRecordsTable(records, showEdit) {
             ${
               records.length
                 ? records.map((record) => renderProductionManagementRow(record, showEdit)).join("")
-                : `<tr><td colspan="${durianMode ? 12 : 9}" class="empty-cell">ยังไม่มีรายการผลผลิตวันนี้</td></tr>`
+                : `<tr><td colspan="${durianMode ? 12 : 9}" class="empty-cell">ยังไม่มีรายการผลผลิตวันที่ ${escapeHtml(productionRecordDate)}</td></tr>`
             }
           </tbody>
         </table>
@@ -6382,6 +6461,10 @@ function renderProductionFast(user, moduleItem) {
       }
 
       <form class="fast-input-form" id="productionFastForm">
+        <label class="field">
+          <span>วันที่</span>
+          <input id="fastRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" required />
+        </label>
         <label class="field">
           <span>กอง</span>
           <select name="pile_no" id="fastPileNo" required>
@@ -6469,7 +6552,7 @@ function renderProductionFast(user, moduleItem) {
             ${
               latestRecords.length
                 ? latestRecords.map(renderProductionRecordRow).join("")
-                : `<tr><td colspan="10" class="empty-cell">ยังไม่มีรายการผลผลิตวันนี้</td></tr>`
+                : `<tr><td colspan="10" class="empty-cell">ยังไม่มีรายการผลผลิตวันที่ ${escapeHtml(productionRecordDate)}</td></tr>`
             }
           </tbody>
         </table>
@@ -6505,6 +6588,7 @@ function renderDurianFast(user, moduleItem) {
       <div class="panel-head"><div><h2>${escapeHtml(moduleItem.label)} - ทุเรียน</h2><p>บันทึกน้ำหนักแยกเกรด A-E ภายในกองเดียวกัน</p></div><span class="badge badge-success">กรอกเร็ว</span></div>
       ${fastInputState.message ? `<div class="alert ${fastInputState.messageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(fastInputState.message)}</div>` : ""}
       <form class="fast-input-form durian-fast-form" id="productionFastForm">
+        <label class="field"><span>วันที่</span><input id="fastRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" required /></label>
         <label class="field"><span>กอง</span><select name="pile_no" id="fastPileNo" required>${[1,2,3,4,5].map((pileNo) => `<option value="${pileNo}" ${fastInputState.pile_no === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}</select></label>
         <label class="field"><span>รหัสพนักงาน</span><input name="emp_code" id="fastEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(fastInputState.emp_code)}" autocomplete="off" required /></label>
         <div class="employee-result"><span>พนักงาน</span><strong>${escapeHtml(employeeName)}</strong></div>
@@ -6565,11 +6649,18 @@ function saveProductionFastForm(user) {
     return;
   }
   const pileInput = document.querySelector("#fastPileNo");
+  const dateInput = document.querySelector("#fastRecordDate");
   const empInput = document.querySelector("#fastEmpCode");
   const waterInput = document.querySelector("#fastWaterWeight");
   const flowerInput = document.querySelector("#fastFlowerWeight");
 
   if (pileInput) fastInputState.pile_no = pileInput.value;
+  if (dateInput?.value) productionRecordDate = dateInput.value;
+  if (!isValidProductionRecordDate(productionRecordDate)) {
+    setFastInputMessage("กรุณาเลือกวันที่บันทึกที่ถูกต้องและไม่เกินวันนี้", "error");
+    render();
+    return;
+  }
   if (empInput) {
     updateFastEmployeeFromCode(empInput.value);
     empInput.value = fastInputState.emp_code;
@@ -6634,12 +6725,13 @@ function saveProductionFastForm(user) {
 
   const payload = {
     employee,
+    record_date: productionRecordDate,
     fruit_type: getSelectedProductionFruitId(),
     pile_no: fastInputState.pile_no,
     water_weight: waterWeight,
     flower_weight: flowerWeight
   };
-  const duplicate = apiCheckProductionDuplicate(employee.id, new Date(), getSelectedProductionFruitId());
+  const duplicate = apiCheckProductionDuplicate(employee.id, new Date(), getSelectedProductionFruitId(), productionRecordDate);
 
   try {
     if (duplicate) {
@@ -6674,8 +6766,15 @@ function saveProductionFastForm(user) {
 
 function saveDurianFastForm(user) {
   const pileInput = document.querySelector("#fastPileNo");
+  const dateInput = document.querySelector("#fastRecordDate");
   const empInput = document.querySelector("#fastEmpCode");
   if (pileInput) fastInputState.pile_no = pileInput.value;
+  if (dateInput?.value) productionRecordDate = dateInput.value;
+  if (!isValidProductionRecordDate(productionRecordDate)) {
+    setFastInputMessage("กรุณาเลือกวันที่บันทึกที่ถูกต้องและไม่เกินวันนี้", "error");
+    render();
+    return;
+  }
   if (empInput) updateFastEmployeeFromCode(empInput.value);
   fastInputState.grade_weights ||= createEmptyDurianGradeWeights("");
   document.querySelectorAll("[data-fast-durian-grade]").forEach((input) => {
@@ -6702,8 +6801,8 @@ function saveDurianFastForm(user) {
     render(); return;
   }
   if (totalWeight > 500 && !window.confirm("น้ำหนักทุเรียนรวมเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?")) return;
-  const payload = { employee, fruit_type: "durian", pile_no: fastInputState.pile_no, grade_weights: gradeWeights };
-  const duplicate = apiCheckProductionDuplicate(employee.id, new Date(), "durian");
+  const payload = { employee, record_date: productionRecordDate, fruit_type: "durian", pile_no: fastInputState.pile_no, grade_weights: gradeWeights };
+  const duplicate = apiCheckProductionDuplicate(employee.id, new Date(), "durian", productionRecordDate);
   try {
     if (duplicate) {
       const addNew = window.confirm("พนักงานคนนี้เพิ่งถูกบันทึกทุเรียนภายใน 1 นาที กด OK เพื่อเพิ่มรายการใหม่ หรือ Cancel เพื่อแก้รายการเดิม");
@@ -6724,12 +6823,13 @@ function saveDurianFastForm(user) {
 function bindProductionFastEvents(user) {
   syncFastInputStateForSelectedFruit();
   const form = document.querySelector("#productionFastForm");
+  const dateInput = document.querySelector("#fastRecordDate");
   const pileInput = document.querySelector("#fastPileNo");
   const empInput = document.querySelector("#fastEmpCode");
   const waterInput = document.querySelector("#fastWaterWeight");
   const flowerInput = document.querySelector("#fastFlowerWeight");
   const gradeInputs = [...document.querySelectorAll("[data-fast-durian-grade]")];
-  const orderedInputs = [pileInput, empInput, waterInput, flowerInput, ...gradeInputs].filter(Boolean);
+  const orderedInputs = [dateInput, pileInput, empInput, waterInput, flowerInput, ...gradeInputs].filter(Boolean);
 
   focusFastEmployeeCode();
   if (empInput?.value) {
@@ -6740,6 +6840,11 @@ function bindProductionFastEvents(user) {
 
   pileInput?.addEventListener("change", (event) => {
     fastInputState.pile_no = event.target.value;
+  });
+
+  dateInput?.addEventListener("change", (event) => {
+    productionRecordDate = event.target.value || new Date().toISOString().slice(0, 10);
+    render();
   });
 
   empInput?.addEventListener("input", (event) => {
@@ -6876,6 +6981,10 @@ function bindProductionManagementEvents(user) {
     }
   });
 
+  document.querySelector("#batchRecordDate")?.addEventListener("change", (event) => {
+    productionRecordDate = event.target.value || new Date().toISOString().slice(0, 10);
+  });
+
   document.querySelector("#batchFlowerPile")?.addEventListener("change", (event) => {
     batchGridState.flower_pile_no = event.target.value;
     render();
@@ -6920,6 +7029,7 @@ function bindProductionManagementEvents(user) {
   });
 
   const batchInputs = [
+    document.querySelector("#batchRecordDate"),
     document.querySelector("#batchEmpCode"),
     ...document.querySelectorAll("[data-batch-weight='flower']"),
     ...document.querySelectorAll("[data-batch-weight='water']")
@@ -7085,6 +7195,13 @@ function saveBatchEntries(user) {
     return;
   }
   syncBatchEmployeeFromInput();
+  const selectedDate = document.querySelector("#batchRecordDate")?.value;
+  if (selectedDate) productionRecordDate = selectedDate;
+  if (!isValidProductionRecordDate(productionRecordDate)) {
+    setProductionMessage("กรุณาเลือกวันที่บันทึกที่ถูกต้องและไม่เกินวันนี้", "error");
+    render();
+    return;
+  }
   const labels = getProductionFieldLabels();
   const employee = batchGridState.employee;
 
@@ -7143,6 +7260,7 @@ function saveBatchEntries(user) {
     apiCreateProductionRecordsBatch(
       Array.from(groups.values()).map((group) => ({
         employee,
+        record_date: productionRecordDate,
         fruit_type: getSelectedProductionFruitId(),
         pile_no: group.pileNo,
         water_weight: group.water,
@@ -7180,6 +7298,13 @@ function saveBatchEntries(user) {
 
 function saveDurianBatchEntries(user) {
   syncBatchEmployeeFromInput();
+  const selectedDate = document.querySelector("#batchRecordDate")?.value;
+  if (selectedDate) productionRecordDate = selectedDate;
+  if (!isValidProductionRecordDate(productionRecordDate)) {
+    setProductionMessage("กรุณาเลือกวันที่บันทึกที่ถูกต้องและไม่เกินวันนี้", "error");
+    render();
+    return;
+  }
   const employee = batchGridState.employee;
   if (!employee) {
     setProductionMessage("กรุณากรอกรหัสพนักงานที่มีอยู่และยังใช้งานอยู่", "error");
@@ -7212,6 +7337,7 @@ function saveDurianBatchEntries(user) {
     apiCreateProductionRecordsBatch(
       [...groups.values()].map((group) => ({
         employee,
+        record_date: productionRecordDate,
         fruit_type: "durian",
         pile_no: group.pileNo,
         grade_weights: group.grade_weights
@@ -12695,9 +12821,16 @@ function bindSummaryGroupReportEvents(user) {
 }
 
 window.addEventListener("hashchange", render);
-window.addEventListener("focus", refreshOnlineUsers);
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshOnlineUsers();
+window.addEventListener("focus", () => {
+  refreshOnlineUsers();
+  refreshLiveStateFromCloud();
 });
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    refreshOnlineUsers();
+    refreshLiveStateFromCloud();
+  }
+});
+window.setInterval(refreshLiveStateFromCloud, 15000);
 startLiveClock();
 render();
