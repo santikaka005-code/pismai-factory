@@ -4161,6 +4161,67 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"deleted": results})
             return
 
+        if parsed.path == "/api/admin/remove-superseded-production-records":
+            if not backup_authorized(self):
+                self.send_json({"error": "Backup code is required."}, 403)
+                return
+            try:
+                record_ids = sorted({int(value) for value in payload.get("record_ids", []) if int(value) > 0})
+            except (TypeError, ValueError):
+                self.send_json({"error": "record_ids must contain positive integers."}, 400)
+                return
+            expected_count = int(payload.get("expected_count", 0) or 0)
+            expected_date = str(payload.get("expected_date", "")).strip()
+            expected_creators = {
+                str(value).strip()
+                for value in payload.get("expected_creators", [])
+                if str(value).strip()
+            }
+            if not record_ids or expected_count != len(record_ids) or not expected_date or not expected_creators:
+                self.send_json({"error": "Complete deletion safeguards are required."}, 400)
+                return
+
+            id_filter = ",".join(str(value) for value in record_ids)
+            status, existing = supabase_request(
+                "GET",
+                f"production_records?id=in.({id_filter})&select=id,record_date,created_by&order=id.asc",
+            )
+            if status >= 400:
+                self.send_json({"error": existing}, status)
+                return
+            invalid_rows = [
+                row
+                for row in (existing if isinstance(existing, list) else [])
+                if row.get("record_date") != expected_date
+                or str(row.get("created_by") or "") not in expected_creators
+            ]
+            if not isinstance(existing, list) or len(existing) != expected_count or invalid_rows:
+                self.send_json(
+                    {
+                        "error": "Deletion safeguards did not match the live rows.",
+                        "found_count": len(existing) if isinstance(existing, list) else 0,
+                        "invalid_rows": invalid_rows,
+                    },
+                    409,
+                )
+                return
+
+            status, deleted = supabase_request(
+                "DELETE",
+                f"production_records?id=in.({id_filter})",
+                prefer="return=representation",
+            )
+            if status >= 400:
+                self.send_json({"error": deleted}, status)
+                return
+            self.send_json(
+                {
+                    "deleted": len(deleted) if isinstance(deleted, list) else 0,
+                    "record_ids": record_ids,
+                }
+            )
+            return
+
         if parsed.path == "/api/state":
             table = str(payload.get("table", "")).strip()
             rows = payload.get("rows", [])
