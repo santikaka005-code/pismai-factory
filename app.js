@@ -1303,6 +1303,47 @@ function getLiveStateVersionSignature() {
     .join("|");
 }
 
+function mergeProductionCloudRows(cloudRows) {
+  if (!Array.isArray(cloudRows) || !cloudRows.length) return;
+  const records = getProductionRecords();
+  const merged = [...records];
+  cloudRows.forEach((cloudRow) => {
+    const cloudClientUid = cloudRow.client_uid || cloudRow.raw_payload?.client_uid || "";
+    const existingIndex = merged.findIndex((record) => {
+      if (cloudClientUid && record.client_uid === cloudClientUid) return true;
+      return Number(record.id) === Number(cloudRow.id);
+    });
+    if (existingIndex >= 0) {
+      merged[existingIndex] = { ...merged[existingIndex], ...cloudRow };
+    } else {
+      merged.push(cloudRow);
+    }
+  });
+  localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
+}
+
+async function saveProductionRowsToCloud(records) {
+  const rows = Array.isArray(records) ? records : [records];
+  const filteredRows = rows.filter(Boolean);
+  if (!filteredRows.length) return [];
+  clearTimeout(liveStateSyncTimers.get("production_records"));
+  liveStateSyncTimers.delete("production_records");
+  liveStateSyncInFlight.add("production_records");
+  try {
+    const response = await cloudApiRequest("/api/production-records/bulk-sync", {
+      method: "POST",
+      body: JSON.stringify({ records: filteredRows })
+    });
+    const cloudRows = Array.isArray(response.data) ? response.data : [];
+    applyingCloudState = true;
+    mergeProductionCloudRows(cloudRows);
+    return cloudRows;
+  } finally {
+    applyingCloudState = false;
+    liveStateSyncInFlight.delete("production_records");
+  }
+}
+
 function waitForMilliseconds(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -3100,9 +3141,9 @@ function getProductionRecords() {
   }
 }
 
-function saveProductionRecords(records) {
+function saveProductionRecords(records, options = {}) {
   localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(records));
-  queueLiveStateSync("production_records");
+  if (options.sync !== false) queueLiveStateSync("production_records");
 }
 
 function normalizeTimeRecordWage(record) {
@@ -3663,7 +3704,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
   };
 }
 
-function apiCreateProductionRecord(payload, user) {
+function apiCreateProductionRecord(payload, user, options = {}) {
   const records = getProductionRecords();
   const nextId = records.length
     ? Math.max(...records.map((record) => record.id)) + 1
@@ -3673,7 +3714,7 @@ function apiCreateProductionRecord(payload, user) {
     id: nextId
   };
 
-  saveProductionRecords([...records, record]);
+  saveProductionRecords([...records, record], { sync: options.sync !== false });
   addAuditLog(
     user,
     "INSERT_PRODUCTION",
@@ -3684,7 +3725,7 @@ function apiCreateProductionRecord(payload, user) {
   return record;
 }
 
-function apiCreateProductionRecordsBatch(payloads, user) {
+function apiCreateProductionRecordsBatch(payloads, user, options = {}) {
   const records = getProductionRecords();
   let nextId = records.length ? Math.max(...records.map((record) => Number(record.id) || 0)) + 1 : 1;
   const createdRecords = payloads.map((payload) => ({
@@ -3692,7 +3733,7 @@ function apiCreateProductionRecordsBatch(payloads, user) {
     id: nextId++
   }));
 
-  saveProductionRecords([...records, ...createdRecords]);
+  saveProductionRecords([...records, ...createdRecords], { sync: options.sync !== false });
   createdRecords.forEach((record) => {
     addAuditLog(
       user,
@@ -3705,7 +3746,7 @@ function apiCreateProductionRecordsBatch(payloads, user) {
   return createdRecords;
 }
 
-function apiUpdateProductionRecord(id, payload, user) {
+function apiUpdateProductionRecord(id, payload, user, options = {}) {
   const records = getProductionRecords();
   const existingRecord = records.find((record) => record.id === id);
 
@@ -3715,7 +3756,8 @@ function apiUpdateProductionRecord(id, payload, user) {
 
   const updatedRecord = buildProductionRecord(payload, user, existingRecord);
   saveProductionRecords(
-    records.map((record) => (record.id === id ? updatedRecord : record))
+    records.map((record) => (record.id === id ? updatedRecord : record)),
+    { sync: options.sync !== false }
   );
   addAuditLog(
     user,
@@ -7510,17 +7552,20 @@ async function saveProductionFastForm(user) {
       );
 
       if (addNew) {
-        apiCreateProductionRecord(payload, user);
+        const record = apiCreateProductionRecord(payload, user, { sync: false });
+        await saveProductionRowsToCloud(record);
         setFastInputMessage("บันทึกรายการใหม่แล้ว");
       } else {
-        apiUpdateProductionRecord(duplicate.id, payload, user);
+        apiUpdateProductionRecord(duplicate.id, payload, user, { sync: false });
+        const updatedRecord = getProductionRecords().find((record) => Number(record.id) === Number(duplicate.id));
+        await saveProductionRowsToCloud(updatedRecord);
         setFastInputMessage(`แก้ไขรายการ #${duplicate.id} แล้ว`);
       }
     } else {
-      apiCreateProductionRecord(payload, user);
+      const record = apiCreateProductionRecord(payload, user, { sync: false });
+      await saveProductionRowsToCloud(record);
     }
 
-    await flushLiveStateSync("production_records");
     setFastInputMessage("บันทึกผลผลิตขึ้น Cloud แล้ว");
     clearFastInputForm(true);
   } catch (error) {
@@ -7581,12 +7626,18 @@ async function saveDurianFastForm(user) {
     render();
     if (duplicate) {
       const addNew = window.confirm("พนักงานคนนี้เพิ่งถูกบันทึกทุเรียนภายใน 1 นาที กด OK เพื่อเพิ่มรายการใหม่ หรือ Cancel เพื่อแก้รายการเดิม");
-      if (addNew) apiCreateProductionRecord(payload, user);
-      else apiUpdateProductionRecord(duplicate.id, payload, user);
+      if (addNew) {
+        const record = apiCreateProductionRecord(payload, user, { sync: false });
+        await saveProductionRowsToCloud(record);
+      } else {
+        apiUpdateProductionRecord(duplicate.id, payload, user, { sync: false });
+        const updatedRecord = getProductionRecords().find((record) => Number(record.id) === Number(duplicate.id));
+        await saveProductionRowsToCloud(updatedRecord);
+      }
     } else {
-      apiCreateProductionRecord(payload, user);
+      const record = apiCreateProductionRecord(payload, user, { sync: false });
+      await saveProductionRowsToCloud(record);
     }
-    await flushLiveStateSync("production_records");
     setFastInputMessage("บันทึกทุเรียนขึ้น Cloud แล้ว");
     clearFastInputForm(true);
   } catch (error) {
@@ -8161,7 +8212,7 @@ async function saveBatchEntries(user) {
     productionSaving = true;
     setProductionMessage("กำลังบันทึกชุดนี้ขึ้น Cloud... กรุณารอสักครู่");
     render();
-    apiCreateProductionRecordsBatch(
+    const createdRecords = apiCreateProductionRecordsBatch(
       Array.from(groups.values()).map((group) => ({
         employee,
         record_date: productionRecordDate,
@@ -8170,9 +8221,10 @@ async function saveBatchEntries(user) {
         water_weight: group.water,
         flower_weight: group.flower
       })),
-      user
+      user,
+      { sync: false }
     );
-    await flushLiveStateSync("production_records");
+    await saveProductionRowsToCloud(createdRecords);
   } catch (error) {
     setProductionMessage(
       error instanceof Error ? error.message : "บันทึกผลผลิตแบบชุดขึ้น Cloud ไม่สำเร็จ",
@@ -8245,7 +8297,7 @@ async function saveDurianBatchEntries(user) {
     productionSaving = true;
     setProductionMessage("กำลังบันทึกทุเรียนชุดนี้ขึ้น Cloud... กรุณารอสักครู่");
     render();
-    apiCreateProductionRecordsBatch(
+    const createdRecords = apiCreateProductionRecordsBatch(
       [...groups.values()].map((group) => ({
         employee,
         record_date: productionRecordDate,
@@ -8253,9 +8305,10 @@ async function saveDurianBatchEntries(user) {
         pile_no: group.pileNo,
         grade_weights: group.grade_weights
       })),
-      user
+      user,
+      { sync: false }
     );
-    await flushLiveStateSync("production_records");
+    await saveProductionRowsToCloud(createdRecords);
   } catch (error) {
     setProductionMessage(error instanceof Error ? error.message : "บันทึกทุเรียนแบบชุดขึ้น Cloud ไม่สำเร็จ", "error");
     productionSaving = false;

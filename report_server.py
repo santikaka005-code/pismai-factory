@@ -4302,6 +4302,29 @@ class ReportHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/production-records/bulk-sync":
+            records = payload.get("records", [])
+            if not isinstance(records, list) or not records:
+                self.send_json({"error": "records must be a non-empty list"}, 400)
+                return
+            converted = [
+                live_state_row("production_records", record)
+                for record in records
+                if isinstance(record, dict)
+            ]
+            with live_state_sync_lock:
+                status, body = sync_rows_by_id("production_records", converted)
+            if status >= 400:
+                self.send_json({"data": None, "error": body}, status)
+                return
+            synced_rows = [
+                live_state_to_client("production_records", row)
+                for row in body.get("synced", [])
+                if isinstance(row, dict)
+            ]
+            self.send_json({"data": synced_rows, "error": None}, status)
+            return
+
         production_delete_match = re.fullmatch(r"/api/production-records/(\d+)/delete", parsed.path)
         if production_delete_match:
             actor = accounting_actor(self, 4)
