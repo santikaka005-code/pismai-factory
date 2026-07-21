@@ -3558,6 +3558,97 @@ function apiCheckProductionDuplicate(
   );
 }
 
+function getProductionPayloadPileSummary(payload) {
+  const pile = String(normalizeProductionPileNumber(payload.pile_no ?? payload.pile) || "");
+  const fruitId = payload.fruit_type || getSelectedProductionFruitId();
+  if (isDurianFruit(fruitId)) {
+    const total = getDurianGradeTotal(payload.grade_weights || {});
+    return { pile, water: 0, flower: 0, total };
+  }
+  const water = Number(payload.water_weight ?? payload.water ?? 0) || 0;
+  const flower = Number(payload.flower_weight ?? payload.flower ?? 0) || 0;
+  return { pile, water, flower, total: water + flower };
+}
+
+function summarizeProductionPayloadGroups(payloads) {
+  const byPile = new Map();
+  payloads.forEach((payload) => {
+    const item = getProductionPayloadPileSummary(payload);
+    if (!item.pile || item.total <= 0) return;
+    const existing = byPile.get(item.pile) || { pile: item.pile, water: 0, flower: 0, total: 0 };
+    existing.water += item.water;
+    existing.flower += item.flower;
+    existing.total += item.total;
+    byPile.set(item.pile, existing);
+  });
+  return Array.from(byPile.values()).sort((a, b) => Number(a.pile) - Number(b.pile));
+}
+
+function summarizeExistingProductionGroups(employee, recordDate, fruitId) {
+  const byPile = new Map();
+  getProductionRecords()
+    .filter((record) => {
+      const sameEmployee =
+        (employee?.id && Number(record.employee_id) === Number(employee.id)) ||
+        String(record.emp_code || "").padStart(2, "0") === String(employee?.emp_code || "").padStart(2, "0");
+      return sameEmployee && getRecordDate(record) === recordDate && productionFruitTypeForRecord(record) === fruitId;
+    })
+    .forEach((record) => {
+      const item = getProductionPayloadPileSummary(record);
+      if (!item.pile || item.total <= 0) return;
+      const existing = byPile.get(item.pile) || { pile: item.pile, water: 0, flower: 0, total: 0, records: 0 };
+      existing.water += item.water;
+      existing.flower += item.flower;
+      existing.total += item.total;
+      existing.records += 1;
+      byPile.set(item.pile, existing);
+    });
+  return Array.from(byPile.values()).sort((a, b) => Number(a.pile) - Number(b.pile));
+}
+
+function productionSimilarityRatio(a, b) {
+  const larger = Math.max(Math.abs(a), Math.abs(b));
+  if (larger <= 0) return 1;
+  return Math.min(Math.abs(a), Math.abs(b)) / larger;
+}
+
+function getPotentialProductionDuplicateWarning(employee, payloads, recordDate, fruitId) {
+  const incomingGroups = summarizeProductionPayloadGroups(payloads);
+  const existingGroups = summarizeExistingProductionGroups(employee, recordDate, fruitId);
+  if (!incomingGroups.length || incomingGroups.length !== existingGroups.length) return "";
+
+  const existingByPile = new Map(existingGroups.map((group) => [group.pile, group]));
+  if (!incomingGroups.every((group) => existingByPile.has(group.pile))) return "";
+
+  const incomingTotal = incomingGroups.reduce((sum, group) => sum + group.total, 0);
+  const existingTotal = existingGroups.reduce((sum, group) => sum + group.total, 0);
+  const sameExact = incomingGroups.every((group) => {
+    const existing = existingByPile.get(group.pile);
+    return (
+      Math.abs(group.water - existing.water) < 0.05 &&
+      Math.abs(group.flower - existing.flower) < 0.05 &&
+      Math.abs(group.total - existing.total) < 0.05
+    );
+  });
+  const totalSimilarity = productionSimilarityRatio(incomingTotal, existingTotal);
+  if (!sameExact && totalSimilarity < 0.9) return "";
+
+  const labels = getProductionFieldLabels(fruitId);
+  const incomingLines = incomingGroups.map((group) => {
+    const existing = existingByPile.get(group.pile);
+    return `กอง ${group.pile}: กำลังกรอก ${numberText(group.total)} กก. / มีอยู่แล้ว ${numberText(existing.total)} กก.`;
+  });
+  return [
+    `อาจมีข้อมูลซ้ำของรหัส ${employee.emp_code} วันที่ ${recordDate}`,
+    `จำนวนกองตรงกัน ${incomingGroups.length} กอง และยอดใกล้กัน ${Math.round(totalSimilarity * 100)}%`,
+    ...incomingLines,
+    "",
+    `กด OK/ยืนยัน เพื่อบันทึกต่อ`,
+    `กด Cancel/ยกเลิก เพื่อกลับไปตรวจสอบ โดยข้อมูลที่กรอกไว้จะยังอยู่`,
+    labels.mode === "grades" ? "" : `ตรวจจาก${labels.waterShort || labels.water} + ${labels.flowerShort || labels.flower}`
+  ].filter((line) => line !== "").join("\n");
+}
+
 function createProductionClientUid() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `production-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
@@ -7540,33 +7631,27 @@ async function saveProductionFastForm(user) {
     water_weight: waterWeight,
     flower_weight: flowerWeight
   };
-  const duplicate = apiCheckProductionDuplicate(employee.id, new Date(), getSelectedProductionFruitId(), productionRecordDate);
+  const duplicateWarning = getPotentialProductionDuplicateWarning(
+    employee,
+    [payload],
+    productionRecordDate,
+    getSelectedProductionFruitId()
+  );
+  if (duplicateWarning && !window.confirm(duplicateWarning)) {
+    setFastInputMessage(`ยกเลิกบันทึก รหัส ${employee.emp_code} ข้อมูลที่กรอกไว้ยังอยู่`, "error");
+    render();
+    focusFastEmployeeCode();
+    return;
+  }
 
   try {
     productionSaving = true;
     setFastInputMessage("กำลังบันทึกขึ้น Cloud... กรุณารอสักครู่", "success");
     render();
-    if (duplicate) {
-      const addNew = window.confirm(
-        "พนักงานคนนี้เพิ่งถูกบันทึกภายใน 1 นาที กด OK เพื่อเพิ่มรายการใหม่ หรือ Cancel เพื่อแก้รายการเดิม"
-      );
+    const record = apiCreateProductionRecord(payload, user, { sync: false });
+    await saveProductionRowsToCloud(record);
 
-      if (addNew) {
-        const record = apiCreateProductionRecord(payload, user, { sync: false });
-        await saveProductionRowsToCloud(record);
-        setFastInputMessage("บันทึกรายการใหม่แล้ว");
-      } else {
-        apiUpdateProductionRecord(duplicate.id, payload, user, { sync: false });
-        const updatedRecord = getProductionRecords().find((record) => Number(record.id) === Number(duplicate.id));
-        await saveProductionRowsToCloud(updatedRecord, { mode: "upsert" });
-        setFastInputMessage(`แก้ไขรายการ #${duplicate.id} แล้ว`);
-      }
-    } else {
-      const record = apiCreateProductionRecord(payload, user, { sync: false });
-      await saveProductionRowsToCloud(record);
-    }
-
-    setFastInputMessage("บันทึกผลผลิตขึ้น Cloud แล้ว");
+    setFastInputMessage(`บันทึกผลผลิตขึ้น Cloud แล้ว: รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(waterWeight + flowerWeight)} กก.`);
     clearFastInputForm(true);
   } catch (error) {
     setFastInputMessage(
@@ -7619,26 +7704,18 @@ async function saveDurianFastForm(user) {
   }
   if (totalWeight > 500 && !window.confirm("น้ำหนักทุเรียนรวมเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?")) return;
   const payload = { employee, record_date: productionRecordDate, fruit_type: "durian", pile_no: fastInputState.pile_no, grade_weights: gradeWeights };
-  const duplicate = apiCheckProductionDuplicate(employee.id, new Date(), "durian", productionRecordDate);
+  const duplicateWarning = getPotentialProductionDuplicateWarning(employee, [payload], productionRecordDate, "durian");
+  if (duplicateWarning && !window.confirm(duplicateWarning)) {
+    setFastInputMessage(`ยกเลิกบันทึกทุเรียน รหัส ${employee.emp_code} ข้อมูลที่กรอกไว้ยังอยู่`, "error");
+    render(); focusFastEmployeeCode(); return;
+  }
   try {
     productionSaving = true;
     setFastInputMessage("กำลังบันทึกขึ้น Cloud... กรุณารอสักครู่", "success");
     render();
-    if (duplicate) {
-      const addNew = window.confirm("พนักงานคนนี้เพิ่งถูกบันทึกทุเรียนภายใน 1 นาที กด OK เพื่อเพิ่มรายการใหม่ หรือ Cancel เพื่อแก้รายการเดิม");
-      if (addNew) {
-        const record = apiCreateProductionRecord(payload, user, { sync: false });
-        await saveProductionRowsToCloud(record);
-      } else {
-        apiUpdateProductionRecord(duplicate.id, payload, user, { sync: false });
-        const updatedRecord = getProductionRecords().find((record) => Number(record.id) === Number(duplicate.id));
-        await saveProductionRowsToCloud(updatedRecord, { mode: "upsert" });
-      }
-    } else {
-      const record = apiCreateProductionRecord(payload, user, { sync: false });
-      await saveProductionRowsToCloud(record);
-    }
-    setFastInputMessage("บันทึกทุเรียนขึ้น Cloud แล้ว");
+    const record = apiCreateProductionRecord(payload, user, { sync: false });
+    await saveProductionRowsToCloud(record);
+    setFastInputMessage(`บันทึกทุเรียนขึ้น Cloud แล้ว: รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(totalWeight)} กก.`);
     clearFastInputForm(true);
   } catch (error) {
     setFastInputMessage(error instanceof Error ? error.message : "บันทึกทุเรียนขึ้น Cloud ไม่สำเร็จ", "error");
@@ -8207,20 +8284,33 @@ async function saveBatchEntries(user) {
   ) {
     return;
   }
+  const batchPayloads = Array.from(groups.values()).map((group) => ({
+    employee,
+    record_date: productionRecordDate,
+    fruit_type: getSelectedProductionFruitId(),
+    pile_no: group.pileNo,
+    water_weight: group.water,
+    flower_weight: group.flower
+  }));
+  const duplicateWarning = getPotentialProductionDuplicateWarning(
+    employee,
+    batchPayloads,
+    productionRecordDate,
+    getSelectedProductionFruitId()
+  );
+  if (duplicateWarning && !window.confirm(duplicateWarning)) {
+    setProductionMessage(`ยกเลิกบันทึกชุด รหัส ${employee.emp_code} ข้อมูลในตารางยังอยู่ กรุณาตรวจสอบอีกครั้ง`, "error");
+    render();
+    window.setTimeout(() => document.querySelector("#batchEmpCode")?.focus(), 0);
+    return;
+  }
 
   try {
     productionSaving = true;
     setProductionMessage("กำลังบันทึกชุดนี้ขึ้น Cloud... กรุณารอสักครู่");
     render();
     const createdRecords = apiCreateProductionRecordsBatch(
-      Array.from(groups.values()).map((group) => ({
-        employee,
-        record_date: productionRecordDate,
-        fruit_type: getSelectedProductionFruitId(),
-        pile_no: group.pileNo,
-        water_weight: group.water,
-        flower_weight: group.flower
-      })),
+      batchPayloads,
       user,
       { sync: false }
     );
@@ -8245,11 +8335,11 @@ async function saveBatchEntries(user) {
     (sum, group) => sum + group.water + group.flower,
     0
   );
-  const summaryMessage = `บันทึกชุดนี้แล้ว\n${summaryLines.join("\n")}\nน้ำหนักทั้งหมดของการกรอกครั้งนี้ ${numberText(grandTotal)} กก.`;
+  const successMessage = `บันทึกชุดนี้แล้ว: รหัส ${employee.emp_code}\n${summaryLines.join("\n")}\nน้ำหนักทั้งหมดของการกรอกครั้งนี้ ${numberText(grandTotal)} กก.`;
 
   clearBatchGridState();
-  setProductionMessage(summaryMessage, "success");
-  window.alert(summaryMessage);
+  setProductionMessage(successMessage, "success");
+  window.alert(successMessage);
   productionSaving = false;
   render();
   window.setTimeout(() => document.querySelector("#batchEmpCode")?.focus(), 0);
@@ -8293,18 +8383,26 @@ async function saveDurianBatchEntries(user) {
   }
   const overLimit = [...groups.values()].some((group) => getDurianGradeTotal(group.grade_weights) > 500);
   if (overLimit && !window.confirm("ผลรวมน้ำหนักทุเรียนบางกองเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?")) return;
+  const batchPayloads = [...groups.values()].map((group) => ({
+    employee,
+    record_date: productionRecordDate,
+    fruit_type: "durian",
+    pile_no: group.pileNo,
+    grade_weights: group.grade_weights
+  }));
+  const duplicateWarning = getPotentialProductionDuplicateWarning(employee, batchPayloads, productionRecordDate, "durian");
+  if (duplicateWarning && !window.confirm(duplicateWarning)) {
+    setProductionMessage(`ยกเลิกบันทึกทุเรียนชุด รหัส ${employee.emp_code} ข้อมูลในตารางยังอยู่ กรุณาตรวจสอบอีกครั้ง`, "error");
+    render();
+    window.setTimeout(() => document.querySelector("#batchEmpCode")?.focus(), 0);
+    return;
+  }
   try {
     productionSaving = true;
     setProductionMessage("กำลังบันทึกทุเรียนชุดนี้ขึ้น Cloud... กรุณารอสักครู่");
     render();
     const createdRecords = apiCreateProductionRecordsBatch(
-      [...groups.values()].map((group) => ({
-        employee,
-        record_date: productionRecordDate,
-        fruit_type: "durian",
-        pile_no: group.pileNo,
-        grade_weights: group.grade_weights
-      })),
+      batchPayloads,
       user,
       { sync: false }
     );
@@ -8319,7 +8417,7 @@ async function saveDurianBatchEntries(user) {
     `กอง ${group.pileNo}: ${DURIAN_GRADES.map((grade) => `${grade} ${numberText(group.grade_weights[grade])}`).join(", ")} · รวม ${numberText(getDurianGradeTotal(group.grade_weights))} กก.`
   );
   const grandTotal = [...groups.values()].reduce((sum, group) => sum + getDurianGradeTotal(group.grade_weights), 0);
-  const message = `บันทึกทุเรียนแบบชุดแล้ว\n${lines.join("\n")}\nน้ำหนักรวม ${numberText(grandTotal)} กก.`;
+  const message = `บันทึกทุเรียนแบบชุดแล้ว: รหัส ${employee.emp_code}\n${lines.join("\n")}\nน้ำหนักรวม ${numberText(grandTotal)} กก.`;
   clearBatchGridState();
   setProductionMessage(message);
   window.alert(message);
