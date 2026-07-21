@@ -521,9 +521,11 @@ def live_state_row(table: str, payload: dict) -> dict:
             "raw_payload": payload,
         }
     elif table == "production_records":
-        water = payload.get("water_weight", payload.get("water", 0)) or 0
-        flower = payload.get("flower_weight", payload.get("flower", 0)) or 0
+        water = safe_float(payload.get("water_weight", payload.get("water", 0)))
+        flower = safe_float(payload.get("flower_weight", payload.get("flower", 0)))
         pile_number = production_pile_number(payload)
+        fruit_type = payload.get("fruit_type") or "mangosteen"
+        total_weight = production_grade_total(payload) if fruit_type == "durian" else water + flower
         row = {
             "record_date": payload.get("record_date") or payload.get("date"),
             # Legacy browser ids belong to a different local database. Keep
@@ -534,12 +536,12 @@ def live_state_row(table: str, payload: dict) -> dict:
             "emp_code": payload.get("emp_code"),
             "employee_name": payload.get("employee_name") or payload.get("fullname"),
             "pay_group": payload.get("pay_group"),
-            "fruit_type": payload.get("fruit_type") or "mangosteen",
+            "fruit_type": fruit_type,
             "pile_no": str(pile_number) if pile_number is not None else None,
             "item_type": payload.get("item_type"),
             "water_weight": water,
             "flower_weight": flower,
-            "total_weight": payload.get("total_weight", float(water) + float(flower)),
+            "total_weight": total_weight,
             "rate": payload.get("rate", 0) or 0,
             "amount": payload.get("amount", payload.get("total_amount", payload.get("grand_total", 0))) or 0,
             "note": payload.get("note"),
@@ -2753,9 +2755,6 @@ def production_grade_total(record: dict) -> float:
 def production_total_weight(record: dict) -> float:
     if (record.get("fruit_type") or "mangosteen") == "durian":
         return production_grade_total(record)
-    explicit = record.get("total_weight")
-    if explicit not in [None, ""] and safe_float(explicit) > 0:
-        return safe_float(explicit)
     return safe_float(record.get("water_weight", record.get("water", 0))) + safe_float(record.get("flower_weight", record.get("flower", 0)))
 
 

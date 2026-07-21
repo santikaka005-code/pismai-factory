@@ -649,6 +649,8 @@ let liveStateCloudBootstrapped = false;
 let applyingCloudState = false;
 const liveStateSyncTimers = new Map();
 const liveStateSyncInFlight = new Set();
+const liveStateSyncVersions = new Map();
+const liveStateSyncPending = new Set();
 let liveStateRefreshInFlight = false;
 let lastRenderedRoute = "";
 let batchEntryText = "";
@@ -1290,31 +1292,60 @@ const liveStateConfig = {
   audit_logs: { key: AUDIT_LOG_KEY, read: getAuditLogs }
 };
 
-function queueLiveStateSync(table) {
+function getLiveStateSyncVersion(table) {
+  return liveStateSyncVersions.get(table) || 0;
+}
+
+function getLiveStateVersionSignature() {
+  return Object.keys(liveStateConfig)
+    .map((table) => `${table}:${getLiveStateSyncVersion(table)}`)
+    .join("|");
+}
+
+function queueLiveStateSync(table, options = {}) {
   if (applyingCloudState || !liveStateConfig[table]) return;
+  const markChanged = options.markChanged !== false;
+  const delayMs = Number.isFinite(Number(options.delayMs)) ? Number(options.delayMs) : 150;
+  if (markChanged) {
+    liveStateSyncVersions.set(table, getLiveStateSyncVersion(table) + 1);
+  }
   clearTimeout(liveStateSyncTimers.get(table));
   liveStateSyncTimers.set(table, setTimeout(async () => {
     liveStateSyncTimers.delete(table);
+    if (liveStateSyncInFlight.has(table)) {
+      liveStateSyncPending.add(table);
+      return;
+    }
+    const requestVersion = getLiveStateSyncVersion(table);
+    const rows = liveStateConfig[table].read();
     liveStateSyncInFlight.add(table);
     let receivedMergedRows = false;
     try {
       const response = await cloudApiRequest("/api/state", {
         method: "POST",
-        body: JSON.stringify({ table, rows: liveStateConfig[table].read() })
+        body: JSON.stringify({ table, rows })
       });
-      if (Array.isArray(response.data)) {
+      if (Array.isArray(response.data) && getLiveStateSyncVersion(table) === requestVersion) {
         applyingCloudState = true;
         localStorage.setItem(liveStateConfig[table].key, JSON.stringify(response.data));
         receivedMergedRows = true;
+      } else {
+        liveStateSyncPending.add(table);
       }
     } catch (error) {
       console.error(`Cloud sync failed for ${table}.`, error);
+      liveStateSyncPending.add(table);
     } finally {
       applyingCloudState = false;
       liveStateSyncInFlight.delete(table);
     }
+    if (liveStateSyncPending.has(table) || getLiveStateSyncVersion(table) !== requestVersion) {
+      liveStateSyncPending.delete(table);
+      queueLiveStateSync(table, { markChanged: false, delayMs: receivedMergedRows ? 150 : 2000 });
+      return;
+    }
     if (receivedMergedRows && !isEditingFormField()) render();
-  }, 150));
+  }, delayMs));
 }
 
 function isEditingFormField() {
@@ -1334,11 +1365,19 @@ async function refreshLiveStateFromCloud({ renderWhenIdle = true } = {}) {
     !getSession()
   ) return;
 
+  const refreshVersionSignature = getLiveStateVersionSignature();
   liveStateRefreshInFlight = true;
   let changed = false;
   try {
     const response = await cloudApiRequest("/api/state");
     const state = response.data || {};
+    if (
+      refreshVersionSignature !== getLiveStateVersionSignature() ||
+      liveStateSyncTimers.size ||
+      liveStateSyncInFlight.size
+    ) {
+      return;
+    }
     applyingCloudState = true;
     for (const [table, config] of Object.entries(liveStateConfig)) {
       const cloudRows = Array.isArray(state[table]) ? state[table] : [];
@@ -3545,6 +3584,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
   const flowerWeight = Number(payload.flower_weight);
   const waterAmount = waterWeight * waterRate;
   const flowerAmount = flowerWeight * flowerRate;
+  const totalWeight = waterWeight + flowerWeight;
 
   return {
     ...base,
@@ -3571,6 +3611,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
     flower_amount: flowerAmount,
     water_total: waterAmount,
     flower_total: flowerAmount,
+    total_weight: totalWeight,
     total_amount: waterAmount + flowerAmount,
     grand_total: waterAmount + flowerAmount,
     record_date: recordDate,
