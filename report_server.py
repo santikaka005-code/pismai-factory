@@ -703,7 +703,7 @@ def supabase_request(
 
 
 def insert_audit_log_compatible(audit_row: dict) -> tuple[int, dict | list | str | None]:
-    """Write audit rows against both current and legacy Supabase schemas."""
+    """Write audit rows across legacy schemas and repaired/imported sequences."""
     variants = [
         audit_row,
         {key: value for key, value in audit_row.items() if key != "ip_address"},
@@ -725,6 +725,30 @@ def insert_audit_log_compatible(audit_row: dict) -> tuple[int, dict | list | str
         )
         if last_status < 400:
             return last_status, last_result
+
+    # Imported audit rows can leave the PostgreSQL identity sequence behind
+    # the highest existing id. Fall back to a guarded explicit id so payroll
+    # edits are not blocked by a duplicate primary key.
+    id_status, id_rows = supabase_request(
+        "GET",
+        "audit_logs?select=id&order=id.desc&limit=1",
+    )
+    if id_status < 400 and isinstance(id_rows, list):
+        highest_id = max(
+            [int(row.get("id") or 0) for row in id_rows if isinstance(row, dict)] or [0]
+        )
+        for offset in range(1, 6):
+            candidate_id = highest_id + offset
+            for candidate in variants:
+                explicit_candidate = {**candidate, "id": candidate_id}
+                last_status, last_result = supabase_request(
+                    "POST",
+                    "audit_logs",
+                    explicit_candidate,
+                    prefer="return=representation",
+                )
+                if last_status < 400:
+                    return last_status, last_result
     return last_status, last_result
 
 
@@ -4565,7 +4589,13 @@ class ReportHandler(BaseHTTPRequestHandler):
                     rollback,
                     prefer="return=minimal",
                 )
-                self.send_json({"error": "Audit log failed; production change was rolled back."}, 500)
+                self.send_json(
+                    {
+                        "error": "Audit log failed; production change was rolled back.",
+                        "audit_error": audit_result,
+                    },
+                    500,
+                )
                 return
             self.send_json({"data": after, "audit": audit_result})
             return

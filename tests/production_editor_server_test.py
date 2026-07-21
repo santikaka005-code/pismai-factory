@@ -65,6 +65,27 @@ class ProductionEditorServerTest(unittest.TestCase):
         self.assertNotIn("ip_address", request.call_args_list[1].args[2])
         self.assertIn("metadata", request.call_args_list[1].args[2])
 
+    def test_audit_insert_recovers_from_an_identity_sequence_collision(self):
+        responses = [
+            (409, {"message": "duplicate key value violates unique constraint"}),
+            (409, {"message": "duplicate key value violates unique constraint"}),
+            (409, {"message": "duplicate key value violates unique constraint"}),
+            (200, [{"id": 243}]),
+            (201, [{"id": 244}]),
+        ]
+        with patch.object(report_server, "supabase_request", side_effect=responses) as request:
+            status, result = report_server.insert_audit_log_compatible({
+                "action": "UPDATE_PRODUCTION",
+                "metadata": {"before": {"id": 243}, "after": {"id": 243}},
+                "ip_address": "127.0.0.1",
+                "user_fullname": "Admin",
+            })
+
+        self.assertEqual(status, 201)
+        self.assertEqual(result[0]["id"], 244)
+        self.assertEqual(request.call_args_list[3].args[0], "GET")
+        self.assertEqual(request.call_args_list[4].args[2]["id"], 244)
+
 
 if __name__ == "__main__":
     unittest.main()
