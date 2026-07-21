@@ -4307,11 +4307,55 @@ class ReportHandler(BaseHTTPRequestHandler):
             if not isinstance(records, list) or not records:
                 self.send_json({"error": "records must be a non-empty list"}, 400)
                 return
+            mode = str(payload.get("mode") or "upsert").strip().lower()
             converted = [
                 live_state_row("production_records", record)
                 for record in records
                 if isinstance(record, dict)
             ]
+            if mode == "insert":
+                insert_rows = []
+                for row in converted:
+                    insert_row = dict(row)
+                    insert_row.pop("id", None)
+                    insert_rows.append(insert_row)
+                status, body = supabase_request(
+                    "POST",
+                    "production_records",
+                    insert_rows,
+                    prefer="return=representation",
+                )
+                if status >= 400 and any(
+                    any(key in row for key in ("grade_weights", "grade_rates", "grade_amounts"))
+                    for row in insert_rows
+                ):
+                    fallback_rows = [
+                        {
+                            key: value
+                            for key, value in row.items()
+                            if key not in ("grade_weights", "grade_rates", "grade_amounts")
+                        }
+                        for row in insert_rows
+                    ]
+                    status, body = supabase_request(
+                        "POST",
+                        "production_records",
+                        fallback_rows,
+                        prefer="return=representation",
+                    )
+                if status >= 400:
+                    self.send_json({"data": None, "error": body}, status)
+                    return
+                synced_rows = [
+                    live_state_to_client("production_records", row)
+                    for row in body
+                    if isinstance(row, dict)
+                ] if isinstance(body, list) else []
+                self.send_json({"data": synced_rows, "error": None}, status)
+                return
+            if mode != "upsert":
+                self.send_json({"error": "mode must be insert or upsert"}, 400)
+                return
             with live_state_sync_lock:
                 status, body = sync_rows_by_id("production_records", converted)
             if status >= 400:

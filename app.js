@@ -1322,7 +1322,7 @@ function mergeProductionCloudRows(cloudRows) {
   localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
 }
 
-async function saveProductionRowsToCloud(records) {
+async function saveProductionRowsToCloud(records, { mode = "insert" } = {}) {
   const rows = Array.isArray(records) ? records : [records];
   const filteredRows = rows.filter(Boolean);
   if (!filteredRows.length) return [];
@@ -1332,7 +1332,7 @@ async function saveProductionRowsToCloud(records) {
   try {
     const response = await cloudApiRequest("/api/production-records/bulk-sync", {
       method: "POST",
-      body: JSON.stringify({ records: filteredRows })
+      body: JSON.stringify({ records: filteredRows, mode })
     });
     const cloudRows = Array.isArray(response.data) ? response.data : [];
     applyingCloudState = true;
@@ -7558,7 +7558,7 @@ async function saveProductionFastForm(user) {
       } else {
         apiUpdateProductionRecord(duplicate.id, payload, user, { sync: false });
         const updatedRecord = getProductionRecords().find((record) => Number(record.id) === Number(duplicate.id));
-        await saveProductionRowsToCloud(updatedRecord);
+        await saveProductionRowsToCloud(updatedRecord, { mode: "upsert" });
         setFastInputMessage(`แก้ไขรายการ #${duplicate.id} แล้ว`);
       }
     } else {
@@ -7632,7 +7632,7 @@ async function saveDurianFastForm(user) {
       } else {
         apiUpdateProductionRecord(duplicate.id, payload, user, { sync: false });
         const updatedRecord = getProductionRecords().find((record) => Number(record.id) === Number(duplicate.id));
-        await saveProductionRowsToCloud(updatedRecord);
+        await saveProductionRowsToCloud(updatedRecord, { mode: "upsert" });
       }
     } else {
       const record = apiCreateProductionRecord(payload, user, { sync: false });
