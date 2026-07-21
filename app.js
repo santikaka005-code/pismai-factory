@@ -628,6 +628,7 @@ let selectedProductionFruit = "";
 let productionRecordDate = new Date().toISOString().slice(0, 10);
 let productionMessage = "";
 let productionMessageType = "success";
+let productionSaving = false;
 let productionEditorOpen = false;
 let productionEditorDate = new Date().toISOString().slice(0, 10);
 let productionEditorFruit = "mangosteen";
@@ -1302,6 +1303,60 @@ function getLiveStateVersionSignature() {
     .join("|");
 }
 
+function waitForMilliseconds(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function syncLiveStateNow(table, { renderOnSuccess = true } = {}) {
+  const config = liveStateConfig[table];
+  if (applyingCloudState || !config) return false;
+  const requestVersion = getLiveStateSyncVersion(table);
+  const rows = config.read();
+  liveStateSyncInFlight.add(table);
+  let receivedMergedRows = false;
+  try {
+    const response = await cloudApiRequest("/api/state", {
+      method: "POST",
+      body: JSON.stringify({ table, rows })
+    });
+    if (Array.isArray(response.data) && getLiveStateSyncVersion(table) === requestVersion) {
+      applyingCloudState = true;
+      localStorage.setItem(config.key, JSON.stringify(response.data));
+      receivedMergedRows = true;
+    } else {
+      liveStateSyncPending.add(table);
+    }
+  } catch (error) {
+    liveStateSyncPending.add(table);
+    throw error;
+  } finally {
+    applyingCloudState = false;
+    liveStateSyncInFlight.delete(table);
+  }
+  if (receivedMergedRows && renderOnSuccess && !isEditingFormField()) render();
+  return receivedMergedRows;
+}
+
+async function flushLiveStateSync(table) {
+  if (!liveStateConfig[table]) return false;
+  clearTimeout(liveStateSyncTimers.get(table));
+  liveStateSyncTimers.delete(table);
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    while (liveStateSyncInFlight.has(table)) {
+      await waitForMilliseconds(50);
+    }
+    const requestVersion = getLiveStateSyncVersion(table);
+    liveStateSyncPending.delete(table);
+    const synced = await syncLiveStateNow(table, { renderOnSuccess: false });
+    if (synced && getLiveStateSyncVersion(table) === requestVersion && !liveStateSyncPending.has(table)) {
+      return true;
+    }
+  }
+
+  throw new Error("ยังยืนยันการบันทึกขึ้น Cloud ไม่สำเร็จ กรุณาลองบันทึกอีกครั้ง");
+}
+
 function queueLiveStateSync(table, options = {}) {
   if (applyingCloudState || !liveStateConfig[table]) return;
   const markChanged = options.markChanged !== false;
@@ -1317,34 +1372,17 @@ function queueLiveStateSync(table, options = {}) {
       return;
     }
     const requestVersion = getLiveStateSyncVersion(table);
-    const rows = liveStateConfig[table].read();
-    liveStateSyncInFlight.add(table);
     let receivedMergedRows = false;
     try {
-      const response = await cloudApiRequest("/api/state", {
-        method: "POST",
-        body: JSON.stringify({ table, rows })
-      });
-      if (Array.isArray(response.data) && getLiveStateSyncVersion(table) === requestVersion) {
-        applyingCloudState = true;
-        localStorage.setItem(liveStateConfig[table].key, JSON.stringify(response.data));
-        receivedMergedRows = true;
-      } else {
-        liveStateSyncPending.add(table);
-      }
+      receivedMergedRows = await syncLiveStateNow(table);
     } catch (error) {
       console.error(`Cloud sync failed for ${table}.`, error);
-      liveStateSyncPending.add(table);
-    } finally {
-      applyingCloudState = false;
-      liveStateSyncInFlight.delete(table);
     }
     if (liveStateSyncPending.has(table) || getLiveStateSyncVersion(table) !== requestVersion) {
       liveStateSyncPending.delete(table);
       queueLiveStateSync(table, { markChanged: false, delayMs: receivedMergedRows ? 150 : 2000 });
       return;
     }
-    if (receivedMergedRows && !isEditingFormField()) render();
   }, delayMs));
 }
 
@@ -7025,8 +7063,8 @@ function renderBatchEntry() {
         </section>
       </div>
       <div class="batch-actions">
-        <button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button">บันทึกชุดนี้</button>
-        <button class="btn btn-outline" id="clearBatchEntry" type="button">ล้างข้อมูล</button>
+        <button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึกชุดนี้"}</button>
+        <button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button>
       </div>
     </section>
   `;
@@ -7061,7 +7099,7 @@ function renderDurianBatchEntry() {
             <div class="batch-weight-grid">${renderInputs(grade)}</div>
           </section>`).join("")}
       </div>
-      <div class="batch-actions"><button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button">บันทึกชุดนี้</button><button class="btn btn-outline" id="clearBatchEntry" type="button">ล้างข้อมูล</button></div>
+      <div class="batch-actions"><button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึกชุดนี้"}</button><button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button></div>
     </section>`;
 }
 
@@ -7251,7 +7289,7 @@ function renderProductionFast(user, moduleItem) {
           />
         </label>
 
-        <button class="btn btn-primary form-submit" type="submit">บันทึก</button>
+        <button class="btn btn-primary form-submit" type="submit" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึก"}</button>
       </form>
 
       <p class="demo-note">
@@ -7323,7 +7361,7 @@ function renderDurianFast(user, moduleItem) {
         <div class="durian-grade-inputs">
           ${DURIAN_GRADES.map((grade) => `<label class="field durian-grade-field grade-${grade.toLowerCase()}"><span>เกรด ${grade}</span><input data-fast-durian-grade="${grade}" type="number" min="0" step="0.1" value="${escapeHtml(fastInputState.grade_weights[grade] ?? "")}" placeholder="0.0" /></label>`).join("")}
         </div>
-        <button class="btn btn-primary form-submit" type="submit">บันทึก</button>
+        <button class="btn btn-primary form-submit" type="submit" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึก"}</button>
       </form>
       <p class="demo-note">กรอกเฉพาะเกรดที่มีน้ำหนักได้ · กด Ctrl+S เพื่อบันทึก · Esc เพื่อล้างฟอร์ม</p>
     </section>
@@ -7370,10 +7408,11 @@ function focusFastEmployeeCode() {
   }, 0);
 }
 
-function saveProductionFastForm(user) {
+async function saveProductionFastForm(user) {
+  if (productionSaving) return;
   syncFastInputStateForSelectedFruit();
   if (isDurianFruit()) {
-    saveDurianFastForm(user);
+    await saveDurianFastForm(user);
     return;
   }
   const pileInput = document.querySelector("#fastPileNo");
@@ -7462,6 +7501,9 @@ function saveProductionFastForm(user) {
   const duplicate = apiCheckProductionDuplicate(employee.id, new Date(), getSelectedProductionFruitId(), productionRecordDate);
 
   try {
+    productionSaving = true;
+    setFastInputMessage("กำลังบันทึกขึ้น Cloud... กรุณารอสักครู่", "success");
+    render();
     if (duplicate) {
       const addNew = window.confirm(
         "พนักงานคนนี้เพิ่งถูกบันทึกภายใน 1 นาที กด OK เพื่อเพิ่มรายการใหม่ หรือ Cancel เพื่อแก้รายการเดิม"
@@ -7476,23 +7518,25 @@ function saveProductionFastForm(user) {
       }
     } else {
       apiCreateProductionRecord(payload, user);
-      setFastInputMessage("บันทึกผลผลิตแล้ว");
     }
 
+    await flushLiveStateSync("production_records");
+    setFastInputMessage("บันทึกผลผลิตขึ้น Cloud แล้ว");
     clearFastInputForm(true);
-    render();
-    focusFastEmployeeCode();
   } catch (error) {
     setFastInputMessage(
-      error instanceof Error ? error.message : "บันทึกไม่สำเร็จ",
+      error instanceof Error ? error.message : "บันทึกขึ้น Cloud ไม่สำเร็จ",
       "error"
     );
+  } finally {
+    productionSaving = false;
     render();
     focusFastEmployeeCode();
   }
 }
 
-function saveDurianFastForm(user) {
+async function saveDurianFastForm(user) {
+  if (productionSaving) return;
   const pileInput = document.querySelector("#fastPileNo");
   const dateInput = document.querySelector("#fastRecordDate");
   const empInput = document.querySelector("#fastEmpCode");
@@ -7532,20 +7576,25 @@ function saveDurianFastForm(user) {
   const payload = { employee, record_date: productionRecordDate, fruit_type: "durian", pile_no: fastInputState.pile_no, grade_weights: gradeWeights };
   const duplicate = apiCheckProductionDuplicate(employee.id, new Date(), "durian", productionRecordDate);
   try {
+    productionSaving = true;
+    setFastInputMessage("กำลังบันทึกขึ้น Cloud... กรุณารอสักครู่", "success");
+    render();
     if (duplicate) {
       const addNew = window.confirm("พนักงานคนนี้เพิ่งถูกบันทึกทุเรียนภายใน 1 นาที กด OK เพื่อเพิ่มรายการใหม่ หรือ Cancel เพื่อแก้รายการเดิม");
       if (addNew) apiCreateProductionRecord(payload, user);
       else apiUpdateProductionRecord(duplicate.id, payload, user);
-      setFastInputMessage(addNew ? "บันทึกรายการทุเรียนใหม่แล้ว" : `แก้ไขรายการ #${duplicate.id} แล้ว`);
     } else {
       apiCreateProductionRecord(payload, user);
-      setFastInputMessage("บันทึกทุเรียนเรียบร้อยแล้ว");
     }
+    await flushLiveStateSync("production_records");
+    setFastInputMessage("บันทึกทุเรียนขึ้น Cloud แล้ว");
     clearFastInputForm(true);
   } catch (error) {
-    setFastInputMessage(error instanceof Error ? error.message : "บันทึกทุเรียนไม่สำเร็จ", "error");
+    setFastInputMessage(error instanceof Error ? error.message : "บันทึกทุเรียนขึ้น Cloud ไม่สำเร็จ", "error");
+  } finally {
+    productionSaving = false;
+    render(); focusFastEmployeeCode();
   }
-  render(); focusFastEmployeeCode();
 }
 
 function bindProductionFastEvents(user) {
@@ -7601,6 +7650,10 @@ function bindProductionFastEvents(user) {
   });
 
   form?.addEventListener("keydown", (event) => {
+    if (productionSaving) {
+      event.preventDefault();
+      return;
+    }
     if (event.key === "Enter") {
       event.preventDefault();
       const currentIndex = orderedInputs.indexOf(event.target);
@@ -7882,6 +7935,7 @@ function bindProductionManagementEvents(user) {
   });
 
   document.querySelector("#clearBatchEntry")?.addEventListener("click", () => {
+    if (productionSaving) return;
     batchEntryText = "";
     clearBatchGridState();
     setProductionMessage("ล้างข้อมูลกรอกแบบชุดแล้ว");
@@ -8035,9 +8089,10 @@ function addBatchGroup(groups, pileNo, water, flower) {
   groups.set(pileNo, existing);
 }
 
-function saveBatchEntries(user) {
+async function saveBatchEntries(user) {
+  if (productionSaving) return;
   if (isDurianFruit()) {
-    saveDurianBatchEntries(user);
+    await saveDurianBatchEntries(user);
     return;
   }
   syncBatchEmployeeFromInput();
@@ -8103,6 +8158,9 @@ function saveBatchEntries(user) {
   }
 
   try {
+    productionSaving = true;
+    setProductionMessage("กำลังบันทึกชุดนี้ขึ้น Cloud... กรุณารอสักครู่");
+    render();
     apiCreateProductionRecordsBatch(
       Array.from(groups.values()).map((group) => ({
         employee,
@@ -8114,11 +8172,13 @@ function saveBatchEntries(user) {
       })),
       user
     );
+    await flushLiveStateSync("production_records");
   } catch (error) {
     setProductionMessage(
-      error instanceof Error ? error.message : "บันทึกผลผลิตแบบชุดไม่สำเร็จ",
+      error instanceof Error ? error.message : "บันทึกผลผลิตแบบชุดขึ้น Cloud ไม่สำเร็จ",
       "error"
     );
+    productionSaving = false;
     render();
     return;
   }
@@ -8138,11 +8198,13 @@ function saveBatchEntries(user) {
   clearBatchGridState();
   setProductionMessage(summaryMessage, "success");
   window.alert(summaryMessage);
+  productionSaving = false;
   render();
   window.setTimeout(() => document.querySelector("#batchEmpCode")?.focus(), 0);
 }
 
-function saveDurianBatchEntries(user) {
+async function saveDurianBatchEntries(user) {
+  if (productionSaving) return;
   syncBatchEmployeeFromInput();
   const selectedDate = document.querySelector("#batchRecordDate")?.value;
   if (selectedDate) productionRecordDate = selectedDate;
@@ -8180,6 +8242,9 @@ function saveDurianBatchEntries(user) {
   const overLimit = [...groups.values()].some((group) => getDurianGradeTotal(group.grade_weights) > 500);
   if (overLimit && !window.confirm("ผลรวมน้ำหนักทุเรียนบางกองเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?")) return;
   try {
+    productionSaving = true;
+    setProductionMessage("กำลังบันทึกทุเรียนชุดนี้ขึ้น Cloud... กรุณารอสักครู่");
+    render();
     apiCreateProductionRecordsBatch(
       [...groups.values()].map((group) => ({
         employee,
@@ -8190,8 +8255,12 @@ function saveDurianBatchEntries(user) {
       })),
       user
     );
+    await flushLiveStateSync("production_records");
   } catch (error) {
-    setProductionMessage(error instanceof Error ? error.message : "บันทึกทุเรียนแบบชุดไม่สำเร็จ", "error"); render(); return;
+    setProductionMessage(error instanceof Error ? error.message : "บันทึกทุเรียนแบบชุดขึ้น Cloud ไม่สำเร็จ", "error");
+    productionSaving = false;
+    render();
+    return;
   }
   const lines = [...groups.values()].sort((a,b) => a.pileNo-b.pileNo).map((group) =>
     `กอง ${group.pileNo}: ${DURIAN_GRADES.map((grade) => `${grade} ${numberText(group.grade_weights[grade])}`).join(", ")} · รวม ${numberText(getDurianGradeTotal(group.grade_weights))} กก.`
@@ -8201,6 +8270,7 @@ function saveDurianBatchEntries(user) {
   clearBatchGridState();
   setProductionMessage(message);
   window.alert(message);
+  productionSaving = false;
   render();
   window.setTimeout(() => document.querySelector("#batchEmpCode")?.focus(), 0);
 }
