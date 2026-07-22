@@ -1371,7 +1371,7 @@ function assertProductionCloudRowMatches(expected, actual) {
   }
 }
 
-async function verifyProductionRowsInCloud(expectedRows) {
+function verifyProductionRowsFromCloudResponse(expectedRows, cloudRows) {
   const expectedByUid = new Map();
   expectedRows.forEach((row) => {
     const uid = getProductionClientUid(row);
@@ -1381,11 +1381,7 @@ async function verifyProductionRowsInCloud(expectedRows) {
     throw new Error("รายการที่กำลังบันทึกไม่มีรหัสตรวจสอบครบ กรุณารีเฟรชหน้าแล้วลองอีกครั้ง");
   }
 
-  const response = await cloudApiRequest("/api/production-records/verify", {
-    method: "POST",
-    body: JSON.stringify({ client_uids: Array.from(expectedByUid.keys()) })
-  });
-  const verifiedRows = Array.isArray(response.data) ? response.data : [];
+  const verifiedRows = Array.isArray(cloudRows) ? cloudRows : [];
   const verifiedByUid = new Map();
   verifiedRows.forEach((row) => {
     const uid = getProductionClientUid(row);
@@ -1425,7 +1421,7 @@ async function saveProductionRowsToCloud(records, { mode = "insert" } = {}) {
         `Cloud ยืนยันกลับมาไม่ครบ (${cloudRows.length}/${filteredRows.length} รายการ) กรุณาตรวจสอบเน็ตแล้วกดบันทึกอีกครั้ง`
       );
     }
-    const verifiedRows = await verifyProductionRowsInCloud(filteredRows);
+    const verifiedRows = verifyProductionRowsFromCloudResponse(filteredRows, cloudRows);
     applyingCloudState = true;
     mergeProductionCloudRows(verifiedRows);
     return verifiedRows;

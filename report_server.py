@@ -465,9 +465,10 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
             prefer="return=representation",
         )
 
-    status, body = post(insert_rows)
-    if status >= 400 and has_durian_columns(insert_rows) and not is_unique_constraint_error(body, "production_records_pkey"):
-        status, body = post(strip_durian_columns(insert_rows))
+    queued_rows = assign_sequential_ids("production_records", insert_rows)
+    status, body = post(queued_rows)
+    if status >= 400 and has_durian_columns(queued_rows) and not is_unique_constraint_error(body, "production_records_pkey"):
+        status, body = post(strip_durian_columns(queued_rows))
 
     for _attempt in range(3):
         if not (status >= 400 and is_unique_constraint_error(body, "production_records_pkey")):
