@@ -12,6 +12,8 @@ const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
 const AUDIT_LOG_PASSWORD = "1150";
 const ONLINE_CLIENT_KEY = "pismai_online_client_id";
 const ONLINE_HEARTBEAT_INTERVAL_MS = 15000;
+const LIVE_STATE_REFRESH_INTERVAL_MS = 60000;
+const AUDIT_LOG_SYNC_DELAY_MS = 8000;
 const REPORT_API_BASE =
   // The desktop launcher opens index.html directly. It must use the same
   // cloud API as the hosted app, otherwise its browser-only data can never
@@ -1526,6 +1528,7 @@ async function refreshLiveStateFromCloud({ renderWhenIdle = true } = {}) {
   if (
     liveStateRefreshInFlight ||
     applyingCloudState ||
+    productionSaving ||
     liveStateSyncTimers.size ||
     liveStateSyncInFlight.size ||
     !getSession()
@@ -2899,7 +2902,7 @@ function getAuditLogs() {
 
 function saveAuditLogs(logs) {
   localStorage.setItem(AUDIT_LOG_KEY, JSON.stringify(logs));
-  queueLiveStateSync("audit_logs");
+  queueLiveStateSync("audit_logs", { delayMs: AUDIT_LOG_SYNC_DELAY_MS });
 }
 
 function addAuditLog(user, action, detail) {
@@ -14146,6 +14149,6 @@ document.addEventListener("visibilitychange", () => {
     refreshLiveStateFromCloud();
   }
 });
-window.setInterval(refreshLiveStateFromCloud, 15000);
+window.setInterval(refreshLiveStateFromCloud, LIVE_STATE_REFRESH_INTERVAL_MS);
 startLiveClock();
 render();
