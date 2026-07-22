@@ -1322,6 +1322,91 @@ function mergeProductionCloudRows(cloudRows) {
   localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
 }
 
+function getProductionClientUid(record) {
+  return String(record?.client_uid || record?.raw_payload?.client_uid || "").trim();
+}
+
+function formatCloudRecordIds(records) {
+  const ids = (Array.isArray(records) ? records : [records])
+    .map((record) => Number(record?.id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+  if (!ids.length) return "-";
+  return ids.map((id) => `#${id}`).join(", ");
+}
+
+function assertProductionCloudRowMatches(expected, actual) {
+  const fields = [
+    ["emp_code", "รหัสพนักงาน"],
+    ["record_date", "วันที่"],
+    ["fruit_type", "ชนิดผลไม้"]
+  ];
+  fields.forEach(([field, label]) => {
+    if (String(expected?.[field] || "") !== String(actual?.[field] || "")) {
+      throw new Error(`Cloud ตรวจกลับมาไม่ตรง: ${label} ไม่ตรง กรุณาตรวจสอบก่อนบันทึกใหม่`);
+    }
+  });
+
+  const expectedPile = normalizeProductionPileNumber(expected?.pile_no ?? expected?.pile);
+  const actualPile = normalizeProductionPileNumber(actual?.pile_no ?? actual?.pile);
+  if (expectedPile !== actualPile) {
+    throw new Error("Cloud ตรวจกลับมาไม่ตรง: เลขกองไม่ตรง กรุณาตรวจสอบก่อนบันทึกใหม่");
+  }
+
+  if (isDurianFruit(productionFruitTypeForRecord(expected))) {
+    const expectedGrades = getRecordGradeWeights(expected);
+    const actualGrades = getRecordGradeWeights(actual);
+    const gradeMismatch = DURIAN_GRADES.some((grade) => Math.abs(expectedGrades[grade] - actualGrades[grade]) > 0.05);
+    if (gradeMismatch) {
+      throw new Error("Cloud ตรวจกลับมาไม่ตรง: น้ำหนักทุเรียนไม่ตรง กรุณาตรวจสอบก่อนบันทึกใหม่");
+    }
+    return;
+  }
+
+  const expectedWater = Number(expected?.water_weight ?? expected?.water ?? 0);
+  const actualWater = Number(actual?.water_weight ?? actual?.water ?? 0);
+  const expectedFlower = Number(expected?.flower_weight ?? expected?.flower ?? 0);
+  const actualFlower = Number(actual?.flower_weight ?? actual?.flower ?? 0);
+  if (Math.abs(expectedWater - actualWater) > 0.05 || Math.abs(expectedFlower - actualFlower) > 0.05) {
+    throw new Error("Cloud ตรวจกลับมาไม่ตรง: น้ำหนักไม่ตรง กรุณาตรวจสอบก่อนบันทึกใหม่");
+  }
+}
+
+async function verifyProductionRowsInCloud(expectedRows) {
+  const expectedByUid = new Map();
+  expectedRows.forEach((row) => {
+    const uid = getProductionClientUid(row);
+    if (uid) expectedByUid.set(uid, row);
+  });
+  if (expectedByUid.size !== expectedRows.length) {
+    throw new Error("รายการที่กำลังบันทึกไม่มีรหัสตรวจสอบครบ กรุณารีเฟรชหน้าแล้วลองอีกครั้ง");
+  }
+
+  const response = await cloudApiRequest("/api/production-records/verify", {
+    method: "POST",
+    body: JSON.stringify({ client_uids: Array.from(expectedByUid.keys()) })
+  });
+  const verifiedRows = Array.isArray(response.data) ? response.data : [];
+  const verifiedByUid = new Map();
+  verifiedRows.forEach((row) => {
+    const uid = getProductionClientUid(row);
+    if (uid && expectedByUid.has(uid)) verifiedByUid.set(uid, row);
+  });
+  if (verifiedByUid.size !== expectedByUid.size) {
+    throw new Error(
+      `Cloud ตรวจกลับมาไม่ครบ (${verifiedByUid.size}/${expectedByUid.size} รายการ) กรุณาตรวจสอบเน็ตแล้วกดบันทึกอีกครั้ง`
+    );
+  }
+  if (verifiedRows.length !== expectedByUid.size) {
+    throw new Error(
+      `Cloud พบจำนวนรายการตรวจสอบผิดปกติ (${verifiedRows.length}/${expectedByUid.size} รายการ) กรุณาแจ้งผู้ดูแลก่อนบันทึกซ้ำ`
+    );
+  }
+  expectedByUid.forEach((expected, uid) => {
+    assertProductionCloudRowMatches(expected, verifiedByUid.get(uid));
+  });
+  return Array.from(verifiedByUid.values()).sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+}
+
 async function saveProductionRowsToCloud(records, { mode = "insert" } = {}) {
   const rows = Array.isArray(records) ? records : [records];
   const filteredRows = rows.filter(Boolean);
@@ -1340,9 +1425,10 @@ async function saveProductionRowsToCloud(records, { mode = "insert" } = {}) {
         `Cloud ยืนยันกลับมาไม่ครบ (${cloudRows.length}/${filteredRows.length} รายการ) กรุณาตรวจสอบเน็ตแล้วกดบันทึกอีกครั้ง`
       );
     }
+    const verifiedRows = await verifyProductionRowsInCloud(filteredRows);
     applyingCloudState = true;
-    mergeProductionCloudRows(cloudRows);
-    return cloudRows;
+    mergeProductionCloudRows(verifiedRows);
+    return verifiedRows;
   } finally {
     applyingCloudState = false;
     liveStateSyncInFlight.delete("production_records");
@@ -7655,9 +7741,9 @@ async function saveProductionFastForm(user) {
     setFastInputMessage("กำลังบันทึกขึ้น Cloud... กรุณารอสักครู่", "success");
     render();
     const record = apiCreateProductionRecord(payload, user, { sync: false });
-    await saveProductionRowsToCloud(record);
+    const cloudRows = await saveProductionRowsToCloud(record);
 
-    setFastInputMessage(`บันทึกผลผลิตขึ้น Cloud แล้ว: รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(waterWeight + flowerWeight)} กก.`);
+    setFastInputMessage(`บันทึกผลผลิตขึ้น Cloud แล้ว: รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(waterWeight + flowerWeight)} กก. · เลขอ้างอิง Cloud ${formatCloudRecordIds(cloudRows)} · ตรวจสำเร็จ ${cloudRows.length}/1 รายการ`);
     clearFastInputForm(true);
   } catch (error) {
     setFastInputMessage(
@@ -7720,8 +7806,8 @@ async function saveDurianFastForm(user) {
     setFastInputMessage("กำลังบันทึกขึ้น Cloud... กรุณารอสักครู่", "success");
     render();
     const record = apiCreateProductionRecord(payload, user, { sync: false });
-    await saveProductionRowsToCloud(record);
-    setFastInputMessage(`บันทึกทุเรียนขึ้น Cloud แล้ว: รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(totalWeight)} กก.`);
+    const cloudRows = await saveProductionRowsToCloud(record);
+    setFastInputMessage(`บันทึกทุเรียนขึ้น Cloud แล้ว: รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(totalWeight)} กก. · เลขอ้างอิง Cloud ${formatCloudRecordIds(cloudRows)} · ตรวจสำเร็จ ${cloudRows.length}/1 รายการ`);
     clearFastInputForm(true);
   } catch (error) {
     setFastInputMessage(error instanceof Error ? error.message : "บันทึกทุเรียนขึ้น Cloud ไม่สำเร็จ", "error");
@@ -8355,7 +8441,7 @@ async function saveBatchEntries(user) {
       user,
       { sync: false }
     );
-    await saveProductionRowsToCloud(createdRecords);
+    var cloudRows = await saveProductionRowsToCloud(createdRecords);
   } catch (error) {
     setProductionMessage(
       error instanceof Error ? error.message : "บันทึกผลผลิตแบบชุดขึ้น Cloud ไม่สำเร็จ",
@@ -8376,7 +8462,7 @@ async function saveBatchEntries(user) {
     (sum, group) => sum + group.water + group.flower,
     0
   );
-  const successMessage = `บันทึกชุดนี้แล้ว: รหัส ${employee.emp_code}\n${summaryLines.join("\n")}\nน้ำหนักทั้งหมดของการกรอกครั้งนี้ ${numberText(grandTotal)} กก.`;
+  const successMessage = `บันทึกชุดนี้แล้ว: รหัส ${employee.emp_code}\nเลขอ้างอิง Cloud: ${formatCloudRecordIds(cloudRows)}\nตรวจสำเร็จ ${cloudRows.length}/${batchPayloads.length} รายการ\n${summaryLines.join("\n")}\nน้ำหนักทั้งหมดของการกรอกครั้งนี้ ${numberText(grandTotal)} กก.`;
 
   clearBatchGridState();
   setProductionMessage(successMessage, "success");
@@ -8447,7 +8533,7 @@ async function saveDurianBatchEntries(user) {
       user,
       { sync: false }
     );
-    await saveProductionRowsToCloud(createdRecords);
+    var cloudRows = await saveProductionRowsToCloud(createdRecords);
   } catch (error) {
     setProductionMessage(error instanceof Error ? error.message : "บันทึกทุเรียนแบบชุดขึ้น Cloud ไม่สำเร็จ", "error");
     productionSaving = false;
@@ -8458,7 +8544,7 @@ async function saveDurianBatchEntries(user) {
     `กอง ${group.pileNo}: ${DURIAN_GRADES.map((grade) => `${grade} ${numberText(group.grade_weights[grade])}`).join(", ")} · รวม ${numberText(getDurianGradeTotal(group.grade_weights))} กก.`
   );
   const grandTotal = [...groups.values()].reduce((sum, group) => sum + getDurianGradeTotal(group.grade_weights), 0);
-  const message = `บันทึกทุเรียนแบบชุดแล้ว: รหัส ${employee.emp_code}\n${lines.join("\n")}\nน้ำหนักรวม ${numberText(grandTotal)} กก.`;
+  const message = `บันทึกทุเรียนแบบชุดแล้ว: รหัส ${employee.emp_code}\nเลขอ้างอิง Cloud: ${formatCloudRecordIds(cloudRows)}\nตรวจสำเร็จ ${cloudRows.length}/${batchPayloads.length} รายการ\n${lines.join("\n")}\nน้ำหนักรวม ${numberText(grandTotal)} กก.`;
   clearBatchGridState();
   setProductionMessage(message);
   window.alert(message);

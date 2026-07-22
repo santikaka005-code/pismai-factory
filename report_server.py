@@ -4372,6 +4372,41 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": synced_rows, "error": None}, status)
             return
 
+        if parsed.path == "/api/production-records/verify":
+            client_uids = payload.get("client_uids", [])
+            if not isinstance(client_uids, list) or not client_uids:
+                self.send_json({"error": "client_uids must be a non-empty list"}, 400)
+                return
+            clean_uids = []
+            for value in client_uids:
+                uid = str(value or "").strip()
+                if uid and uid not in clean_uids:
+                    clean_uids.append(uid)
+            if not clean_uids:
+                self.send_json({"error": "client_uids must include at least one value"}, 400)
+                return
+            if len(clean_uids) > 100:
+                self.send_json({"error": "client_uids limit is 100 per verification"}, 400)
+                return
+            verified_rows = []
+            uid_filter_field = quote("raw_payload->>client_uid", safe="")
+            for uid in clean_uids:
+                status, body = supabase_request(
+                    "GET",
+                    f"production_records?{uid_filter_field}=eq.{quote(uid)}&select=*&order=id.asc",
+                )
+                if status >= 400:
+                    self.send_json({"data": None, "error": body, "client_uid": uid}, status)
+                    return
+                if isinstance(body, list):
+                    verified_rows.extend(
+                        live_state_to_client("production_records", row)
+                        for row in body
+                        if isinstance(row, dict)
+                    )
+            self.send_json({"data": verified_rows, "error": None})
+            return
+
         production_delete_match = re.fullmatch(r"/api/production-records/(\d+)/delete", parsed.path)
         if production_delete_match:
             actor = accounting_actor(self, 4)
