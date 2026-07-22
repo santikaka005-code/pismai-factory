@@ -3721,7 +3721,7 @@ function getPotentialProductionDuplicateWarning(employee, payloads, recordDate, 
     );
   });
   const totalSimilarity = productionSimilarityRatio(incomingTotal, existingTotal);
-  if (!sameExact && totalSimilarity < 0.9) return "";
+  if (!sameExact && totalSimilarity < 0.5) return "";
 
   const labels = getProductionFieldLabels(fruitId);
   const incomingLines = incomingGroups.map((group) => {
@@ -3742,6 +3742,11 @@ function getPotentialProductionDuplicateWarning(employee, payloads, recordDate, 
 function createProductionClientUid() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `production-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function createProductionBatchUid() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `production-batch-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 function isValidProductionRecordDate(value) {
@@ -3784,6 +3789,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       ...base,
       id: existingRecord?.id,
       client_uid: existingRecord?.client_uid || createProductionClientUid(),
+      batch_uid: existingRecord?.batch_uid || payload.batch_uid || createProductionBatchUid(),
       session_id: payload.session_id || existingRecord?.session_id || 0,
       fruit_type: fruitType,
       employee_id: payload.employee.id,
@@ -3850,6 +3856,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
     ...base,
     id: existingRecord?.id,
     client_uid: existingRecord?.client_uid || createProductionClientUid(),
+    batch_uid: existingRecord?.batch_uid || payload.batch_uid || createProductionBatchUid(),
     session_id: payload.session_id || existingRecord?.session_id || 0,
     fruit_type: fruitType,
     employee_id: payload.employee.id,
@@ -3891,7 +3898,7 @@ function apiCreateProductionRecord(payload, user, options = {}) {
     ? Math.max(...records.map((record) => record.id)) + 1
     : 1;
   const record = {
-    ...buildProductionRecord(payload, user),
+    ...buildProductionRecord({ ...payload, batch_uid: payload.batch_uid || createProductionBatchUid() }, user),
     id: nextId
   };
 
@@ -3910,8 +3917,9 @@ function apiCreateProductionRecord(payload, user, options = {}) {
 function apiCreateProductionRecordsBatch(payloads, user, options = {}) {
   const records = getProductionRecords();
   let nextId = records.length ? Math.max(...records.map((record) => Number(record.id) || 0)) + 1 : 1;
+  const batchUid = createProductionBatchUid();
   const createdRecords = payloads.map((payload) => ({
-    ...buildProductionRecord(payload, user),
+    ...buildProductionRecord({ ...payload, batch_uid: payload.batch_uid || batchUid }, user),
     id: nextId++
   }));
 

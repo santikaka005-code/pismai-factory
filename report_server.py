@@ -477,6 +477,11 @@ def production_record_client_uid(row: dict) -> str:
     return str(raw.get("client_uid") or row.get("client_uid") or "").strip()
 
 
+def production_record_batch_uid(row: dict) -> str:
+    raw = production_record_raw_payload(row)
+    return str(raw.get("batch_uid") or row.get("batch_uid") or "").strip()
+
+
 def production_record_duplicate_signature(row: dict) -> str:
     raw = production_record_raw_payload(row)
     fruit_type = str(row.get("fruit_type") or raw.get("fruit_type") or "mangosteen")
@@ -500,6 +505,77 @@ def production_record_duplicate_signature(row: dict) -> str:
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def production_record_weight_total(row: dict) -> float:
+    raw = production_record_raw_payload(row)
+    fruit_type = str(row.get("fruit_type") or raw.get("fruit_type") or "mangosteen")
+    if fruit_type == "durian":
+        return production_grade_total(raw if raw.get("grade_weights") is not None else row)
+    return (
+        safe_float(row.get("water_weight", raw.get("water_weight", raw.get("water", 0))))
+        + safe_float(row.get("flower_weight", raw.get("flower_weight", raw.get("flower", 0))))
+    )
+
+
+def production_similarity_ratio(a: float, b: float) -> float:
+    larger = max(abs(a), abs(b))
+    if larger <= 0:
+        return 1.0
+    return min(abs(a), abs(b)) / larger
+
+
+def production_batch_group_key(row: dict) -> str:
+    batch_uid = production_record_batch_uid(row)
+    if batch_uid:
+        return f"batch:{batch_uid}"
+    raw = production_record_raw_payload(row)
+    return f"time:{row.get('record_time') or raw.get('record_time') or row.get('created_at') or raw.get('created_at') or ''}"
+
+
+def production_batch_summary(rows: list[dict]) -> dict:
+    piles: dict[str, float] = {}
+    for row in rows:
+        raw = production_record_raw_payload(row)
+        pile = str(production_pile_number(raw) or production_pile_number(row) or "")
+        if not pile:
+            continue
+        piles[pile] = piles.get(pile, 0.0) + production_record_weight_total(row)
+    return {"piles": piles, "total": sum(piles.values())}
+
+
+def near_duplicate_batch_error(insert_rows: list[dict], existing_rows: list[dict]) -> dict | None:
+    incoming_summary = production_batch_summary(insert_rows)
+    incoming_piles = set(incoming_summary["piles"].keys())
+    if not incoming_piles or incoming_summary["total"] <= 0:
+        return None
+    existing_groups: dict[str, list[dict]] = {}
+    for row in existing_rows:
+        existing_groups.setdefault(production_batch_group_key(row), []).append(row)
+    for group_rows in existing_groups.values():
+        existing_summary = production_batch_summary(group_rows)
+        if set(existing_summary["piles"].keys()) != incoming_piles:
+            continue
+        similarity = production_similarity_ratio(incoming_summary["total"], existing_summary["total"])
+        if similarity < 0.5:
+            continue
+        same_exact = all(
+            abs(incoming_summary["piles"].get(pile, 0.0) - existing_summary["piles"].get(pile, 0.0)) < 0.05
+            for pile in incoming_piles
+        )
+        if same_exact:
+            continue
+        sample = group_rows[0]
+        return {
+            "error": "พบข้อมูลเดิมที่ใกล้เคียงมากเกิน 50% ระบบจึงไม่บันทึกซ้ำ กรุณาตรวจรายการเดิมก่อน",
+            "duplicate_guard": "near_batch",
+            "similarity": round(similarity, 3),
+            "existing_ids": [row.get("id") for row in group_rows],
+            "record_date": sample.get("record_date"),
+            "emp_code": sample.get("emp_code"),
+            "fruit_type": sample.get("fruit_type"),
+        }
+    return None
 
 
 def production_duplicate_lookup_rows(insert_rows: list[dict]) -> tuple[int, list[dict] | dict]:
@@ -558,6 +634,11 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
         production_record_duplicate_signature(row): row
         for row in existing_rows
     }
+    existing_by_batch_uid: dict[str, list[dict]] = {}
+    for row in existing_rows:
+        batch_uid = production_record_batch_uid(row)
+        if batch_uid:
+            existing_by_batch_uid.setdefault(batch_uid, []).append(row)
     result_rows: list[dict | None] = [None] * len(insert_rows)
     pending_rows: list[dict] = []
     pending_indexes: list[int] = []
@@ -581,6 +662,20 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
         pending_by_signature[signature] = index
         pending_indexes.append(index)
         pending_rows.append(row)
+
+    incoming_batch_uids = {production_record_batch_uid(row) for row in insert_rows if production_record_batch_uid(row)}
+    for batch_uid in incoming_batch_uids:
+        existing_batch_rows = existing_by_batch_uid.get(batch_uid, [])
+        if existing_batch_rows and len(existing_batch_rows) >= len(insert_rows):
+            sorted_existing = sorted(existing_batch_rows, key=lambda item: (production_pile_number(item) or 0, item.get("id") or 0))
+            return 200, [
+                production_duplicate_response_row(existing, incoming)
+                for existing, incoming in zip(sorted_existing, insert_rows)
+            ]
+
+    near_error = near_duplicate_batch_error(insert_rows, existing_rows)
+    if near_error:
+        return 409, near_error
 
     if not pending_rows:
         return 200, [row for row in result_rows if row is not None]
