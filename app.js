@@ -7199,6 +7199,7 @@ function renderBatchEntry() {
         <button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึกชุดนี้"}</button>
         <button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button>
       </div>
+      <p class="demo-note">คีย์ลัด: ↑/↓ เปลี่ยนกองของช่องที่กำลังกรอก · ←/→ สลับดอก/น้ำช่องเดียวกัน</p>
     </section>
   `;
 }
@@ -8030,6 +8031,23 @@ function bindProductionManagementEvents(user) {
       const values = getBatchPileWeights(type);
       values[index] = event.target.value;
     });
+    input.addEventListener("keydown", (event) => {
+      if (productionSaving) {
+        event.preventDefault();
+        return;
+      }
+      const type = event.currentTarget.dataset.batchWeight;
+      const index = Number(event.currentTarget.dataset.batchIndex) || 0;
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.preventDefault();
+        changeBatchPile(type, event.key === "ArrowUp" ? -1 : 1, index);
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        focusBatchWeightInput(type === "flower" ? "water" : "flower", index);
+      }
+    });
   });
 
   document.querySelectorAll("[data-durian-batch-grade]").forEach((input) => {
@@ -8215,6 +8233,24 @@ function addBatchGroup(groups, pileNo, water, flower) {
   existing.water += water;
   existing.flower += flower;
   groups.set(pileNo, existing);
+}
+
+function focusBatchWeightInput(type, index = 0) {
+  const input = document.querySelector(`[data-batch-weight='${type}'][data-batch-index='${index}']`)
+    || document.querySelector(`[data-batch-weight='${type}']`);
+  if (!input) return;
+  input.focus();
+  input.select?.();
+}
+
+function changeBatchPile(type, direction, index = 0) {
+  const field = type === "flower" ? "flower_pile_no" : "water_pile_no";
+  const currentPile = Number(batchGridState[field]) || 1;
+  const nextPile = Math.min(5, Math.max(1, currentPile + direction));
+  if (nextPile === currentPile) return;
+  batchGridState[field] = String(nextPile);
+  render();
+  window.setTimeout(() => focusBatchWeightInput(type, index), 0);
 }
 
 async function saveBatchEntries(user) {
