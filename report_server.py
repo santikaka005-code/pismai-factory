@@ -4313,6 +4313,9 @@ class ReportHandler(BaseHTTPRequestHandler):
                 for record in records
                 if isinstance(record, dict)
             ]
+            if len(converted) != len(records):
+                self.send_json({"error": "all records must be objects"}, 400)
+                return
             if mode == "insert":
                 insert_rows = []
                 for row in converted:

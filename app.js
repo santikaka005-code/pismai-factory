@@ -1335,6 +1335,11 @@ async function saveProductionRowsToCloud(records, { mode = "insert" } = {}) {
       body: JSON.stringify({ records: filteredRows, mode })
     });
     const cloudRows = Array.isArray(response.data) ? response.data : [];
+    if (cloudRows.length !== filteredRows.length) {
+      throw new Error(
+        `Cloud ยืนยันกลับมาไม่ครบ (${cloudRows.length}/${filteredRows.length} รายการ) กรุณาตรวจสอบเน็ตแล้วกดบันทึกอีกครั้ง`
+      );
+    }
     applyingCloudState = true;
     mergeProductionCloudRows(cloudRows);
     return cloudRows;
