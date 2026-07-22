@@ -419,6 +419,67 @@ def next_table_id(table: str) -> int:
     return 1
 
 
+def supabase_error_text(body: object) -> str:
+    if isinstance(body, dict):
+        return " ".join(str(value) for value in body.values() if value is not None)
+    return str(body or "")
+
+
+def is_unique_constraint_error(body: object, constraint_name: str) -> bool:
+    text = supabase_error_text(body).lower()
+    return "duplicate key value" in text and constraint_name.lower() in text
+
+
+def strip_durian_columns(rows: list[dict]) -> list[dict]:
+    return [
+        {
+            key: value
+            for key, value in row.items()
+            if key not in ("grade_weights", "grade_rates", "grade_amounts")
+        }
+        for row in rows
+    ]
+
+
+def has_durian_columns(rows: list[dict]) -> bool:
+    return any(
+        any(key in row for key in ("grade_weights", "grade_rates", "grade_amounts"))
+        for row in rows
+    )
+
+
+def assign_sequential_ids(table: str, rows: list[dict]) -> list[dict]:
+    next_id = next_table_id(table)
+    assigned_rows = []
+    for index, row in enumerate(rows):
+        assigned_rows.append({**row, "id": next_id + index})
+    return assigned_rows
+
+
+def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, dict | list | str | None]:
+    def post(rows: list[dict]) -> tuple[int, dict | list | str | None]:
+        return supabase_request(
+            "POST",
+            "production_records",
+            rows,
+            prefer="return=representation",
+        )
+
+    status, body = post(insert_rows)
+    if status >= 400 and has_durian_columns(insert_rows) and not is_unique_constraint_error(body, "production_records_pkey"):
+        status, body = post(strip_durian_columns(insert_rows))
+
+    for _attempt in range(3):
+        if not (status >= 400 and is_unique_constraint_error(body, "production_records_pkey")):
+            break
+        retry_rows = assign_sequential_ids("production_records", insert_rows)
+        status, body = post(retry_rows)
+        if status >= 400 and has_durian_columns(retry_rows) and not is_unique_constraint_error(body, "production_records_pkey"):
+            status, body = post(strip_durian_columns(retry_rows))
+
+    return status, body
+
+
 def ensure_row_id(table: str, row: dict) -> dict:
     if row.get("id") in [None, ""]:
         return {**row, "id": next_table_id(table)}
@@ -4322,30 +4383,8 @@ class ReportHandler(BaseHTTPRequestHandler):
                     insert_row = dict(row)
                     insert_row.pop("id", None)
                     insert_rows.append(insert_row)
-                status, body = supabase_request(
-                    "POST",
-                    "production_records",
-                    insert_rows,
-                    prefer="return=representation",
-                )
-                if status >= 400 and any(
-                    any(key in row for key in ("grade_weights", "grade_rates", "grade_amounts"))
-                    for row in insert_rows
-                ):
-                    fallback_rows = [
-                        {
-                            key: value
-                            for key, value in row.items()
-                            if key not in ("grade_weights", "grade_rates", "grade_amounts")
-                        }
-                        for row in insert_rows
-                    ]
-                    status, body = supabase_request(
-                        "POST",
-                        "production_records",
-                        fallback_rows,
-                        prefer="return=representation",
-                    )
+                with live_state_sync_lock:
+                    status, body = insert_production_records_compatible(insert_rows)
                 if status >= 400:
                     self.send_json({"data": None, "error": body}, status)
                     return
