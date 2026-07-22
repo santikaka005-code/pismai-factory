@@ -2900,12 +2900,12 @@ function getAuditLogs() {
   }
 }
 
-function saveAuditLogs(logs) {
+function saveAuditLogs(logs, options = {}) {
   localStorage.setItem(AUDIT_LOG_KEY, JSON.stringify(logs));
-  queueLiveStateSync("audit_logs", { delayMs: AUDIT_LOG_SYNC_DELAY_MS });
+  if (options.sync !== false) queueLiveStateSync("audit_logs", { delayMs: AUDIT_LOG_SYNC_DELAY_MS });
 }
 
-function addAuditLog(user, action, detail) {
+function addAuditLog(user, action, detail, options = {}) {
   const logs = getAuditLogs();
   const now = new Date().toISOString();
   const nextId = logs.length ? Math.max(...logs.map((log) => log.id)) + 1 : 1;
@@ -2921,7 +2921,7 @@ function addAuditLog(user, action, detail) {
       role: user.role_label || user.role || "",
       created_at: now
     }
-  ]);
+  ], { sync: options.sync !== false });
 }
 
 function productionRecordsForActiveSession() {
@@ -3901,7 +3901,8 @@ function apiCreateProductionRecord(payload, user, options = {}) {
     "INSERT_PRODUCTION",
     isDurianFruit(record.fruit_type)
       ? `Added ${record.emp_code} pile ${record.pile_no} durian grades ${JSON.stringify(record.grade_weights)}`
-      : `Added ${record.emp_code} pile ${record.pile_no} water ${record.water_weight} flower ${record.flower_weight}`
+      : `Added ${record.emp_code} pile ${record.pile_no} water ${record.water_weight} flower ${record.flower_weight}`,
+    { sync: options.sync !== false }
   );
   return record;
 }
@@ -3921,7 +3922,8 @@ function apiCreateProductionRecordsBatch(payloads, user, options = {}) {
       "INSERT_PRODUCTION",
       isDurianFruit(record.fruit_type)
         ? `Added ${record.emp_code} pile ${record.pile_no} durian grades ${JSON.stringify(record.grade_weights)}`
-        : `Added ${record.emp_code} pile ${record.pile_no} water ${record.water_weight} flower ${record.flower_weight}`
+        : `Added ${record.emp_code} pile ${record.pile_no} water ${record.water_weight} flower ${record.flower_weight}`,
+      { sync: options.sync !== false }
     );
   });
   return createdRecords;

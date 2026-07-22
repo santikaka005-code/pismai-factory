@@ -95,6 +95,7 @@ LIVE_STATE_TABLES = {
 ONLINE_USER_TIMEOUT_SECONDS = 45
 online_user_lock = threading.Lock()
 live_state_sync_lock = threading.Lock()
+production_record_insert_lock = threading.Lock()
 online_user_sessions: dict[str, dict] = {}
 production_record_next_id: int | None = None
 SYSTEM_ACCOUNT_PROFILES = {
@@ -4394,7 +4395,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                     insert_row = dict(row)
                     insert_row.pop("id", None)
                     insert_rows.append(insert_row)
-                with live_state_sync_lock:
+                with production_record_insert_lock:
                     status, body = insert_production_records_compatible(insert_rows)
                 if status >= 400:
                     self.send_json({"data": None, "error": body}, status)
