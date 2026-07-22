@@ -8092,17 +8092,13 @@ function bindProductionManagementEvents(user) {
   document.querySelector("#batchFlowerPile")?.addEventListener("change", (event) => {
     batchGridState.flower_pile_no = event.target.value;
     render();
-    window.setTimeout(() => {
-      document.querySelector("[data-batch-weight='flower']")?.focus();
-    }, 0);
+    window.setTimeout(() => focusBatchWeightInput("flower"), 0);
   });
 
   document.querySelector("#batchWaterPile")?.addEventListener("change", (event) => {
     batchGridState.water_pile_no = event.target.value;
     render();
-    window.setTimeout(() => {
-      document.querySelector("[data-batch-weight='water']")?.focus();
-    }, 0);
+    window.setTimeout(() => focusBatchWeightInput("water"), 0);
   });
 
   document.querySelectorAll("[data-durian-grade-pile]").forEach((select) => {
@@ -8128,15 +8124,14 @@ function bindProductionManagementEvents(user) {
         return;
       }
       const type = event.currentTarget.dataset.batchWeight;
-      const index = Number(event.currentTarget.dataset.batchIndex) || 0;
       if (event.key === "ArrowUp" || event.key === "ArrowDown") {
         event.preventDefault();
-        changeBatchPile(type, event.key === "ArrowUp" ? -1 : 1, index);
+        changeBatchPile(type, event.key === "ArrowUp" ? -1 : 1);
         return;
       }
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
-        focusBatchWeightInput(type === "flower" ? "water" : "flower", index);
+        focusBatchWeightInput(type === "flower" ? "water" : "flower");
       }
     });
   });
@@ -8326,22 +8321,30 @@ function addBatchGroup(groups, pileNo, water, flower) {
   groups.set(pileNo, existing);
 }
 
-function focusBatchWeightInput(type, index = 0) {
-  const input = document.querySelector(`[data-batch-weight='${type}'][data-batch-index='${index}']`)
+function getNextBatchWeightInputIndex(type) {
+  const values = getBatchPileWeights(type);
+  const emptyIndex = values.findIndex((value) => String(value ?? "").trim() === "");
+  if (emptyIndex >= 0) return emptyIndex;
+  return Math.max(0, values.length - 1);
+}
+
+function focusBatchWeightInput(type, index = null) {
+  const targetIndex = Number.isInteger(index) ? index : getNextBatchWeightInputIndex(type);
+  const input = document.querySelector(`[data-batch-weight='${type}'][data-batch-index='${targetIndex}']`)
     || document.querySelector(`[data-batch-weight='${type}']`);
   if (!input) return;
   input.focus();
   input.select?.();
 }
 
-function changeBatchPile(type, direction, index = 0) {
+function changeBatchPile(type, direction) {
   const field = type === "flower" ? "flower_pile_no" : "water_pile_no";
   const currentPile = Number(batchGridState[field]) || 1;
   const nextPile = Math.min(5, Math.max(1, currentPile + direction));
   if (nextPile === currentPile) return;
   batchGridState[field] = String(nextPile);
   render();
-  window.setTimeout(() => focusBatchWeightInput(type, index), 0);
+  window.setTimeout(() => focusBatchWeightInput(type), 0);
 }
 
 async function saveBatchEntries(user) {
