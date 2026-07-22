@@ -96,6 +96,7 @@ ONLINE_USER_TIMEOUT_SECONDS = 45
 online_user_lock = threading.Lock()
 live_state_sync_lock = threading.Lock()
 online_user_sessions: dict[str, dict] = {}
+production_record_next_id: int | None = None
 SYSTEM_ACCOUNT_PROFILES = {
     "Santi": {
         "username": "Santi",
@@ -448,8 +449,17 @@ def has_durian_columns(rows: list[dict]) -> bool:
     )
 
 
-def assign_sequential_ids(table: str, rows: list[dict]) -> list[dict]:
-    next_id = next_table_id(table)
+def reserve_production_record_ids(count: int, refresh: bool = False) -> int:
+    global production_record_next_id
+    if refresh or production_record_next_id is None:
+        production_record_next_id = next_table_id("production_records")
+    next_id = production_record_next_id
+    production_record_next_id += count
+    return next_id
+
+
+def assign_production_record_ids(rows: list[dict], refresh: bool = False) -> list[dict]:
+    next_id = reserve_production_record_ids(len(rows), refresh=refresh)
     assigned_rows = []
     for index, row in enumerate(rows):
         assigned_rows.append({**row, "id": next_id + index})
@@ -465,15 +475,15 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
             prefer="return=representation",
         )
 
-    queued_rows = assign_sequential_ids("production_records", insert_rows)
+    queued_rows = assign_production_record_ids(insert_rows)
     status, body = post(queued_rows)
     if status >= 400 and has_durian_columns(queued_rows) and not is_unique_constraint_error(body, "production_records_pkey"):
         status, body = post(strip_durian_columns(queued_rows))
 
-    for _attempt in range(3):
+    for attempt in range(3):
         if not (status >= 400 and is_unique_constraint_error(body, "production_records_pkey")):
             break
-        retry_rows = assign_sequential_ids("production_records", insert_rows)
+        retry_rows = assign_production_record_ids(insert_rows, refresh=(attempt == 0))
         status, body = post(retry_rows)
         if status >= 400 and has_durian_columns(retry_rows) and not is_unique_constraint_error(body, "production_records_pkey"):
             status, body = post(strip_durian_columns(retry_rows))
