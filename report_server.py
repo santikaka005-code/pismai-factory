@@ -467,6 +467,76 @@ def assign_production_record_ids(rows: list[dict], refresh: bool = False) -> lis
     return assigned_rows
 
 
+def production_record_raw_payload(row: dict) -> dict:
+    raw = row.get("raw_payload")
+    return raw if isinstance(raw, dict) else row
+
+
+def production_record_client_uid(row: dict) -> str:
+    raw = production_record_raw_payload(row)
+    return str(raw.get("client_uid") or row.get("client_uid") or "").strip()
+
+
+def production_record_duplicate_signature(row: dict) -> str:
+    raw = production_record_raw_payload(row)
+    fruit_type = str(row.get("fruit_type") or raw.get("fruit_type") or "mangosteen")
+    pile = production_pile_number(raw) or production_pile_number(row) or ""
+    if fruit_type == "durian":
+        weights = production_grade_weights(raw if raw.get("grade_weights") is not None else row)
+        weight_key = {grade: round(weights[grade], 3) for grade in DURIAN_GRADES}
+    else:
+        weight_key = {
+            "water": round(safe_float(row.get("water_weight", raw.get("water_weight", raw.get("water", 0)))), 3),
+            "flower": round(safe_float(row.get("flower_weight", raw.get("flower_weight", raw.get("flower", 0)))), 3),
+        }
+    return json.dumps(
+        [
+            str(row.get("record_date") or raw.get("record_date") or raw.get("date") or ""),
+            str(row.get("emp_code") or raw.get("emp_code") or ""),
+            fruit_type,
+            str(pile),
+            weight_key,
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def production_duplicate_lookup_rows(insert_rows: list[dict]) -> tuple[int, list[dict] | dict]:
+    lookup_groups = {
+        (
+            str(row.get("record_date") or ""),
+            str(row.get("emp_code") or ""),
+            str(row.get("fruit_type") or "mangosteen"),
+        )
+        for row in insert_rows
+        if row.get("record_date") and row.get("emp_code")
+    }
+    existing_rows: list[dict] = []
+    for record_date, emp_code, fruit_type in lookup_groups:
+        status, body = supabase_request(
+            "GET",
+            "production_records?"
+            f"record_date=eq.{quote(record_date)}"
+            f"&emp_code=eq.{quote(emp_code)}"
+            f"&fruit_type=eq.{quote(fruit_type)}"
+            "&select=*",
+        )
+        if status >= 400:
+            return status, {"error": body, "lookup": [record_date, emp_code, fruit_type]}
+        if isinstance(body, list):
+            existing_rows.extend(row for row in body if isinstance(row, dict))
+    return 200, existing_rows
+
+
+def production_duplicate_response_row(existing_row: dict, incoming_row: dict) -> dict:
+    response_row = dict(existing_row)
+    incoming_raw = production_record_raw_payload(incoming_row)
+    if isinstance(incoming_raw, dict):
+        response_row["raw_payload"] = {**incoming_raw, "id": existing_row.get("id")}
+    return response_row
+
+
 def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, dict | list | str | None]:
     def post(rows: list[dict]) -> tuple[int, dict | list | str | None]:
         return supabase_request(
@@ -476,7 +546,46 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
             prefer="return=representation",
         )
 
-    queued_rows = assign_production_record_ids(insert_rows)
+    lookup_status, existing_rows = production_duplicate_lookup_rows(insert_rows)
+    if lookup_status >= 400:
+        return lookup_status, existing_rows
+    existing_by_uid = {
+        production_record_client_uid(row): row
+        for row in existing_rows
+        if production_record_client_uid(row)
+    }
+    existing_by_signature = {
+        production_record_duplicate_signature(row): row
+        for row in existing_rows
+    }
+    result_rows: list[dict | None] = [None] * len(insert_rows)
+    pending_rows: list[dict] = []
+    pending_indexes: list[int] = []
+    pending_by_uid: dict[str, int] = {}
+    pending_by_signature: dict[str, int] = {}
+    duplicate_refs: dict[int, int] = {}
+    for index, row in enumerate(insert_rows):
+        uid = production_record_client_uid(row)
+        signature = production_record_duplicate_signature(row)
+        existing = existing_by_uid.get(uid) if uid else None
+        existing = existing or existing_by_signature.get(signature)
+        if existing:
+            result_rows[index] = production_duplicate_response_row(existing, row)
+            continue
+        pending_ref = pending_by_uid.get(uid) if uid else None
+        pending_ref = pending_ref if pending_ref is not None else pending_by_signature.get(signature)
+        if pending_ref is not None:
+            duplicate_refs[index] = pending_ref
+            continue
+        pending_by_uid[uid] = index
+        pending_by_signature[signature] = index
+        pending_indexes.append(index)
+        pending_rows.append(row)
+
+    if not pending_rows:
+        return 200, [row for row in result_rows if row is not None]
+
+    queued_rows = assign_production_record_ids(pending_rows)
     status, body = post(queued_rows)
     if status >= 400 and has_durian_columns(queued_rows) and not is_unique_constraint_error(body, "production_records_pkey"):
         status, body = post(strip_durian_columns(queued_rows))
@@ -484,10 +593,19 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
     for attempt in range(3):
         if not (status >= 400 and is_unique_constraint_error(body, "production_records_pkey")):
             break
-        retry_rows = assign_production_record_ids(insert_rows, refresh=(attempt == 0))
+        retry_rows = assign_production_record_ids(pending_rows, refresh=(attempt == 0))
         status, body = post(retry_rows)
         if status >= 400 and has_durian_columns(retry_rows) and not is_unique_constraint_error(body, "production_records_pkey"):
             status, body = post(strip_durian_columns(retry_rows))
+
+    if status < 400 and isinstance(body, list):
+        for index, row in zip(pending_indexes, body):
+            result_rows[index] = row
+        for duplicate_index, source_index in duplicate_refs.items():
+            source_row = result_rows[source_index]
+            if isinstance(source_row, dict):
+                result_rows[duplicate_index] = production_duplicate_response_row(source_row, insert_rows[duplicate_index])
+        return status, [row for row in result_rows if row is not None]
 
     return status, body
 
