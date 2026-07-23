@@ -96,8 +96,10 @@ ONLINE_USER_TIMEOUT_SECONDS = 45
 online_user_lock = threading.Lock()
 live_state_sync_lock = threading.Lock()
 production_record_insert_lock = threading.Lock()
+deduction_record_insert_lock = threading.Lock()
 online_user_sessions: dict[str, dict] = {}
 production_record_next_id: int | None = None
+deduction_record_next_id: int | None = None
 SYSTEM_ACCOUNT_PROFILES = {
     "Santi": {
         "username": "Santi",
@@ -398,6 +400,8 @@ def deduction_from_payload(payload: dict) -> dict:
         "created_by": str(payload.get("created_by", "")).strip() or None,
         "updated_by": str(payload.get("updated_by", "")).strip() or None,
     }
+    if payload.get("client_uid") not in [None, ""]:
+        deduction["client_uid"] = str(payload.get("client_uid")).strip()
     if payload.get("id") not in [None, ""]:
         deduction["id"] = payload.get("id")
     return deduction
@@ -703,6 +707,85 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
         return status, [row for row in result_rows if row is not None]
 
     return status, body
+
+
+def reserve_deduction_record_id(refresh: bool = False) -> int:
+    global deduction_record_next_id
+    if refresh or deduction_record_next_id is None:
+        deduction_record_next_id = next_table_id("deduction_records")
+    next_id = deduction_record_next_id
+    deduction_record_next_id += 1
+    return next_id
+
+
+def deduction_duplicate_lookup(deduction: dict) -> tuple[int, list[dict] | dict]:
+    client_uid = str(deduction.get("client_uid") or "").strip()
+    if client_uid:
+        status, body = supabase_request(
+            "GET",
+            f"deduction_records?client_uid=eq.{quote(client_uid)}&select=*&limit=1",
+        )
+        if status >= 400:
+            text = supabase_error_text(body).lower()
+            if "client_uid" not in text and "column" not in text and "schema cache" not in text:
+                return status, {"error": body}
+        elif isinstance(body, list) and body:
+            return 200, body
+    amount = round(safe_float(deduction.get("amount")), 2)
+    status, body = supabase_request(
+        "GET",
+        "deduction_records?"
+        f"employee_kind=eq.{quote(str(deduction.get('employee_kind') or ''))}"
+        f"&employee_id=eq.{quote(str(deduction.get('employee_id') or ''))}"
+        f"&start_date=eq.{quote(str(deduction.get('start_date') or ''))}"
+        f"&end_date=eq.{quote(str(deduction.get('end_date') or ''))}"
+        f"&deduction_type=eq.{quote(str(deduction.get('deduction_type') or ''))}"
+        f"&deduction_label=eq.{quote(str(deduction.get('deduction_label') or ''))}"
+        "&select=*",
+    )
+    if status >= 400:
+        return status, {"error": body}
+    matches = [
+        row for row in (body if isinstance(body, list) else [])
+        if abs(round(safe_float(row.get("amount")), 2) - amount) < 0.005
+        and str(row.get("status") or "") == str(deduction.get("status") or "")
+    ]
+    return 200, matches
+
+
+def insert_deduction_record_compatible(deduction: dict) -> tuple[int, dict | list | str | None]:
+    lookup_status, duplicate_rows = deduction_duplicate_lookup(deduction)
+    if lookup_status >= 400:
+        return lookup_status, duplicate_rows
+    if isinstance(duplicate_rows, list) and duplicate_rows:
+        return 200, duplicate_rows[:1]
+
+    insert_row = dict(deduction)
+    insert_row["id"] = reserve_deduction_record_id()
+    for attempt in range(4):
+        status, body = supabase_request(
+            "POST",
+            "deduction_records",
+            insert_row,
+            prefer="return=representation",
+        )
+        if status < 400:
+            return status, body
+        if not is_unique_constraint_error(body, "deduction_records_pkey"):
+            text = supabase_error_text(body).lower()
+            if "client_uid" in text and ("column" in text or "schema cache" in text):
+                fallback_row = {key: value for key, value in insert_row.items() if key != "client_uid"}
+                status, body = supabase_request(
+                    "POST",
+                    "deduction_records",
+                    fallback_row,
+                    prefer="return=representation",
+                )
+                if status < 400 or not is_unique_constraint_error(body, "deduction_records_pkey"):
+                    return status, body
+            return status, body
+        insert_row["id"] = reserve_deduction_record_id(refresh=(attempt == 0))
+    return 409, {"error": "Could not allocate a unique deduction record id."}
 
 
 def ensure_row_id(table: str, row: dict) -> dict:
@@ -5155,18 +5238,14 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/deductions":
-            deduction = ensure_row_id("deduction_records", deduction_from_payload(payload))
+            deduction = deduction_from_payload(payload)
             required = ["employee_kind", "employee_id", "emp_code", "employee_name", "start_date", "end_date", "deduction_type", "deduction_label", "amount"]
             missing = [key for key in required if deduction.get(key) in [None, ""]]
             if missing:
                 self.send_json({"error": f"Missing required fields: {', '.join(missing)}"}, 400)
                 return
-            status, body = supabase_request(
-                "POST",
-                "deduction_records",
-                deduction,
-                prefer="return=representation",
-            )
+            with deduction_record_insert_lock:
+                status, body = insert_deduction_record_compatible(deduction)
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 

@@ -2139,12 +2139,19 @@ async function apiCreateDeduction(payload, actor) {
     deduction_label: getDeductionTypeLabel(payload.deduction_type),
     amount,
     note: payload.note,
+    client_uid: payload.client_uid || createProductionClientUid(),
     status: bonusMode ? "Active" : "Pending",
     created_by: actor?.fullname || ""
   });
   const created = await createCloudDeduction(baseRecord);
   if (!created) throw new Error(`ไม่สามารถบันทึก${bonusMode ? "เบี้ยขยัน" : "รายการหักเงิน"}ลงฐานข้อมูลกลางได้`);
-  saveDeductionRecords([...getDeductionRecords(), created]);
+  const existingRecords = getDeductionRecords();
+  const existingIndex = existingRecords.findIndex((record) => Number(record.id) === Number(created.id));
+  if (existingIndex >= 0) {
+    saveDeductionRecords(existingRecords.map((record, index) => index === existingIndex ? created : record));
+  } else {
+    saveDeductionRecords([...existingRecords, created]);
+  }
   addAuditLog(actor, bonusMode ? "CREATE_ATTENDANCE_BONUS" : "CREATE_DEDUCTION", `Added ${created.deduction_label} ${created.emp_code} ${created.amount}`);
   return created;
 }
