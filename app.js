@@ -336,7 +336,7 @@ modules.splice(
   },
   {
     id: "secret-room",
-    label: "ห้องแห่งความลับ",
+    label: "Community",
     roles: ["admin", "hr", "operator", "supervisor", "developer"],
     description: "พื้นที่เพื่อนร่วมงาน คอมมู และแชทส่วนตัวภายในองค์กร",
     icon: "◌"
@@ -1080,7 +1080,7 @@ function getDefaultRouteForUser(user) {
 }
 
 function visibleNavModulesForUser(user) {
-  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings", "accounting-control", "secret-room"];
+  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "settings"];
   return navRouteIds
     .map((routeId) => modules.find((item) => item.id === routeId))
     .filter((item) => item && !item.hidden)
@@ -4437,7 +4437,7 @@ function renderApp(user, route) {
 
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
   const visibleModules = visibleNavModulesForUser(user);
-  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "settings", "accounting-control", "secret-room"];
+  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "settings"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
 
