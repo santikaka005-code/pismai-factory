@@ -32,6 +32,7 @@ const context = {
   getSession: () => ({ user: {} }),
   getProductionFieldLabels: (fruit) => context.productionFruitFieldLabels[fruit],
   getProductionFruitLabel: (fruit) => ({ mangosteen: "มังคุด", durian: "ทุเรียน", mango: "มะม่วง" })[fruit],
+  getDurianGradeTotal: (grades) => Object.values(grades || {}).reduce((sum, value) => sum + Number(value || 0), 0),
   recordsForPersonalReport: (...args) => {
     context.lastFruit = args[3];
     return [{ fruit_type: args[3] }];
@@ -76,7 +77,8 @@ assert.doesNotMatch(mangosteenHtml, /<th>เกรด A<\/th>/);
 context.personalReportFruitFilter = "durian";
 const durianHtml = context.renderPersonalProductionSummaryTab(reportContext);
 assert.equal(context.lastFruit, "durian");
-assert.match(durianHtml, /<th>เกรด A<\/th>/);
+assert.match(durianHtml, /<th>น้ำหนักทุเรียน<\/th>/);
+assert.doesNotMatch(durianHtml, /<th>เกรด A<\/th>/);
 assert.doesNotMatch(durianHtml, /<th>น้ำหนักน้ำ<\/th>/);
 
 console.log("Personal report UI fruit separation tests passed.");

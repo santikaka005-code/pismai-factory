@@ -51,7 +51,8 @@ assert.match(mangosteenHtml, /<th>น้ำหนักน้ำ<\/th>/);
 
 context.summaryFruitFilter = "durian";
 const durianHtml = context.renderSummaryAll({ label: "สรุปผลทั้งหมด" });
-assert.match(durianHtml, /<th>เกรด A<\/th>/);
+assert.match(durianHtml, /<th>น้ำหนักทุเรียน<\/th>/);
+assert.doesNotMatch(durianHtml, /<th>เกรด A<\/th>/);
 assert.doesNotMatch(durianHtml, /<th>น้ำหนักน้ำ<\/th>/);
 
 console.log("Summary fruit UI separation tests passed.");

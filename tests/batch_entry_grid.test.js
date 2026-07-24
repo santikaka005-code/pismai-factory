@@ -1,6 +1,6 @@
-const assert = require("assert");
-const fs = require("fs");
-const vm = require("vm");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
 
 const source = fs.readFileSync("app.js", "utf8");
 
@@ -17,37 +17,31 @@ function functionSource(name) {
 }
 
 const context = {};
-vm.createContext(context);
-vm.runInContext(`
+vm.runInNewContext(`
   const BATCH_WEIGHT_INPUT_COUNT = 40;
-  const DURIAN_GRADES = ["A", "B", "C", "D", "E"];
   ${functionSource("createBatchPileWeightMap")}
-  ${functionSource("createDurianGradePileSelection")}
-  ${functionSource("createDurianBatchWeightMap")}
   let batchGridState = {
     emp_code: "02",
     employee: { id: 2 },
     flower_pile_no: "4",
     water_pile_no: "5",
+    durian_pile_no: "3",
     flower_weights_by_pile: createBatchPileWeightMap(),
     water_weights_by_pile: createBatchPileWeightMap(),
-    durian_grade_piles: { A: "5", B: "4", C: "3", D: "2", E: "1" },
-    durian_grade_weights_by_pile: createDurianBatchWeightMap()
+    durian_weights_by_pile: createBatchPileWeightMap()
   };
   ${functionSource("clearBatchGridState")}
-  globalThis.testPileMap = createBatchPileWeightMap();
   clearBatchGridState();
-  globalThis.clearedBatchState = batchGridState;
+  globalThis.state = batchGridState;
 `, context);
 
-assert.deepStrictEqual(
-  Object.values(context.testPileMap).map((values) => values.length),
+assert.equal(context.state.flower_pile_no, "1");
+assert.equal(context.state.water_pile_no, "1");
+assert.equal(context.state.durian_pile_no, "1");
+assert.equal(context.state.emp_code, "");
+assert.deepEqual(
+  Object.values(context.state.durian_weights_by_pile).map((values) => values.length),
   [40, 40, 40, 40, 40]
 );
-assert.strictEqual(context.clearedBatchState.flower_pile_no, "1");
-assert.strictEqual(context.clearedBatchState.water_pile_no, "1");
-assert.strictEqual(context.clearedBatchState.emp_code, "");
-assert(Object.values(context.clearedBatchState.durian_grade_piles).every((pile) => pile === "1"));
-assert(source.includes("BATCH_WEIGHT_INPUT_COUNT = 40"));
 
-console.log("Batch entry 40-slot and pile reset tests passed.");
+console.log("Batch entry single durian grid tests passed.");

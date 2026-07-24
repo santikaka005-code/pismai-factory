@@ -54,19 +54,27 @@ def test_fruit_filter_and_numeric_piles():
     invalid_rows = report_server.pile_summary_rows(invalid_pile)
     assert invalid_rows[0]["pile"] == "-"
     assert invalid_rows[0]["total_weight"] == 15
+    assert report_server.production_total_weight(RECORDS[1]) == 10
+    assert report_server.production_grade_text(RECORDS[1]) == "10"
+    assert report_server.production_total_weight({
+        "fruit_type": "durian",
+        "durian_weight": 12.5,
+        "grade_weights": {"A": 1},
+    }) == 12.5
 
 
 def test_excel_columns_follow_selected_fruit():
     mangosteen_book = load_workbook(BytesIO(report_server.build_production_summary_excel(payload("mangosteen"))))
     mangosteen_headers = detail_headers(mangosteen_book)
-    assert "ทุเรียนเกรด A-E" not in mangosteen_headers
+    assert "น้ำหนักทุเรียน" not in mangosteen_headers
     assert "น้ำหนักน้ำ (กก.)" in mangosteen_headers
     pile_column = mangosteen_headers.index("กอง") + 1
     assert isinstance(mangosteen_book["Details"].cell(2, pile_column).value, int)
 
     durian_book = load_workbook(BytesIO(report_server.build_production_summary_excel(payload("durian"))))
     durian_headers = detail_headers(durian_book)
-    assert "ทุเรียนเกรด A-E" in durian_headers
+    assert "น้ำหนักทุเรียน" in durian_headers
+    assert not any(str(header or "").startswith("เกรด ") for header in durian_headers)
     assert "น้ำหนักน้ำ (กก.)" not in durian_headers
 
 

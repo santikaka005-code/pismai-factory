@@ -62,9 +62,10 @@ def test_personal_exports_use_selected_fruit_columns():
     )
     mangosteen_headers = workbook_headers(mangosteen_excel)
     durian_headers = workbook_headers(durian_excel)
-    assert "ทุเรียนเกรด A-E" not in mangosteen_headers
+    assert "น้ำหนักทุเรียน" not in mangosteen_headers
     assert "น้ำหนักน้ำ" in mangosteen_headers
-    assert "เกรด A" in durian_headers
+    assert "น้ำหนักทุเรียน" in durian_headers
+    assert not any(str(header or "").startswith("เกรด ") for header in durian_headers)
     assert "น้ำหนักน้ำ" not in durian_headers
 
     mangosteen_pdf = report_server.build_employee_range_pdf(

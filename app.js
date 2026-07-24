@@ -667,6 +667,8 @@ let batchGridState = {
   water_pile_no: "1",
   flower_weights_by_pile: createBatchPileWeightMap(),
   water_weights_by_pile: createBatchPileWeightMap(),
+  durian_pile_no: "1",
+  durian_weights_by_pile: createBatchPileWeightMap(),
   durian_grade_piles: createDurianGradePileSelection(),
   durian_grade_weights_by_pile: createDurianBatchWeightMap()
 };
@@ -675,6 +677,7 @@ let fastInputState = {
   emp_code: "",
   water_weight: "",
   flower_weight: "",
+  durian_weight: "",
   grade_weights: createEmptyDurianGradeWeights(""),
   employee: null,
   message: "",
@@ -693,7 +696,7 @@ const productionFruitOptions = [
     id: "durian",
     label: "ทุเรียน",
     status: "พร้อมใช้งาน",
-    description: "บันทึกน้ำหนักทุเรียนแยกเกรด A-E และแยกกอง"
+    description: "บันทึกน้ำหนักทุเรียนรวมและแยกกอง"
   },
   {
     id: "mango",
@@ -718,9 +721,10 @@ const productionFruitFieldLabels = {
     description: "กรอกกอง รหัสพนักงาน น้ำหนักน้ำ และน้ำหนักดอกสำหรับงานมังคุด"
   },
   durian: {
-    mode: "grades",
-    grades: DURIAN_GRADES,
-    description: "กรอกกอง รหัสพนักงาน และน้ำหนักทุเรียนแยกเกรด A-E"
+    mode: "single",
+    weight: "น้ำหนักทุเรียน",
+    weightShort: "ทุเรียน",
+    description: "กรอกกอง รหัสพนักงาน และน้ำหนักทุเรียน"
   },
   mango: {
     water: "มะม่วงฝา",
@@ -742,13 +746,13 @@ function getWageRateTypeOptions() {
     .filter((fruit) => productionFruitFieldLabels[fruit.id])
     .flatMap((fruit) => {
       const labels = getProductionFieldLabels(fruit.id);
-      if (labels.mode === "grades") {
-        return DURIAN_GRADES.map((grade) => ({
-          value: wageRateItemTypeForFruitField(fruit.id, `grade_${grade}`),
-          label: `${fruit.label} - เกรด ${grade}`,
+      if (labels.mode === "single") {
+        return [{
+          value: wageRateItemTypeForFruitField(fruit.id, "weight"),
+          label: `${fruit.label} - น้ำหนักทุเรียน`,
           fruitId: fruit.id,
-          fieldKey: `grade_${grade}`
-        }));
+          fieldKey: "weight"
+        }];
       }
       return [
         {
@@ -804,6 +808,7 @@ function createFastInputState() {
     emp_code: "",
     water_weight: "",
     flower_weight: "",
+    durian_weight: "",
     grade_weights: createEmptyDurianGradeWeights(""),
     employee: null,
     message: "",
@@ -844,14 +849,22 @@ function getDurianGradeTotal(value) {
   return DURIAN_GRADES.reduce((sum, grade) => sum + weights[grade], 0);
 }
 
+function getRecordDurianWeight(record) {
+  if (!isDurianFruit(productionFruitTypeForRecord(record))) return 0;
+  const directWeight = Number(record?.durian_weight);
+  if (Number.isFinite(directWeight) && directWeight > 0) return directWeight;
+  const totalWeight = Number(record?.total_weight);
+  if (Number.isFinite(totalWeight) && totalWeight > 0) return totalWeight;
+  return getDurianGradeTotal(record?.grade_weights || record?.grades);
+}
+
 function getRecordTotalWeight(record) {
-  if (isDurianFruit(productionFruitTypeForRecord(record))) return getDurianGradeTotal(record.grade_weights);
+  if (isDurianFruit(productionFruitTypeForRecord(record))) return getRecordDurianWeight(record);
   return Number(record.water_weight || record.water || 0) + Number(record.flower_weight || record.flower || 0);
 }
 
 function formatDurianGradeBreakdown(record, separator = " · ") {
-  const weights = getRecordGradeWeights(record);
-  return DURIAN_GRADES.map((grade) => `${grade} ${numberText(weights[grade])}`).join(separator);
+  return `ทุเรียน ${numberText(getRecordDurianWeight(record))}`;
 }
 
 function getFastInputFruitKey() {
@@ -945,10 +958,14 @@ function getDurianBatchWeights(grade, pileNo = null) {
 }
 
 function getBatchPileWeights(type, pileNo = null) {
-  const stateKey =
-    type === "flower" ? "flower_weights_by_pile" : "water_weights_by_pile";
-  const selectedPile =
-    pileNo || (type === "flower" ? batchGridState.flower_pile_no : batchGridState.water_pile_no);
+  const stateKey = type === "flower"
+    ? "flower_weights_by_pile"
+    : type === "durian" ? "durian_weights_by_pile" : "water_weights_by_pile";
+  const selectedPile = pileNo || (
+    type === "flower"
+      ? batchGridState.flower_pile_no
+      : type === "durian" ? batchGridState.durian_pile_no : batchGridState.water_pile_no
+  );
   const pileKey = String(selectedPile);
 
   if (!batchGridState[stateKey]) {
@@ -3846,26 +3863,32 @@ function buildProductionRecord(payload, user, existingRecord = null) {
   if (pileNo === null) throw new Error("เลขกองต้องเป็นจำนวนเต็มตั้งแต่ 1 ขึ้นไป");
 
   if (isDurianFruit(fruitType)) {
-    const gradeWeights = normalizeDurianGradeWeights(payload.grade_weights || existingRecord?.grade_weights);
-    const gradeRates = {};
-    const gradeAmounts = {};
-    const missingRates = [];
-    DURIAN_GRADES.forEach((grade) => {
-      const rateRecord = apiGetCurrentProductionRate(fruitType, `grade_${grade}`, recordDate);
-      const preservedRate = Number(existingRecord?.grade_rates?.[grade]);
-      const rate = rateRecord ? Number(rateRecord.rate) : preservedRate;
-      if (gradeWeights[grade] > 0 && (!Number.isFinite(rate) || rate <= 0)) missingRates.push(`เกรด ${grade}`);
-      gradeRates[grade] = Number.isFinite(rate) ? rate : 0;
-      gradeAmounts[grade] = gradeWeights[grade] * gradeRates[grade];
-    });
-    if (missingRates.length) {
+    const legacyWeights = normalizeDurianGradeWeights(payload.grade_weights || existingRecord?.grade_weights);
+    const durianWeight = Number(
+      payload.durian_weight ?? (payload.grade_weights ? getDurianGradeTotal(payload.grade_weights) : getRecordDurianWeight(existingRecord))
+    );
+    const rateRecord =
+      apiGetCurrentProductionRate(fruitType, "weight", recordDate) ||
+      apiGetCurrentProductionRate(fruitType, "grade_A", recordDate);
+    const existingTotalWeight = getRecordDurianWeight(existingRecord);
+    const derivedExistingRate = existingTotalWeight > 0
+      ? Number(existingRecord?.total_amount || existingRecord?.grand_total || 0) / existingTotalWeight
+      : 0;
+    const preservedRate = Number(existingRecord?.durian_rate || derivedExistingRate || existingRecord?.grade_rates?.A);
+    const durianRate = rateRecord ? Number(rateRecord.rate) : preservedRate;
+    if (!Number.isFinite(durianWeight) || durianWeight <= 0) {
+      throw new Error("กรุณากรอกน้ำหนักทุเรียนมากกว่า 0");
+    }
+    if (!Number.isFinite(durianRate) || durianRate <= 0) {
       throw new Error(
-        `ยังไม่ได้ตั้งอัตราค่าจ้างทุเรียนสำหรับ ${missingRates.join(", ")} ` +
+        `ยังไม่ได้ตั้งอัตราค่าจ้างสำหรับน้ำหนักทุเรียน ` +
         `(วันที่เริ่มใช้ต้องไม่เกิน ${recordDate}) ตั้งเพียงครั้งเดียวแล้วระบบจะใช้ต่อเนื่องจนกว่าจะเปลี่ยนเรท`
       );
     }
-    const totalWeight = getDurianGradeTotal(gradeWeights);
-    const totalAmount = DURIAN_GRADES.reduce((sum, grade) => sum + gradeAmounts[grade], 0);
+    const gradeWeights = { ...legacyWeights, A: durianWeight, B: 0, C: 0, D: 0, E: 0 };
+    const gradeRates = { A: durianRate, B: 0, C: 0, D: 0, E: 0 };
+    const totalAmount = durianWeight * durianRate;
+    const gradeAmounts = { A: totalAmount, B: 0, C: 0, D: 0, E: 0 };
     return {
       ...base,
       id: existingRecord?.id,
@@ -3884,10 +3907,13 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       record_date: recordDate,
       record_time: recordTime,
       shift: payload.shift || existingRecord?.shift || "",
+      durian_weight: durianWeight,
+      durian_rate: durianRate,
+      durian_amount: totalAmount,
       grade_weights: gradeWeights,
       grade_rates: gradeRates,
       grade_amounts: gradeAmounts,
-      total_weight: totalWeight,
+      total_weight: durianWeight,
       water_weight: 0,
       flower_weight: 0,
       water: 0,
@@ -5030,7 +5056,7 @@ function renderSummaryAll(moduleItem) {
             <div class="chart-legend">
               <span><i class="legend-water"></i>น้ำ</span>
               <span><i class="legend-flower"></i>ดอก</span>
-              <span><i class="legend-durian"></i>ทุเรียน A-E</span>
+              <span><i class="legend-durian"></i>น้ำหนักทุเรียน</span>
             </div>
           </div>
           <div class="summary-chart">
@@ -5075,7 +5101,7 @@ function renderSummaryAll(moduleItem) {
                 <th>กอง</th>
                 <th>น้ำหนักน้ำ</th>
                 <th>น้ำหนักดอก</th>
-                <th>ทุเรียน A-E</th>
+                <th>น้ำหนักทุเรียน</th>
                 <th>น้ำหนักรวม</th>
                 <th>รวมเงิน</th>
                 <th>ผู้บันทึก</th>
@@ -5881,10 +5907,10 @@ function renderSettingsPileCard(summary, selectedFruit) {
       </div>
       <div class="settings-pile-breakdown">
         ${renderSettingsPileWeightRows(summary, selectedFruit)}
-        ${hasGrades || isDurianFruit(selectedFruit) ? `<div><span>ทุเรียน A-E</span><strong>${numberText(summary.gradeTotal)} กก.</strong></div>` : ""}
+        ${hasGrades || isDurianFruit(selectedFruit) ? `<div><span>น้ำหนักทุเรียน</span><strong>${numberText(summary.gradeTotal)} กก.</strong></div>` : ""}
         <div><span>พนักงาน</span><strong>${summary.count ? summary.employees.size : 0} คน</strong></div>
       </div>
-      ${hasGrades ? `<div class="settings-pile-grades">${DURIAN_GRADES.map((grade) => `<span>${grade} <strong>${numberText(summary.grades[grade])}</strong></span>`).join("")}</div>` : ""}
+      ${hasGrades ? `<div class="settings-pile-grades"><span>ทุเรียนรวม <strong>${numberText(summary.gradeTotal)}</strong> กก.</span></div>` : ""}
       <div class="settings-pile-amount"><span>ยอดเงินกองนี้</span><strong>${money(summary.amount)}</strong></div>
     </article>
   `;
@@ -7100,7 +7126,7 @@ function renderProductionEditor(user, moduleItem) {
             <label class="field compact-field"><span>พนักงาน</span><select name="employee_id" required>${employees.map((employee) => `<option value="${employee.id}" ${Number(employee.id) === Number(editEmployeeId) ? "selected" : ""}>${escapeHtml(employee.emp_code)} - ${escapeHtml(employee.fullname)}</option>`).join("")}</select></label>
             <label class="field compact-field"><span>กอง</span><select name="pile_no">${[1,2,3,4,5].map((pile) => `<option value="${pile}" ${Number(editingRecord.pile_no ?? editingRecord.pile) === pile ? "selected" : ""}>กอง ${pile}</option>`).join("")}</select></label>
             ${isDurian
-              ? DURIAN_GRADES.map((grade) => `<label class="field compact-field"><span>เกรด ${grade} (กก.)</span><input name="grade_${grade}" type="number" min="0" step="0.1" value="${Number(getRecordGradeWeights(editingRecord)[grade] || 0)}" required /></label>`).join("")
+              ? `<label class="field compact-field"><span>น้ำหนักทุเรียน (กก.)</span><input name="durian_weight" type="number" min="0" step="0.1" value="${Number(getRecordDurianWeight(editingRecord) || 0)}" required /></label>`
               : `<label class="field compact-field"><span>${escapeHtml(labels.water)} (กก.)</span><input name="water_weight" type="number" min="0" step="0.1" value="${Number(editingRecord.water_weight || editingRecord.water || 0)}" required /></label><label class="field compact-field"><span>${escapeHtml(labels.flower)} (กก.)</span><input name="flower_weight" type="number" min="0" step="0.1" value="${Number(editingRecord.flower_weight || editingRecord.flower || 0)}" required /></label>`}
             <label class="field production-edit-reason"><span>เหตุผลการแก้ไข</span><textarea name="reason" rows="2" minlength="3" placeholder="ระบุสาเหตุเพื่อบันทึกใน Log" required></textarea></label>
             <button class="btn btn-primary production-edit-submit" type="submit" ${productionEditorSaving ? "disabled" : ""}>${productionEditorSaving ? "กำลังบันทึก..." : "บันทึกการแก้ไข"}</button>
@@ -7126,11 +7152,11 @@ function renderProductionEditor(user, moduleItem) {
         <div class="table-heading">รายการ${escapeHtml(getProductionFruitLabel(productionEditorFruit))} วันที่ ${escapeHtml(productionEditorDate)}</div>
         <div class="table-scroll">
           <table class="production-editor-table">
-            <thead><tr><th>เวลา</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th><th>${isDurian ? "น้ำหนักเกรด A-E" : `${escapeHtml(labels.water)} / ${escapeHtml(labels.flower)}`}</th><th>รวมเงิน</th><th>ผู้บันทึก</th><th>จัดการ</th></tr></thead>
+            <thead><tr><th>เวลา</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th><th>${isDurian ? "น้ำหนักทุเรียน" : `${escapeHtml(labels.water)} / ${escapeHtml(labels.flower)}`}</th><th>รวมเงิน</th><th>ผู้บันทึก</th><th>จัดการ</th></tr></thead>
             <tbody>${records.length ? records.map((record) => {
               const employee = employees.find((item) => Number(item.id) === Number(record.employee_id));
               const weights = isDurian
-                ? DURIAN_GRADES.map((grade) => `${grade} ${numberText(getRecordGradeWeights(record)[grade])}`).join(" · ")
+                ? `${numberText(getRecordDurianWeight(record))} กก.`
                 : `${numberText(record.water_weight || record.water || 0)} / ${numberText(record.flower_weight || record.flower || 0)}`;
               const activeClass = Number(record.id) === Number(editingProductionRecordId)
                 ? "is-editing"
@@ -7221,24 +7247,14 @@ async function saveProductionEditorRecord(user, formElement) {
   const fruitType = productionFruitTypeForRecord(existingRecord);
   const payload = { employee, fruit_type: fruitType, record_date: recordDate, pile_no: pileNo };
   if (fruitType === "durian") {
-    const gradeWeights = {};
-    for (const grade of DURIAN_GRADES) {
-      const raw = String(form.get(`grade_${grade}`) ?? "").trim();
-      if (!isOneDecimalWeightInput(raw) || Number(raw) < 0) {
-        productionEditorMessage = `น้ำหนักเกรด ${grade} ต้องเป็นเลขไม่ติดลบและมีทศนิยมไม่เกิน 1 ตำแหน่ง`;
-        productionEditorMessageType = "error";
-        render();
-        return;
-      }
-      gradeWeights[grade] = Number(raw);
-    }
-    if (getDurianGradeTotal(gradeWeights) <= 0) {
-      productionEditorMessage = "ทุเรียนต้องมีน้ำหนักอย่างน้อย 1 เกรด";
+    const raw = String(form.get("durian_weight") ?? "").trim();
+    if (!isOneDecimalWeightInput(raw) || Number(raw) <= 0) {
+      productionEditorMessage = "น้ำหนักทุเรียนต้องมากกว่า 0 และมีทศนิยมไม่เกิน 1 ตำแหน่ง";
       productionEditorMessageType = "error";
       render();
       return;
     }
-    payload.grade_weights = gradeWeights;
+    payload.durian_weight = Number(raw);
   } else {
     const waterRaw = String(form.get("water_weight") ?? "").trim();
     const flowerRaw = String(form.get("flower_weight") ?? "").trim();
@@ -7389,30 +7405,29 @@ function renderDurianBatchEntry() {
   const employeeName = batchGridState.employee
     ? batchGridState.employee.fullname
     : "รอกรอกรหัสพนักงานอย่างน้อย 2 หลัก";
-  const renderInputs = (grade) => getDurianBatchWeights(grade).map((value, index) => `
+  const renderInputs = () => getBatchPileWeights("durian", batchGridState.durian_pile_no).map((value, index) => `
     <label class="batch-weight-cell">
       <span>${index + 1}</span>
-      <input data-durian-batch-grade="${grade}" data-batch-index="${index}" inputmode="decimal" type="number" min="0" step="0.1" value="${escapeHtml(value)}" />
+      <input data-durian-batch-weight data-batch-index="${index}" inputmode="decimal" type="number" min="0" step="0.1" value="${escapeHtml(value)}" />
     </label>`).join("");
   return `
     <section class="panel">
-      <div class="panel-head"><div><h2>กรอกทุเรียนแบบชุด</h2><p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักแต่ละเกรดแยกตามกอง เกรดละ 40 ช่อง</p></div></div>
+      <div class="panel-head"><div><h2>กรอกทุเรียนแบบชุด</h2><p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักทุเรียนแยกตามกอง กองละ 40 ช่อง</p></div></div>
       <div class="batch-employee-row">
         <label class="field"><span>วันที่บันทึกผลผลิต</span><input id="batchRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" /></label>
         <label class="field"><span>รหัสพนักงาน</span><input id="batchEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(batchGridState.emp_code)}" autocomplete="off" /></label>
         <div class="employee-result"><span>พนักงาน</span><strong>${escapeHtml(employeeName)}</strong></div>
       </div>
       <div class="durian-batch-grid">
-        ${DURIAN_GRADES.map((grade) => `
-          <section class="batch-side durian-grade-side grade-${grade.toLowerCase()}">
-            <div class="batch-side-head">
-              <h3>เกรด ${grade}</h3>
-              <label class="compact-field"><span>กอง</span><select data-durian-grade-pile="${grade}">
-                ${[1,2,3,4,5].map((pileNo) => `<option value="${pileNo}" ${String(batchGridState.durian_grade_piles?.[grade] || "1") === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}
-              </select></label>
-            </div>
-            <div class="batch-weight-grid">${renderInputs(grade)}</div>
-          </section>`).join("")}
+        <section class="batch-side durian-grade-side">
+          <div class="batch-side-head">
+            <h3>น้ำหนักทุเรียน</h3>
+            <label class="compact-field"><span>กอง</span><select id="batchDurianPile">
+              ${[1,2,3,4,5].map((pileNo) => `<option value="${pileNo}" ${String(batchGridState.durian_pile_no || "1") === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}
+            </select></label>
+          </div>
+          <div class="batch-weight-grid">${renderInputs()}</div>
+        </section>
       </div>
       <div class="batch-actions"><button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึกชุดนี้"}</button><button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button></div>
     </section>`;
@@ -7425,17 +7440,15 @@ function renderProductionSummary(user) {
   const employeeMap = new Map(getEmployees().map((employee) => [employee.id, employee]));
 
   const durianMode = isDurianFruit();
-  const gradeTotals = durianMode ? records.reduce((totals, record) => {
-    const weights = getRecordGradeWeights(record);
-    DURIAN_GRADES.forEach((grade) => totals[grade] += weights[grade]);
-    return totals;
-  }, createEmptyDurianGradeWeights(0)) : null;
+  const durianTotal = durianMode
+    ? records.reduce((sum, record) => sum + getRecordDurianWeight(record), 0)
+    : 0;
   return `
     <section class="panel">
       <div class="panel-head">
         <div>
           <h2>สรุปการผลิต</h2>
-          <p>${durianMode ? DURIAN_GRADES.map((grade) => `เกรด ${grade} ${numberText(gradeTotals[grade])} กก.`).join(" · ") : `${labels.waterShort} ${numberText(totals.water)} กก., ${labels.flowerShort} ${numberText(totals.flower)} กก.`}, ${totals.people.size} คน</p>
+          <p>${durianMode ? `น้ำหนักทุเรียน ${numberText(durianTotal)} กก.` : `${labels.waterShort} ${numberText(totals.water)} กก., ${labels.flowerShort} ${numberText(totals.flower)} กก.`}, ${totals.people.size} คน</p>
         </div>
         <span class="badge badge-success">${money(totals.amount)}</span>
       </div>
@@ -7459,14 +7472,14 @@ function renderProductionRecordsTable(records, showEdit) {
         <table>
           <thead>
             <tr>
-              <th>เวลา</th><th>รหัส</th><th>ชื่อ</th><th>กอง</th>${durianMode ? DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("") : `<th>${escapeHtml(labels.water)}</th><th>${escapeHtml(labels.flower)}</th>`}<th>รวมเงิน</th><th>สถานะ</th><th>จัดการ</th>
+              <th>เวลา</th><th>รหัส</th><th>ชื่อ</th><th>กอง</th>${durianMode ? `<th>น้ำหนักทุเรียน</th>` : `<th>${escapeHtml(labels.water)}</th><th>${escapeHtml(labels.flower)}</th>`}<th>รวมเงิน</th><th>สถานะ</th><th>จัดการ</th>
             </tr>
           </thead>
           <tbody>
             ${
               records.length
                 ? records.map((record) => renderProductionManagementRow(record, showEdit)).join("")
-                : `<tr><td colspan="${durianMode ? 12 : 9}" class="empty-cell">ยังไม่มีรายการผลผลิตวันที่ ${escapeHtml(productionRecordDate)}</td></tr>`
+                : `<tr><td colspan="${durianMode ? 8 : 9}" class="empty-cell">ยังไม่มีรายการผลผลิตวันที่ ${escapeHtml(productionRecordDate)}</td></tr>`
             }
           </tbody>
         </table>
@@ -7486,7 +7499,7 @@ function renderProductionManagementRow(record, showEdit) {
       <td>${escapeHtml(record.employee_name || employee?.fullname || "")}</td>
       <td>${record.pile_no}</td>
       ${isDurianFruit(productionFruitTypeForRecord(record))
-        ? DURIAN_GRADES.map((grade) => `<td>${numberText(getRecordGradeWeights(record)[grade])}</td>`).join("")
+        ? `<td>${numberText(getRecordDurianWeight(record))}</td>`
         : `<td>${numberText(record.water_weight)}</td><td>${numberText(record.flower_weight)}</td>`}
       <td><strong>${money(record.total_amount)}</strong></td>
       <td><span class="badge ${locked ? "badge-danger" : "badge-success"}">${locked ? "Locked" : "Open"}</span></td>
@@ -7661,37 +7674,34 @@ function renderProductionRecordRow(record) {
 function renderDurianFast(user, moduleItem) {
   syncFastInputStateForSelectedFruit();
   if (fastInputState.emp_code) updateFastEmployeeFromCode(fastInputState.emp_code);
-  fastInputState.grade_weights ||= createEmptyDurianGradeWeights("");
   const latestRecords = productionRecordsForActiveSession().sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 10);
   const employeeName = getEmployeeLookupText(fastInputState.employee, fastInputState.emp_code);
   return `
     <section class="panel fast-input-panel durian-fast-panel">
-      <div class="panel-head"><div><h2>${escapeHtml(moduleItem.label)} - ทุเรียน</h2><p>บันทึกน้ำหนักแยกเกรด A-E ภายในกองเดียวกัน</p></div><span class="badge badge-success">กรอกเร็ว</span></div>
+      <div class="panel-head"><div><h2>${escapeHtml(moduleItem.label)} - ทุเรียน</h2><p>บันทึกน้ำหนักทุเรียนรวมในแต่ละกอง</p></div><span class="badge badge-success">กรอกเร็ว</span></div>
       ${fastInputState.message ? `<div class="alert ${fastInputState.messageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(fastInputState.message)}</div>` : ""}
       <form class="fast-input-form durian-fast-form" id="productionFastForm">
         <label class="field"><span>วันที่</span><input id="fastRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" required /></label>
         <label class="field"><span>กอง</span><select name="pile_no" id="fastPileNo" required>${[1,2,3,4,5].map((pileNo) => `<option value="${pileNo}" ${fastInputState.pile_no === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}</select></label>
         <label class="field"><span>รหัสพนักงาน</span><input name="emp_code" id="fastEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(fastInputState.emp_code)}" autocomplete="off" required /></label>
         <div class="employee-result"><span>พนักงาน</span><strong>${escapeHtml(employeeName)}</strong></div>
-        <div class="durian-grade-inputs">
-          ${DURIAN_GRADES.map((grade) => `<label class="field durian-grade-field grade-${grade.toLowerCase()}"><span>เกรด ${grade}</span><input data-fast-durian-grade="${grade}" type="number" min="0" step="0.1" value="${escapeHtml(fastInputState.grade_weights[grade] ?? "")}" placeholder="0.0" /></label>`).join("")}
-        </div>
+        <label class="field"><span>น้ำหนักทุเรียน (กก.)</span><input id="fastDurianWeight" type="number" min="0" step="0.1" value="${escapeHtml(fastInputState.durian_weight || "")}" placeholder="0.0" required /></label>
         <button class="btn btn-primary form-submit" type="submit" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึก"}</button>
       </form>
-      <p class="demo-note">กรอกเฉพาะเกรดที่มีน้ำหนักได้ · กด Ctrl+S เพื่อบันทึก · Esc เพื่อล้างฟอร์ม</p>
+      <p class="demo-note">กด Ctrl+S เพื่อบันทึก · Esc เพื่อล้างฟอร์ม</p>
     </section>
     <section class="table-card"><div class="table-scroll"><table>
-      <thead><tr><th>เลขที่</th><th>วันที่</th><th>เวลา</th><th>กอง</th><th>รหัส</th>${DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("")}<th>รวมเงิน</th><th>สถานะ</th><th>ผู้บันทึก</th></tr></thead>
-      <tbody>${latestRecords.length ? latestRecords.map(renderDurianRecordRow).join("") : `<tr><td colspan="13" class="empty-cell">ยังไม่มีรายการทุเรียนวันนี้</td></tr>`}</tbody>
+      <thead><tr><th>เลขที่</th><th>วันที่</th><th>เวลา</th><th>กอง</th><th>รหัส</th><th>น้ำหนักทุเรียน</th><th>อัตรา</th><th>รวมเงิน</th><th>สถานะ</th><th>ผู้บันทึก</th></tr></thead>
+      <tbody>${latestRecords.length ? latestRecords.map(renderDurianRecordRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีรายการทุเรียนวันนี้</td></tr>`}</tbody>
     </table></div></section>`;
 }
 
 function renderDurianRecordRow(record) {
-  const weights = getRecordGradeWeights(record);
-  const rates = record.grade_rates || {};
+  const weight = getRecordDurianWeight(record);
+  const rate = Number(record.durian_rate || (weight > 0 ? Number(record.total_amount || 0) / weight : 0));
   return `<tr>
     <td>${record.id}</td><td>${escapeHtml(record.record_date)}</td><td>${escapeHtml(record.record_time)}</td><td>${record.pile_no}</td><td><strong>${escapeHtml(record.emp_code)}</strong></td>
-    ${DURIAN_GRADES.map((grade) => `<td>${numberText(weights[grade])} x ${money(rates[grade] || 0)}</td>`).join("")}
+    <td>${numberText(weight)} กก.</td><td>${money(rate)}</td>
     <td><strong>${money(record.total_amount)}</strong></td><td><span class="badge badge-warning">${escapeHtml(record.status)}</span></td><td>${escapeHtml(record.created_by)}</td>
   </tr>`;
 }
@@ -7709,6 +7719,7 @@ function clearFastInputForm(keepMessage = false) {
     emp_code: "",
     water_weight: "",
     flower_weight: "",
+    durian_weight: "",
     grade_weights: createEmptyDurianGradeWeights(""),
     employee: null,
     message: keepMessage ? fastInputState.message : "",
@@ -7860,32 +7871,26 @@ async function saveDurianFastForm(user) {
     return;
   }
   if (empInput) updateFastEmployeeFromCode(empInput.value);
-  fastInputState.grade_weights ||= createEmptyDurianGradeWeights("");
-  document.querySelectorAll("[data-fast-durian-grade]").forEach((input) => {
-    fastInputState.grade_weights[input.dataset.fastDurianGrade] = input.value;
-  });
+  const weightInput = document.querySelector("#fastDurianWeight");
+  if (weightInput) fastInputState.durian_weight = weightInput.value;
   const employee = fastInputState.emp_code.length >= 2 ? apiGetEmployeeByCode(fastInputState.emp_code) : null;
   fastInputState.employee = employee;
   if (!employee) {
     setFastInputMessage("ต้องกรอกรหัสพนักงานที่มีอยู่และยังใช้งานอยู่", "error");
     render(); focusFastEmployeeCode(); return;
   }
-  const invalidGrade = DURIAN_GRADES.find((grade) => {
-    const raw = String(fastInputState.grade_weights[grade] ?? "").trim();
-    return raw && !isOneDecimalWeightInput(raw);
-  });
-  if (invalidGrade) {
-    setFastInputMessage(`น้ำหนักเกรด ${invalidGrade} ต้องเป็นทศนิยมได้ไม่เกิน 1 ตำแหน่ง`, "error");
+  const rawWeight = String(fastInputState.durian_weight || "").trim();
+  const totalWeight = Number(rawWeight);
+  if (!isOneDecimalWeightInput(rawWeight) || !Number.isFinite(totalWeight)) {
+    setFastInputMessage("น้ำหนักทุเรียนต้องเป็นทศนิยมได้ไม่เกิน 1 ตำแหน่ง", "error");
     render(); return;
   }
-  const gradeWeights = normalizeDurianGradeWeights(fastInputState.grade_weights);
-  const totalWeight = getDurianGradeTotal(gradeWeights);
   if (totalWeight <= 0) {
-    setFastInputMessage("กรุณากรอกน้ำหนักอย่างน้อย 1 เกรด", "error");
+    setFastInputMessage("กรุณากรอกน้ำหนักทุเรียนมากกว่า 0", "error");
     render(); return;
   }
   if (totalWeight > 500 && !window.confirm("น้ำหนักทุเรียนรวมเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?")) return;
-  const payload = { employee, record_date: productionRecordDate, fruit_type: "durian", pile_no: fastInputState.pile_no, grade_weights: gradeWeights };
+  const payload = { employee, record_date: productionRecordDate, fruit_type: "durian", pile_no: fastInputState.pile_no, durian_weight: totalWeight };
   const duplicateWarning = getPotentialProductionDuplicateWarning(employee, [payload], productionRecordDate, "durian");
   if (duplicateWarning && !window.confirm(duplicateWarning)) {
     setFastInputMessage(`ยกเลิกบันทึกทุเรียน รหัส ${employee.emp_code} ข้อมูลที่กรอกไว้ยังอยู่`, "error");
@@ -7915,8 +7920,8 @@ function bindProductionFastEvents(user) {
   const empInput = document.querySelector("#fastEmpCode");
   const waterInput = document.querySelector("#fastWaterWeight");
   const flowerInput = document.querySelector("#fastFlowerWeight");
-  const gradeInputs = [...document.querySelectorAll("[data-fast-durian-grade]")];
-  const orderedInputs = [dateInput, pileInput, empInput, waterInput, flowerInput, ...gradeInputs].filter(Boolean);
+  const durianWeightInput = document.querySelector("#fastDurianWeight");
+  const orderedInputs = [dateInput, pileInput, empInput, waterInput, flowerInput, durianWeightInput].filter(Boolean);
 
   focusFastEmployeeCode();
   if (empInput?.value) {
@@ -7949,10 +7954,9 @@ function bindProductionFastEvents(user) {
     fastInputState.flower_weight = event.target.value;
   });
 
-  gradeInputs.forEach((input) => input.addEventListener("input", (event) => {
-    fastInputState.grade_weights ||= createEmptyDurianGradeWeights("");
-    fastInputState.grade_weights[event.target.dataset.fastDurianGrade] = event.target.value;
-  }));
+  durianWeightInput?.addEventListener("input", (event) => {
+    fastInputState.durian_weight = event.target.value;
+  });
 
   form?.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -8191,14 +8195,10 @@ function bindProductionManagementEvents(user) {
     window.setTimeout(() => focusBatchWeightInput("water"), 0);
   });
 
-  document.querySelectorAll("[data-durian-grade-pile]").forEach((select) => {
-    select.addEventListener("change", (event) => {
-      const grade = event.target.dataset.durianGradePile;
-      batchGridState.durian_grade_piles ||= createDurianGradePileSelection();
-      batchGridState.durian_grade_piles[grade] = event.target.value;
-      render();
-      window.setTimeout(() => document.querySelector(`[data-durian-batch-grade='${grade}']`)?.focus(), 0);
-    });
+  document.querySelector("#batchDurianPile")?.addEventListener("change", (event) => {
+    batchGridState.durian_pile_no = event.target.value;
+    render();
+    window.setTimeout(() => document.querySelector("[data-durian-batch-weight]")?.focus(), 0);
   });
 
   document.querySelectorAll("[data-batch-weight]").forEach((input) => {
@@ -8226,11 +8226,10 @@ function bindProductionManagementEvents(user) {
     });
   });
 
-  document.querySelectorAll("[data-durian-batch-grade]").forEach((input) => {
+  document.querySelectorAll("[data-durian-batch-weight]").forEach((input) => {
     input.addEventListener("input", (event) => {
-      const grade = event.target.dataset.durianBatchGrade;
       const index = Number(event.target.dataset.batchIndex);
-      getDurianBatchWeights(grade)[index] = event.target.value;
+      getBatchPileWeights("durian")[index] = event.target.value;
     });
   });
 
@@ -8239,7 +8238,7 @@ function bindProductionManagementEvents(user) {
     document.querySelector("#batchEmpCode"),
     ...document.querySelectorAll("[data-batch-weight='flower']"),
     ...document.querySelectorAll("[data-batch-weight='water']")
-    ,...document.querySelectorAll("[data-durian-batch-grade]")
+    ,...document.querySelectorAll("[data-durian-batch-weight]")
   ].filter(Boolean);
 
   batchInputs.forEach((input, index) => {
@@ -8368,10 +8367,10 @@ function clearBatchGridState(keepEmployee = false) {
     employee: keepEmployee ? batchGridState.employee : null,
     flower_pile_no: "1",
     water_pile_no: "1",
+    durian_pile_no: "1",
     flower_weights_by_pile: createBatchPileWeightMap(),
     water_weights_by_pile: createBatchPileWeightMap(),
-    durian_grade_piles: createDurianGradePileSelection(),
-    durian_grade_weights_by_pile: createDurianBatchWeightMap()
+    durian_weights_by_pile: createBatchPileWeightMap()
   };
 }
 
@@ -8584,16 +8583,11 @@ async function saveDurianBatchEntries(user) {
   }
   const groups = new Map();
   const errors = [];
-  DURIAN_GRADES.forEach((grade) => {
-    [1,2,3,4,5].forEach((pileNo) => {
-      const result = readBatchWeightValues(getDurianBatchWeights(grade, pileNo), `เกรด ${grade} กอง ${pileNo}`);
-      errors.push(...result.errors);
-      const total = result.weights.reduce((sum, weight) => sum + weight, 0);
-      if (total <= 0) return;
-      const group = groups.get(pileNo) || { pileNo, grade_weights: createEmptyDurianGradeWeights(0) };
-      group.grade_weights[grade] += total;
-      groups.set(pileNo, group);
-    });
+  [1,2,3,4,5].forEach((pileNo) => {
+    const result = readBatchWeightValues(getBatchPileWeights("durian", pileNo), `น้ำหนักทุเรียน กอง ${pileNo}`);
+    errors.push(...result.errors);
+    const total = result.weights.reduce((sum, weight) => sum + weight, 0);
+    if (total > 0) groups.set(pileNo, { pileNo, durian_weight: total });
   });
   if (errors.length) {
     setProductionMessage(errors.join("\n"), "error"); render(); return;
@@ -8601,14 +8595,14 @@ async function saveDurianBatchEntries(user) {
   if (!groups.size) {
     setProductionMessage("กรุณากรอกน้ำหนักทุเรียนอย่างน้อย 1 ช่อง", "error"); render(); return;
   }
-  const overLimit = [...groups.values()].some((group) => getDurianGradeTotal(group.grade_weights) > 500);
+  const overLimit = [...groups.values()].some((group) => group.durian_weight > 500);
   if (overLimit && !window.confirm("ผลรวมน้ำหนักทุเรียนบางกองเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?")) return;
   const batchPayloads = [...groups.values()].map((group) => ({
     employee,
     record_date: productionRecordDate,
     fruit_type: "durian",
     pile_no: group.pileNo,
-    grade_weights: group.grade_weights
+    durian_weight: group.durian_weight
   }));
   const duplicateWarning = getPotentialProductionDuplicateWarning(employee, batchPayloads, productionRecordDate, "durian");
   if (duplicateWarning && !window.confirm(duplicateWarning)) {
@@ -8634,9 +8628,9 @@ async function saveDurianBatchEntries(user) {
     return;
   }
   const lines = [...groups.values()].sort((a,b) => a.pileNo-b.pileNo).map((group) =>
-    `กอง ${group.pileNo}: ${DURIAN_GRADES.map((grade) => `${grade} ${numberText(group.grade_weights[grade])}`).join(", ")} · รวม ${numberText(getDurianGradeTotal(group.grade_weights))} กก.`
+    `กอง ${group.pileNo}: ${numberText(group.durian_weight)} กก.`
   );
-  const grandTotal = [...groups.values()].reduce((sum, group) => sum + getDurianGradeTotal(group.grade_weights), 0);
+  const grandTotal = [...groups.values()].reduce((sum, group) => sum + group.durian_weight, 0);
   const message = `บันทึกทุเรียนแบบชุดแล้ว: รหัส ${employee.emp_code}\nเลขอ้างอิง Cloud: ${formatCloudRecordIds(cloudRows)}\nตรวจสำเร็จ ${cloudRows.length}/${batchPayloads.length} รายการ\n${lines.join("\n")}\nน้ำหนักรวม ${numberText(grandTotal)} กก.`;
   clearBatchGridState();
   setProductionMessage(message);
@@ -8668,22 +8662,26 @@ function editProductionRecord(recordId, user) {
     const pile = window.prompt("กอง", String(record.pile_no));
     if (pile === null) return;
     const pileNo = Number(pile);
-    const gradeWeights = {};
-    const currentWeights = getRecordGradeWeights(record);
-    for (const grade of DURIAN_GRADES) {
-      const value = window.prompt(`น้ำหนักทุเรียนเกรด ${grade}`, String(currentWeights[grade]));
-      if (value === null) return;
-      if (!isOneDecimalWeightInput(value) || Number(value) < 0) {
-        setProductionMessage(`น้ำหนักเกรด ${grade} ต้องเป็นตัวเลขไม่ติดลบและมีทศนิยมไม่เกิน 1 ตำแหน่ง`, "error");
-        render(); return;
-      }
-      gradeWeights[grade] = Number(value);
-    }
-    if (!Number.isInteger(pileNo) || pileNo < 1 || pileNo > 5 || getDurianGradeTotal(gradeWeights) <= 0) {
-      setProductionMessage("กองต้องเป็นเลข 1-5 และต้องมีน้ำหนักอย่างน้อย 1 เกรด", "error"); render(); return;
+    const weight = window.prompt("น้ำหนักทุเรียน", String(getRecordDurianWeight(record)));
+    if (weight === null) return;
+    if (
+      !Number.isInteger(pileNo) ||
+      pileNo < 1 ||
+      pileNo > 5 ||
+      !isOneDecimalWeightInput(weight) ||
+      Number(weight) <= 0
+    ) {
+      setProductionMessage("กองต้องเป็นเลข 1-5 และน้ำหนักทุเรียนต้องมากกว่า 0 โดยมีทศนิยมไม่เกิน 1 ตำแหน่ง", "error");
+      render();
+      return;
     }
     try {
-      apiUpdateProductionRecord(record.id, { employee, fruit_type: "durian", pile_no: pileNo, grade_weights: gradeWeights }, user);
+      apiUpdateProductionRecord(record.id, {
+        employee,
+        fruit_type: "durian",
+        pile_no: pileNo,
+        durian_weight: Number(weight)
+      }, user);
       setProductionMessage(`แก้ไขรายการทุเรียน #${record.id} แล้ว`);
     } catch (error) {
       setProductionMessage(error instanceof Error ? error.message : "แก้ไขรายการทุเรียนไม่สำเร็จ", "error");
@@ -9100,7 +9098,7 @@ function renderPersonalReport(moduleItem) {
                 <th>วันที่</th>
                 <th>น้ำหนักดอก</th>
                 <th>น้ำหนักน้ำ</th>
-                <th>ทุเรียน A-E</th>
+                <th>น้ำหนักทุเรียน</th>
                 <th>น้ำหนักรวม</th>
                 <th>รวมเป็นเงิน</th>
               </tr>
@@ -9126,7 +9124,7 @@ function renderPersonalReport(moduleItem) {
                 <th>จำนวนรายการ</th>
                 <th>น้ำหนักดอก</th>
                 <th>น้ำหนักน้ำ</th>
-                <th>ทุเรียน A-E</th>
+                <th>น้ำหนักทุเรียน</th>
                 <th>น้ำหนักรวม</th>
                 <th>รวมเป็นเงิน</th>
               </tr>
@@ -9151,7 +9149,7 @@ function renderPersonalDailyRow(item, fruitId = personalReportFruitFilter) {
     <tr>
       <td><strong>${escapeHtml(item.date)}</strong></td>
       ${isDurian
-        ? DURIAN_GRADES.map((grade) => `<td>${numberText(item.grades[grade])}</td>`).join("")
+        ? `<td>${numberText(getDurianGradeTotal(item.grades))}</td>`
         : `<td>${numberText(item.water)}</td><td>${numberText(item.flower)}</td>`}
       <td><strong>${numberText(item.total)}</strong></td>
       <td><strong>${money(item.amount)}</strong></td>
@@ -9166,7 +9164,7 @@ function renderPersonalPileRow(item, fruitId = personalReportFruitFilter) {
       <td><strong>กอง ${escapeHtml(item.pile)}</strong></td>
       <td>${item.count.toLocaleString("th-TH")}</td>
       ${isDurian
-        ? DURIAN_GRADES.map((grade) => `<td>${numberText(item.grades[grade])}</td>`).join("")
+        ? `<td>${numberText(getDurianGradeTotal(item.grades))}</td>`
         : `<td>${numberText(item.water)}</td><td>${numberText(item.flower)}</td>`}
       <td><strong>${numberText(item.total)}</strong></td>
       <td><strong>${money(item.amount)}</strong></td>
@@ -10872,7 +10870,7 @@ function renderDashboard(moduleItem) {
                 <th>กอง</th>
                 <th>น้ำหนักน้ำ</th>
                 <th>น้ำหนักดอก</th>
-                <th>ทุเรียน A-E</th>
+                <th>น้ำหนักทุเรียน</th>
                 <th>น้ำหนักรวม</th>
                 <th>รวมเงิน</th>
                 <th>ผู้บันทึก</th>
@@ -10920,13 +10918,13 @@ function renderDashboardBars(pileSummaries, fruitFilter = summaryFruitFilter) {
 }
 
 function renderPileSummaryRow(item, fruitFilter = summaryFruitFilter) {
-  const showGrades = fruitFilter === "all" || fruitFilter === "durian";
+  const showDurianWeight = fruitFilter === "all" || fruitFilter === "durian";
   const showStandardWeights = fruitFilter !== "durian";
   return `
     <tr>
       <td>กอง ${item.pile}</td>
       ${showStandardWeights ? `<td>${numberText(item.water)}</td><td>${numberText(item.flower)}</td>` : ""}
-      ${showGrades ? DURIAN_GRADES.map((grade) => `<td>${numberText(item.grades[grade])}</td>`).join("") : ""}
+      ${showDurianWeight ? `<td>${numberText(getDurianGradeTotal(item.grades))}</td>` : ""}
       <td><strong>${numberText(item.total)}</strong></td>
       <td><strong>${money(item.amount)}</strong></td>
     </tr>
@@ -10937,7 +10935,7 @@ function renderDashboardDetailRow(record, fruitFilter = summaryFruitFilter) {
   const employee = getEmployees().find((item) => item.id === record.employee_id);
   const isDurian = isDurianFruit(productionFruitTypeForRecord(record));
   const showFruit = fruitFilter === "all";
-  const showGrades = fruitFilter === "all" || fruitFilter === "durian";
+  const showDurianWeight = fruitFilter === "all" || fruitFilter === "durian";
   const showStandardWeights = fruitFilter !== "durian";
   const pile = normalizeProductionPileNumber(record.pile_no ?? record.pile);
 
@@ -10949,7 +10947,7 @@ function renderDashboardDetailRow(record, fruitFilter = summaryFruitFilter) {
       ${showFruit ? `<td>${escapeHtml(getProductionFruitLabel(productionFruitTypeForRecord(record)))}</td>` : ""}
       <td>${pile === null ? "-" : pile}</td>
       ${showStandardWeights ? `<td>${isDurian ? "-" : numberText(record.water_weight || record.water)}</td><td>${isDurian ? "-" : numberText(record.flower_weight || record.flower)}</td>` : ""}
-      ${showGrades ? DURIAN_GRADES.map((grade) => `<td>${isDurian ? numberText(getRecordGradeWeights(record)[grade]) : "-"}</td>`).join("") : ""}
+      ${showDurianWeight ? `<td>${isDurian ? numberText(getRecordDurianWeight(record)) : "-"}</td>` : ""}
       <td><strong>${numberText(getRecordTotalWeight(record))}</strong></td>
       <td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td>
       <td>${escapeHtml(record.created_by || "")}</td>
@@ -10988,7 +10986,7 @@ function exportSummaryData() {
     lines.push(csvRow(["น้ำหนักรวมทั้งหมด (กก.)", totals.total]));
     lines.push(csvRow(["น้ำหนักน้ำ (กก.)", totals.water]));
     lines.push(csvRow(["น้ำหนักดอก (กก.)", totals.flower]));
-    lines.push(csvRow(["ทุเรียนเกรด A-E", formatDurianGradeBreakdown(totals)]));
+    lines.push(csvRow(["น้ำหนักทุเรียน (กก.)", getDurianGradeTotal(totals.grades)]));
     lines.push(csvRow(["ยอดเงินรวม", totals.amount]));
     lines.push(csvRow(["พนักงานที่มีรายการ", totals.people.size]));
     lines.push(csvRow(["จำนวนรายการ", records.length]));
@@ -10997,16 +10995,16 @@ function exportSummaryData() {
 
   if (summaryExportOptions.piles) {
     lines.push(csvRow(["สรุปตามกอง"]));
-    lines.push(csvRow(["กอง", "น้ำหนักน้ำ (กก.)", "น้ำหนักดอก (กก.)", "ทุเรียนเกรด A-E", "รวม (กก.)", "รวมเงิน"]));
+    lines.push(csvRow(["กอง", "น้ำหนักน้ำ (กก.)", "น้ำหนักดอก (กก.)", "น้ำหนักทุเรียน (กก.)", "รวม (กก.)", "รวมเงิน"]));
     pileSummaries.forEach((item) => {
-      lines.push(csvRow([`กอง ${item.pile}`, item.water, item.flower, formatDurianGradeBreakdown(item), item.total, item.amount]));
+      lines.push(csvRow([`กอง ${item.pile}`, item.water, item.flower, getDurianGradeTotal(item.grades), item.total, item.amount]));
     });
     lines.push("");
   }
 
   if (summaryExportOptions.details) {
     lines.push(csvRow(["รายละเอียด"]));
-    lines.push(csvRow(["วันที่", "เวลา", "รหัสพนักงาน", "ชื่อพนักงาน", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "ทุเรียนเกรด A-E", "น้ำหนักรวม", "รวมเงิน", "ผู้บันทึก"]));
+    lines.push(csvRow(["วันที่", "เวลา", "รหัสพนักงาน", "ชื่อพนักงาน", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "น้ำหนักทุเรียน", "น้ำหนักรวม", "รวมเงิน", "ผู้บันทึก"]));
     records.forEach((record) => {
       const employee = getEmployees().find((item) => item.id === record.employee_id);
       lines.push(
@@ -11018,7 +11016,7 @@ function exportSummaryData() {
           record.pile_no || record.pile || "",
           record.water_weight || record.water || 0,
           record.flower_weight || record.flower || 0,
-          isDurianFruit(productionFruitTypeForRecord(record)) ? formatDurianGradeBreakdown(record) : "-",
+          isDurianFruit(productionFruitTypeForRecord(record)) ? getRecordDurianWeight(record) : "-",
           getRecordTotalWeight(record),
           record.total_amount || record.grand_total || 0,
           record.created_by || ""
@@ -12495,8 +12493,8 @@ function renderPersonalProductionSummaryTab(context) {
   const isDurian = personalReportFruitFilter === "durian";
   const labels = getProductionFieldLabels(personalReportFruitFilter);
   const selectedFruitLabel = getProductionFruitLabel(personalReportFruitFilter);
-  const dailyColumnCount = isDurian ? 8 : 5;
-  const pileColumnCount = isDurian ? 9 : 6;
+  const dailyColumnCount = 4;
+  const pileColumnCount = 5;
 
   return `
     ${
@@ -12510,7 +12508,7 @@ function renderPersonalProductionSummaryTab(context) {
         <span>น้ำหนักรวม</span>
         <strong>${numberText(totals.total)} กก.</strong>
         <small>${isDurian
-          ? DURIAN_GRADES.map((grade) => `${grade} ${numberText(totals.grades[grade])}`).join(" | ")
+          ? `ทุเรียน ${numberText(getDurianGradeTotal(totals.grades))}`
           : `${escapeHtml(labels.waterShort)} ${numberText(totals.water)} | ${escapeHtml(labels.flowerShort)} ${numberText(totals.flower)}`}</small>
       </div>
       <div class="metric-card metric-blue">
@@ -12539,7 +12537,7 @@ function renderPersonalProductionSummaryTab(context) {
               <tr>
                 <th>วันที่</th>
                 ${isDurian
-                  ? DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("")
+                  ? `<th>น้ำหนักทุเรียน</th>`
                   : `<th>${escapeHtml(labels.water)}</th><th>${escapeHtml(labels.flower)}</th>`}
                 <th>น้ำหนักรวม</th>
                 <th>รวมเป็นเงิน</th>
@@ -12565,7 +12563,7 @@ function renderPersonalProductionSummaryTab(context) {
                 <th>กอง</th>
                 <th>จำนวนรายการ</th>
                 ${isDurian
-                  ? DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("")
+                  ? `<th>น้ำหนักทุเรียน</th>`
                   : `<th>${escapeHtml(labels.water)}</th><th>${escapeHtml(labels.flower)}</th>`}
                 <th>น้ำหนักรวม</th>
                 <th>รวมเป็นเงิน</th>
@@ -12867,7 +12865,7 @@ const summaryExportFieldGroups = {
     { key: "totalWeight", label: "น้ำหนักรวมทั้งหมด" },
     { key: "water", label: "น้ำหนักน้ำ" },
     { key: "flower", label: "น้ำหนักดอก" },
-    { key: "grades", label: "ทุเรียนเกรด A-E" },
+    { key: "grades", label: "น้ำหนักทุเรียน" },
     { key: "amount", label: "ยอดเงินรวม" },
     { key: "employees", label: "พนักงานที่มีรายการ" },
     { key: "records", label: "จำนวนรายการ" }
@@ -12876,7 +12874,7 @@ const summaryExportFieldGroups = {
     { key: "pile", label: "กอง" },
     { key: "water", label: "น้ำหนักน้ำ" },
     { key: "flower", label: "น้ำหนักดอก" },
-    { key: "grades", label: "ทุเรียนเกรด A-E" },
+    { key: "grades", label: "น้ำหนักทุเรียน" },
     { key: "total", label: "รวม" },
     { key: "amount", label: "รวมเงิน" }
   ],
@@ -12888,7 +12886,7 @@ const summaryExportFieldGroups = {
     { key: "pile", label: "กอง" },
     { key: "water", label: "น้ำหนักน้ำ" },
     { key: "flower", label: "น้ำหนักดอก" },
-    { key: "grades", label: "ทุเรียนเกรด A-E" },
+    { key: "grades", label: "น้ำหนักทุเรียน" },
     { key: "total", label: "น้ำหนักรวม" },
     { key: "amount", label: "รวมเงิน" },
     { key: "createdBy", label: "ผู้บันทึก" }
@@ -12996,8 +12994,8 @@ function renderSummaryAll(moduleItem) {
   const fruitLabels = summaryFruitFilter === "all"
     ? { water: "น้ำหนักช่อง 1", flower: "น้ำหนักช่อง 2", waterShort: "ช่อง 1", flowerShort: "ช่อง 2" }
     : getProductionFieldLabels(summaryFruitFilter);
-  const detailColumnCount = 7 + (showFruitColumn ? 1 : 0) + (showStandardWeights ? 2 : 0) + (showGrades ? DURIAN_GRADES.length : 0);
-  const pileColumnCount = 3 + (showStandardWeights ? 2 : 0) + (showGrades ? DURIAN_GRADES.length : 0);
+  const detailColumnCount = 7 + (showFruitColumn ? 1 : 0) + (showStandardWeights ? 2 : 0) + (showGrades ? 1 : 0);
+  const pileColumnCount = 3 + (showStandardWeights ? 2 : 0) + (showGrades ? 1 : 0);
 
   return `
     <section class="summary-page">
@@ -13084,7 +13082,7 @@ function renderSummaryAll(moduleItem) {
           <span>น้ำหนักรวมทั้งหมด</span>
           <strong>${numberText(totals.total)} กก.</strong>
           <small>${summaryFruitFilter === "durian"
-            ? DURIAN_GRADES.map((grade) => `${grade} ${numberText(totals.grades[grade])}`).join(" | ")
+            ? `ทุเรียน ${numberText(getDurianGradeTotal(totals.grades))} กก.`
             : `${escapeHtml(fruitLabels.waterShort || "น้ำ")} ${numberText(totals.water)} กก. | ${escapeHtml(fruitLabels.flowerShort || "ดอก")} ${numberText(totals.flower)} กก.${showGrades ? ` | ทุเรียน ${numberText(getDurianGradeTotal(totals.grades))} กก.` : ""}`}</small>
         </div>
         <div class="metric-card metric-blue">
@@ -13110,7 +13108,7 @@ function renderSummaryAll(moduleItem) {
             <h3>กราฟเปรียบเทียบน้ำหนัก</h3>
             <div class="chart-legend">
               ${showStandardWeights ? `<span><i class="legend-water"></i>${escapeHtml(fruitLabels.waterShort || "น้ำ")}</span><span><i class="legend-flower"></i>${escapeHtml(fruitLabels.flowerShort || "ดอก")}</span>` : ""}
-              ${showGrades ? `<span><i class="legend-durian"></i>ทุเรียน A-E</span>` : ""}
+              ${showGrades ? `<span><i class="legend-durian"></i>น้ำหนักทุเรียน</span>` : ""}
             </div>
           </div>
           <div class="summary-chart">
@@ -13126,7 +13124,7 @@ function renderSummaryAll(moduleItem) {
                 <tr>
                   <th>กอง</th>
                   ${showStandardWeights ? `<th>${escapeHtml(fruitLabels.water || "น้ำหนักน้ำ")}</th><th>${escapeHtml(fruitLabels.flower || "น้ำหนักดอก")}</th>` : ""}
-                  ${showGrades ? DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("") : ""}
+                  ${showGrades ? `<th>น้ำหนักทุเรียน</th>` : ""}
                   <th>รวม</th>
                   <th>รวมเงิน</th>
                 </tr>
@@ -13155,7 +13153,7 @@ function renderSummaryAll(moduleItem) {
                 ${showFruitColumn ? "<th>ผลไม้</th>" : ""}
                 <th>กอง</th>
                 ${showStandardWeights ? `<th>${escapeHtml(fruitLabels.water || "น้ำหนักน้ำ")}</th><th>${escapeHtml(fruitLabels.flower || "น้ำหนักดอก")}</th>` : ""}
-                ${showGrades ? DURIAN_GRADES.map((grade) => `<th>เกรด ${grade}</th>`).join("") : ""}
+                ${showGrades ? `<th>น้ำหนักทุเรียน</th>` : ""}
                 <th>น้ำหนักรวม</th>
                 <th>รวมเงิน</th>
                 <th>ผู้บันทึก</th>
@@ -13217,7 +13215,7 @@ function exportSummaryData() {
       ["totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", totals.total],
       ["water", `${fruitLabels.water || "น้ำหนักน้ำ"} (กก.)`, totals.water],
       ["flower", `${fruitLabels.flower || "น้ำหนักดอก"} (กก.)`, totals.flower],
-      ["grades", "ทุเรียนเกรด A-E", DURIAN_GRADES.map((grade) => `${grade} ${numberText(totals.grades[grade])}`).join(" | ")],
+      ["grades", "น้ำหนักทุเรียน", numberText(getDurianGradeTotal(totals.grades))],
       ["amount", "ยอดเงินรวม", totals.amount],
       ["employees", "พนักงานที่มีรายการ", totals.people.size],
       ["records", "จำนวนรายการ", records.length]
@@ -13234,7 +13232,7 @@ function exportSummaryData() {
       pile: (item) => item.pile,
       water: (item) => item.water,
       flower: (item) => item.flower,
-      grades: (item) => DURIAN_GRADES.map((grade) => `${grade} ${numberText(item.grades?.[grade] || 0)}`).join(" | "),
+      grades: (item) => numberText(getDurianGradeTotal(item.grades)),
       total: (item) => item.total,
       amount: (item) => item.amount
     };
@@ -13769,7 +13767,7 @@ function renderGroupReportSummaryRow(row, showFruit = false) {
       <td>${row.records.toLocaleString("th-TH")}</td>
       <td>${compactNumberText(row.water)}</td>
       <td>${compactNumberText(row.flower)}</td>
-      <td>${getDurianGradeTotal(row.grades) > 0 ? DURIAN_GRADES.map((grade) => `${grade}:${compactNumberText(row.grades[grade])}`).join(" · ") : "-"}</td>
+      <td>${getDurianGradeTotal(row.grades) > 0 ? compactNumberText(getDurianGradeTotal(row.grades)) : "-"}</td>
       <td><strong>${compactNumberText(row.total)}</strong></td>
       <td><strong>${money(row.amount)}</strong></td>
       <td>${money(row.bonus_amount || 0)}</td>
@@ -13789,7 +13787,7 @@ function renderGroupReportEmployeeRow(row) {
       <td>${row.records.toLocaleString("th-TH")}</td>
       <td>${numberText(row.water)}</td>
       <td>${numberText(row.flower)}</td>
-      <td>${getDurianGradeTotal(row.grades) > 0 ? DURIAN_GRADES.map((grade) => `${grade}:${numberText(row.grades[grade])}`).join(" · ") : "-"}</td>
+      <td>${getDurianGradeTotal(row.grades) > 0 ? numberText(getDurianGradeTotal(row.grades)) : "-"}</td>
       <td><strong>${numberText(row.total)}</strong></td>
       <td><strong>${money(row.amount)}</strong></td>
       <td>${money(row.bonus_amount || 0)}</td>
@@ -14052,7 +14050,7 @@ function renderSummaryGroupReport(moduleItem) {
           <div class="table-heading">สรุปตามกลุ่ม</div>
           <div class="table-scroll">
             <table class="group-report-compact-table">
-              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>น้ำ</th><th>ดอก</th><th>เกรดทุเรียน A-E</th><th>รวม</th><th>เงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
+              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>น้ำ</th><th>ดอก</th><th>น้ำหนักทุเรียน</th><th>รวม</th><th>เงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
               <tbody>${groupRows.length ? groupRows.map((row) => renderGroupReportSummaryRow(row)).join("") : `<tr><td colspan="12" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
             </table>
           </div>
@@ -14063,7 +14061,7 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">สรุปตามกลุ่มและผลไม้</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>เกรดทุเรียน A-E</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
+            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>น้ำหนักทุเรียน</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
             <tbody>${fruitRows.length ? fruitRows.map((row) => renderGroupReportSummaryRow(row, true)).join("") : `<tr><td colspan="13" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
@@ -14073,7 +14071,7 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">รายละเอียดพนักงานในกลุ่ม</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>เกรดทุเรียน A-E</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
+            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>น้ำหนักทุเรียน</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
             <tbody>${employeeRows.length ? employeeRows.map(renderGroupReportEmployeeRow).join("") : `<tr><td colspan="13" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
@@ -14083,7 +14081,7 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">รายละเอียดรายการ</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>วันที่</th><th>กลุ่ม</th><th>ผลไม้</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>เกรดทุเรียน A-E</th><th>รวมเงิน</th></tr></thead>
+            <thead><tr><th>วันที่</th><th>กลุ่ม</th><th>ผลไม้</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>น้ำหนักทุเรียน</th><th>รวมเงิน</th></tr></thead>
             <tbody>${records.length ? records.slice(0, 200).map(renderGroupReportDetailRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
