@@ -615,6 +615,7 @@ let timeEntryEmployeeCode = "";
 let weeklyTimeEmployeeCode = "";
 let weeklyTimeDraft = Array.from({ length: 7 }, () => ({ clock_in: "", clock_out: "" }));
 let editingTimeRecordId = null;
+let timeRecordSaving = false;
 let deductionActiveTab = "production";
 let deductionBonusEmployeeKind = "time";
 let deductionApprovalEmployeeKind = "production";
@@ -1430,6 +1431,74 @@ async function saveProductionRowsToCloud(records, { mode = "insert" } = {}) {
   } finally {
     applyingCloudState = false;
     liveStateSyncInFlight.delete("production_records");
+  }
+}
+
+function mergeTimeCloudRows(cloudRows) {
+  if (!Array.isArray(cloudRows) || !cloudRows.length) return;
+  const records = getTimeRecords();
+  const merged = [...records];
+  cloudRows.forEach((cloudRow) => {
+    const existingIndex = merged.findIndex((record) => Number(record.id) === Number(cloudRow.id));
+    if (existingIndex >= 0) {
+      merged[existingIndex] = { ...merged[existingIndex], ...cloudRow };
+    } else {
+      merged.push(cloudRow);
+    }
+  });
+  saveTimeRecordsLocal(merged);
+}
+
+function assertTimeCloudRowMatches(expected, actual) {
+  const fields = [
+    ["record_date", "วันที่"],
+    ["emp_code", "รหัสพนักงาน"],
+    ["clock_in", "เวลาเข้า"],
+    ["clock_out", "เวลาออก"]
+  ];
+  fields.forEach(([field, label]) => {
+    if (String(expected?.[field] || "") !== String(actual?.[field] || "")) {
+      throw new Error(`Cloud ตรวจกลับมาไม่ตรง: ${label} ไม่ตรง กรุณาตรวจสอบก่อนบันทึกใหม่`);
+    }
+  });
+}
+
+async function saveTimeRowsToCloud(records, { mode = "upsert" } = {}) {
+  const rows = (Array.isArray(records) ? records : [records]).filter(Boolean);
+  if (!rows.length) return [];
+  clearTimeout(liveStateSyncTimers.get("time_records"));
+  liveStateSyncTimers.delete("time_records");
+  liveStateSyncInFlight.add("time_records");
+  try {
+    const response = await cloudApiRequest("/api/time-records/bulk-sync", {
+      method: "POST",
+      body: JSON.stringify({ records: rows, mode })
+    });
+    const cloudRows = Array.isArray(response.data) ? response.data : [];
+    if (cloudRows.length !== rows.length) {
+      throw new Error(`Cloud ยืนยันรายการเวลาไม่ครบ (${cloudRows.length}/${rows.length}) กรุณาตรวจสอบเน็ตแล้วกดบันทึกอีกครั้ง`);
+    }
+    rows.forEach((expected, index) => assertTimeCloudRowMatches(expected, cloudRows[index]));
+    applyingCloudState = true;
+    mergeTimeCloudRows(cloudRows);
+    return cloudRows;
+  } finally {
+    applyingCloudState = false;
+    liveStateSyncInFlight.delete("time_records");
+  }
+}
+
+async function deleteTimeRecordFromCloud(id) {
+  clearTimeout(liveStateSyncTimers.get("time_records"));
+  liveStateSyncTimers.delete("time_records");
+  liveStateSyncInFlight.add("time_records");
+  try {
+    await cloudApiRequest("/api/time-records/bulk-sync", {
+      method: "POST",
+      body: JSON.stringify({ mode: "delete", record_ids: [id] })
+    });
+  } finally {
+    liveStateSyncInFlight.delete("time_records");
   }
 }
 
@@ -3281,6 +3350,10 @@ function saveTimeRecords(records) {
   queueLiveStateSync("time_records");
 }
 
+function saveTimeRecordsLocal(records) {
+  localStorage.setItem(TIME_RECORDS_KEY, JSON.stringify(records));
+}
+
 function nextLocalEmployeeId(...groups) {
   const ids = groups
     .flat()
@@ -3517,27 +3590,25 @@ function shouldAuditTimeRecordEdit(record, now = new Date()) {
   return ageMinutes > 2 || createdDate !== today || record.record_date !== today;
 }
 
-function apiCreateTimeRecord(payload, user) {
+async function apiCreateTimeRecord(payload, user) {
   const records = getTimeRecords();
   const recordDate = String(payload.record_date || "").trim();
   const empCode = normalizeTimeEmployeeCodeInput(payload.emp_code);
   assertNoDuplicateTimeRecord(empCode, recordDate);
-  const nextId = records.length ? Math.max(...records.map((record) => record.id || 0)) + 1 : 1;
-  const record = {
-    ...buildTimeRecord(payload, user),
-    id: nextId
-  };
+  const record = buildTimeRecord(payload, user);
 
-  saveTimeRecords([...records, record]);
+  const [cloudRecord] = await saveTimeRowsToCloud(record, { mode: "insert" });
+  const savedRecord = cloudRecord || record;
+  saveTimeRecordsLocal([...records.filter((item) => Number(item.id) !== Number(savedRecord.id)), savedRecord]);
   addAuditLog(
     user,
     "INSERT_TIME_RECORD",
-    `Added time record ${record.emp_code} ${record.clock_in}-${record.clock_out}`
+    `Added time record ${savedRecord.emp_code} ${savedRecord.clock_in}-${savedRecord.clock_out}`
   );
-  return record;
+  return savedRecord;
 }
 
-function apiUpdateTimeRecord(id, payload, user) {
+async function apiUpdateTimeRecord(id, payload, user) {
   const records = getTimeRecords();
   const existingRecord = records.find((record) => record.id === id);
   if (!existingRecord) {
@@ -3554,21 +3625,24 @@ function apiUpdateTimeRecord(id, payload, user) {
   };
   assertNoDuplicateTimeRecord(nextRecord.emp_code, nextRecord.record_date, id);
 
-  saveTimeRecords(records.map((record) => (record.id === id ? nextRecord : record)));
+  const [cloudRecord] = await saveTimeRowsToCloud(nextRecord, { mode: "upsert" });
+  const savedRecord = cloudRecord || nextRecord;
+  saveTimeRecordsLocal(records.map((record) => (record.id === id ? savedRecord : record)));
   if (shouldAuditTimeRecordEdit(existingRecord)) {
     addAuditLog(
       user,
       "UPDATE_TIME_RECORD",
-      `Edited time record ${existingRecord.emp_code} #${id}: ${existingRecord.record_date} ${existingRecord.clock_in}-${existingRecord.clock_out} -> ${nextRecord.record_date} ${nextRecord.clock_in}-${nextRecord.clock_out}`
+      `Edited time record ${existingRecord.emp_code} #${id}: ${existingRecord.record_date} ${existingRecord.clock_in}-${existingRecord.clock_out} -> ${savedRecord.record_date} ${savedRecord.clock_in}-${savedRecord.clock_out}`
     );
   }
-  return nextRecord;
+  return savedRecord;
 }
 
-function apiDeleteTimeRecord(id, user) {
+async function apiDeleteTimeRecord(id, user) {
   const records = getTimeRecords();
   const record = records.find((item) => item.id === id);
-  saveTimeRecords(records.filter((item) => item.id !== id));
+  await deleteTimeRecordFromCloud(id);
+  saveTimeRecordsLocal(records.filter((item) => item.id !== id));
   if (record) {
     addAuditLog(user, "DELETE_TIME_RECORD", `Deleted time record ${record.emp_code} #${id}`);
   }
@@ -9427,7 +9501,7 @@ function renderTimeReport(user, moduleItem) {
               <span>เวลาออก</span>
               <input name="clock_out" type="time" value="${escapeHtml(editingTimeRecord?.clock_out || "17:00")}" required />
             </label>
-            <button class="btn btn-primary form-submit" type="submit">${editingTimeRecord ? "บันทึกการแก้ไข" : "บันทึกรายการ"}</button>
+            <button class="btn btn-primary form-submit" type="submit" ${timeRecordSaving ? "disabled" : ""}>${timeRecordSaving ? "กำลังบันทึก..." : (editingTimeRecord ? "บันทึกการแก้ไข" : "บันทึกรายการ")}</button>
             ${editingTimeRecord ? `<button class="btn btn-outline" id="cancelTimeRecordEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
           </form>
           ${editingTimeRecord ? `<div class="alert alert-success">กำลังแก้ไขรายการ #${editingTimeRecord.id} ${escapeHtml(editingTimeRecord.emp_code)} ${escapeHtml(editingTimeRecord.clock_in)}-${escapeHtml(editingTimeRecord.clock_out)}</div>` : ""}
@@ -9599,7 +9673,7 @@ function renderWeeklyTimeEntry(user) {
           </div>
           <div class="weekly-actions">
             <button class="btn btn-outline" id="clearWeeklyTime" type="button">ล้างตาราง</button>
-            <button class="btn btn-primary report-primary-button" type="submit">บันทึกทั้งสัปดาห์</button>
+            <button class="btn btn-primary report-primary-button" type="submit" ${timeRecordSaving ? "disabled" : ""}>${timeRecordSaving ? "กำลังบันทึก..." : "บันทึกทั้งสัปดาห์"}</button>
           </div>
         </div>
       </form>
@@ -9786,8 +9860,9 @@ function bindTimeReportEvents(user) {
     updateWeeklyDayTotals();
   });
 
-  document.querySelector("#weeklyTimeForm")?.addEventListener("submit", (event) => {
+  document.querySelector("#weeklyTimeForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (timeRecordSaving) return;
     syncWeeklyDraftFromForm();
     const form = new FormData(event.currentTarget);
     const empCode = String(form.get("emp_code") || "").trim();
@@ -9801,6 +9876,10 @@ function bindTimeReportEvents(user) {
       return;
     }
 
+    timeRecordSaving = true;
+    setTimeRecordMessage("กำลังบันทึกรายสัปดาห์ขึ้น Cloud... กรุณารอสักครู่");
+    render();
+
     for (let index = 0; index < 7; index += 1) {
       const clockIn = normalizeClockText(form.get(`clock_in_${index}`));
       const clockOut = normalizeClockText(form.get(`clock_out_${index}`));
@@ -9813,7 +9892,7 @@ function bindTimeReportEvents(user) {
       }
 
       try {
-        apiCreateTimeRecord(
+        await apiCreateTimeRecord(
           {
             record_date: recordDate,
             emp_code: empCode,
@@ -9827,6 +9906,8 @@ function bindTimeReportEvents(user) {
         errors.push(`${recordDate}: ${error instanceof Error ? error.message : "บันทึกไม่สำเร็จ"}`);
       }
     }
+
+    timeRecordSaving = false;
 
     if (!savedCount && !errors.length) {
       setTimeRecordMessage("กรุณากรอกเวลาอย่างน้อย 1 วัน", "error");
@@ -9867,13 +9948,23 @@ function bindTimeReportEvents(user) {
   });
 
   document.querySelectorAll("[data-delete-time-record]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
+      if (timeRecordSaving) return;
       const id = Number(button.dataset.deleteTimeRecord);
       if (!window.confirm("ยืนยันลบรายการเวลานี้?")) return;
-      apiDeleteTimeRecord(id, user);
-      if (editingTimeRecordId === id) editingTimeRecordId = null;
-      setTimeRecordMessage("ลบรายการเวลาเรียบร้อยแล้ว");
-      render();
+      try {
+        timeRecordSaving = true;
+        setTimeRecordMessage("กำลังลบรายการเวลาจาก Cloud... กรุณารอสักครู่");
+        render();
+        await apiDeleteTimeRecord(id, user);
+        if (editingTimeRecordId === id) editingTimeRecordId = null;
+        setTimeRecordMessage("ลบรายการเวลาเรียบร้อยแล้ว");
+      } catch (error) {
+        setTimeRecordMessage(error instanceof Error ? error.message : "ลบรายการเวลาไม่สำเร็จ", "error");
+      } finally {
+        timeRecordSaving = false;
+        render();
+      }
     });
   });
 
@@ -9884,8 +9975,9 @@ function bindTimeReportEvents(user) {
     render();
   });
 
-  document.querySelector("#timeRecordForm")?.addEventListener("submit", (event) => {
+  document.querySelector("#timeRecordForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (timeRecordSaving) return;
     const form = new FormData(event.currentTarget);
     timeRecordDate = String(form.get("record_date") || timeRecordDate);
 
@@ -9897,17 +9989,21 @@ function bindTimeReportEvents(user) {
         clock_in: form.get("clock_in"),
         clock_out: form.get("clock_out")
       };
+      timeRecordSaving = true;
+      setTimeRecordMessage(`${wasEditing ? "กำลังแก้ไข" : "กำลังบันทึก"}รายการเวลาขึ้น Cloud... กรุณารอสักครู่`);
+      render();
       const record = editingTimeRecordId
-        ? apiUpdateTimeRecord(editingTimeRecordId, payload, user)
-        : apiCreateTimeRecord(payload, user);
+        ? await apiUpdateTimeRecord(editingTimeRecordId, payload, user)
+        : await apiCreateTimeRecord(payload, user);
       const actionText = wasEditing ? "แก้ไข" : "บันทึก";
       const nextEmployeeCode = wasEditing ? record.emp_code : getNextAvailableTimeEntryEmployeeCode(record.emp_code, timeRecordDate);
       editingTimeRecordId = null;
       timeEntryEmployeeCode = nextEmployeeCode;
       setTimeRecordMessage(`${actionText} ${record.emp_code} ${record.clock_in}-${record.clock_out} สุทธิ ${formatMinutesToHourText(record.net_minutes)} ชั่วโมง${nextEmployeeCode ? ` · ถัดไป ${nextEmployeeCode}` : " · ครบทุกคนในวันนี้แล้ว"}`);
-      render();
     } catch (error) {
       setTimeRecordMessage(error instanceof Error ? error.message : "บันทึกเวลาไม่สำเร็จ", "error");
+    } finally {
+      timeRecordSaving = false;
       render();
     }
   });

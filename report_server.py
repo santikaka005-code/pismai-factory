@@ -97,9 +97,11 @@ online_user_lock = threading.Lock()
 live_state_sync_lock = threading.Lock()
 production_record_insert_lock = threading.Lock()
 deduction_record_insert_lock = threading.Lock()
+time_record_insert_lock = threading.Lock()
 online_user_sessions: dict[str, dict] = {}
 production_record_next_id: int | None = None
 deduction_record_next_id: int | None = None
+time_record_next_id: int | None = None
 SYSTEM_ACCOUNT_PROFILES = {
     "Santi": {
         "username": "Santi",
@@ -788,6 +790,40 @@ def insert_deduction_record_compatible(deduction: dict) -> tuple[int, dict | lis
     return 409, {"error": "Could not allocate a unique deduction record id."}
 
 
+def reserve_time_record_id(refresh: bool = False) -> int:
+    global time_record_next_id
+    if refresh or time_record_next_id is None:
+        time_record_next_id = next_table_id("time_records")
+    next_id = time_record_next_id
+    time_record_next_id += 1
+    return next_id
+
+
+def insert_time_records_compatible(rows: list[dict]) -> tuple[int, list | dict | str | None]:
+    if not rows:
+        return 200, []
+
+    for attempt in range(4):
+        insert_rows = []
+        for row in rows:
+            insert_row = dict(row)
+            insert_row["id"] = reserve_time_record_id(refresh=(attempt == 1 and not insert_rows))
+            insert_rows.append(insert_row)
+
+        status, body = supabase_request(
+            "POST",
+            "time_records",
+            insert_rows,
+            prefer="return=representation",
+        )
+        if status < 400:
+            return status, body
+        if not is_unique_constraint_error(body, "time_records_pkey"):
+            return status, body
+
+    return 409, {"error": "Could not allocate unique time record ids."}
+
+
 def ensure_row_id(table: str, row: dict) -> dict:
     if row.get("id") in [None, ""]:
         return {**row, "id": next_table_id(table)}
@@ -805,7 +841,7 @@ def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
             clean_row["id"] = next_id
             next_id += 1
         row_id = clean_row.get("id")
-        select_fields = "id,raw_payload" if table == "production_records" else "id"
+        select_fields = "id,raw_payload" if table in {"production_records", "time_records"} else "id"
         status, existing = supabase_request(
             "GET",
             f"{table}?id=eq.{quote(str(row_id))}&select={select_fields}&limit=1",
@@ -841,6 +877,25 @@ def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
                 # Two browsers can allocate the same local numeric id. Allocate
                 # the next central id explicitly because legacy identity
                 # sequences may lag behind rows inserted with browser ids.
+                clean_row["id"] = next_table_id(table)
+                row_id = clean_row["id"]
+                has_existing = False
+        elif table == "time_records":
+            incoming_raw = clean_row.get("raw_payload") if isinstance(clean_row.get("raw_payload"), dict) else {}
+            existing_raw = existing[0].get("raw_payload") if has_existing and isinstance(existing[0].get("raw_payload"), dict) else {}
+            incoming_created_at = str(incoming_raw.get("created_at") or clean_row.get("created_at") or "")
+            existing_created_at = str(existing_raw.get("created_at") or existing[0].get("created_at") or "") if has_existing else ""
+            incoming_identity = (
+                str(incoming_raw.get("record_date") or clean_row.get("work_date") or ""),
+                str(incoming_raw.get("emp_code") or clean_row.get("emp_code") or ""),
+                incoming_created_at,
+            )
+            existing_identity = (
+                str(existing_raw.get("record_date") or (existing[0].get("work_date") if has_existing else "") or ""),
+                str(existing_raw.get("emp_code") or (existing[0].get("emp_code") if has_existing else "") or ""),
+                existing_created_at,
+            )
+            if has_existing and incoming_created_at and existing_created_at and incoming_identity != existing_identity:
                 clean_row["id"] = next_table_id(table)
                 row_id = clean_row["id"]
                 has_existing = False
@@ -4713,6 +4768,85 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             synced_rows = [
                 live_state_to_client("production_records", row)
+                for row in body.get("synced", [])
+                if isinstance(row, dict)
+            ]
+            self.send_json({"data": synced_rows, "error": None}, status)
+            return
+
+        if parsed.path == "/api/time-records/bulk-sync":
+            mode = str(payload.get("mode") or "upsert").strip().lower()
+            if mode == "delete":
+                record_ids = payload.get("record_ids", [])
+                if not isinstance(record_ids, list) or not record_ids:
+                    self.send_json({"error": "record_ids must be a non-empty list"}, 400)
+                    return
+                clean_ids = []
+                for value in record_ids:
+                    try:
+                        record_id = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if record_id > 0 and record_id not in clean_ids:
+                        clean_ids.append(record_id)
+                if not clean_ids:
+                    self.send_json({"error": "record_ids must include valid ids"}, 400)
+                    return
+                id_list = ",".join(str(record_id) for record_id in clean_ids)
+                status, body = supabase_request(
+                    "DELETE",
+                    f"time_records?id=in.({id_list})",
+                    prefer="return=representation",
+                )
+                if status >= 400:
+                    self.send_json({"data": None, "error": body}, status)
+                    return
+                self.send_json({"data": body if isinstance(body, list) else [], "error": None}, status)
+                return
+
+            records = payload.get("records", [])
+            if not isinstance(records, list) or not records:
+                self.send_json({"error": "records must be a non-empty list"}, 400)
+                return
+            converted = [
+                live_state_row("time_records", record)
+                for record in records
+                if isinstance(record, dict)
+            ]
+            if len(converted) != len(records):
+                self.send_json({"error": "all records must be objects"}, 400)
+                return
+            if mode == "insert":
+                insert_rows = []
+                for row in converted:
+                    insert_row = dict(row)
+                    insert_row.pop("id", None)
+                    raw_payload = insert_row.get("raw_payload")
+                    if isinstance(raw_payload, dict):
+                        insert_row["raw_payload"] = {key: value for key, value in raw_payload.items() if key != "id"}
+                    insert_rows.append(insert_row)
+                with time_record_insert_lock:
+                    status, body = insert_time_records_compatible(insert_rows)
+                if status >= 400:
+                    self.send_json({"data": None, "error": body}, status)
+                    return
+                synced_rows = [
+                    live_state_to_client("time_records", row)
+                    for row in body
+                    if isinstance(row, dict)
+                ] if isinstance(body, list) else []
+                self.send_json({"data": synced_rows, "error": None}, status)
+                return
+            if mode != "upsert":
+                self.send_json({"error": "mode must be insert, upsert, or delete"}, 400)
+                return
+            with live_state_sync_lock:
+                status, body = sync_rows_by_id("time_records", converted)
+            if status >= 400:
+                self.send_json({"data": None, "error": body}, status)
+                return
+            synced_rows = [
+                live_state_to_client("time_records", row)
                 for row in body.get("synced", [])
                 if isinstance(row, dict)
             ]
