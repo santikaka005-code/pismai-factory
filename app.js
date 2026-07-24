@@ -13392,7 +13392,13 @@ function getProductionFruitLabel(fruitId) {
 }
 
 function getGroupReportPayGroups() {
-  return [...groupReportDefaultGroups];
+  const employeeGroups = getEmployees()
+    .filter((employee) => employee.status === "Active")
+    .map((employee) => getEmployeePayGroup(employee))
+    .filter(Boolean);
+  return [...new Set([...groupReportDefaultGroups, ...employeeGroups])].sort((a, b) =>
+    a.localeCompare(b, "th")
+  );
 }
 
 function getGroupReportRecords() {
@@ -13410,7 +13416,7 @@ function getGroupReportRecords() {
 
       const payGroup = getEmployeePayGroup(employee);
       const fruitId = productionFruitTypeForRecord(record);
-      if (!groupReportDefaultGroups.includes(payGroup)) return null;
+      if (!payGroup) return null;
       return {
         ...record,
         employee,
@@ -13441,6 +13447,7 @@ function getGroupReportRecords() {
 function summarizeGroupReportRows(records, mode = "group") {
   const range = normalizeGroupReportRange();
   const summaries = new Map();
+  const adjustedEmployees = new Set();
   records.forEach((record) => {
     const water = Number(record.water_weight || record.water || 0);
     const flower = Number(record.flower_weight || record.flower || 0);
@@ -13477,7 +13484,8 @@ function summarizeGroupReportRows(records, mode = "group") {
     DURIAN_GRADES.forEach((grade) => summary.grades[grade] += getRecordGradeWeights(record)[grade]);
     summary.total += getRecordTotalWeight(record);
     summary.amount += amount;
-    if (mode === "group" && !summary.deductedEmployees.has(employeeKey)) {
+    if (employeeKey && !adjustedEmployees.has(employeeKey)) {
+      adjustedEmployees.add(employeeKey);
       summary.deductedEmployees.add(employeeKey);
       summary.deduction_amount += getDeductionTotalForEmployee(
         "production",
@@ -13759,15 +13767,16 @@ function getTimeGroupReportTotals(groupRows) {
 }
 
 function renderGroupReportSummaryRow(row, showFruit = false) {
+  const showStandardWeights = groupReportFruit !== "durian";
+  const showDurianWeight = groupReportFruit === "all" || groupReportFruit === "durian";
   return `
     <tr>
       <td><strong>${escapeHtml(row.pay_group)}</strong></td>
       ${showFruit ? `<td>${escapeHtml(row.fruit_label)}</td>` : ""}
       <td>${row.employees.size.toLocaleString("th-TH")}</td>
       <td>${row.records.toLocaleString("th-TH")}</td>
-      <td>${compactNumberText(row.water)}</td>
-      <td>${compactNumberText(row.flower)}</td>
-      <td>${getDurianGradeTotal(row.grades) > 0 ? compactNumberText(getDurianGradeTotal(row.grades)) : "-"}</td>
+      ${showStandardWeights ? `<td>${compactNumberText(row.water)}</td><td>${compactNumberText(row.flower)}</td>` : ""}
+      ${showDurianWeight ? `<td>${getDurianGradeTotal(row.grades) > 0 ? compactNumberText(getDurianGradeTotal(row.grades)) : "-"}</td>` : ""}
       <td><strong>${compactNumberText(row.total)}</strong></td>
       <td><strong>${money(row.amount)}</strong></td>
       <td>${money(row.bonus_amount || 0)}</td>
@@ -13779,15 +13788,16 @@ function renderGroupReportSummaryRow(row, showFruit = false) {
 }
 
 function renderGroupReportEmployeeRow(row) {
+  const showStandardWeights = groupReportFruit !== "durian";
+  const showDurianWeight = groupReportFruit === "all" || groupReportFruit === "durian";
   return `
     <tr>
       <td>${escapeHtml(row.pay_group)}</td>
       <td><strong>${escapeHtml(row.emp_code)}</strong></td>
       <td>${escapeHtml(row.fullname)}</td>
       <td>${row.records.toLocaleString("th-TH")}</td>
-      <td>${numberText(row.water)}</td>
-      <td>${numberText(row.flower)}</td>
-      <td>${getDurianGradeTotal(row.grades) > 0 ? numberText(getDurianGradeTotal(row.grades)) : "-"}</td>
+      ${showStandardWeights ? `<td>${numberText(row.water)}</td><td>${numberText(row.flower)}</td>` : ""}
+      ${showDurianWeight ? `<td>${getDurianGradeTotal(row.grades) > 0 ? numberText(getDurianGradeTotal(row.grades)) : "-"}</td>` : ""}
       <td><strong>${numberText(row.total)}</strong></td>
       <td><strong>${money(row.amount)}</strong></td>
       <td>${money(row.bonus_amount || 0)}</td>
@@ -13799,6 +13809,8 @@ function renderGroupReportEmployeeRow(row) {
 }
 
 function renderGroupReportDetailRow(record) {
+  const showStandardWeights = groupReportFruit !== "durian";
+  const showDurianWeight = groupReportFruit === "all" || groupReportFruit === "durian";
   return `
     <tr>
       <td>${escapeHtml(record.record_date || "-")}</td>
@@ -13807,9 +13819,8 @@ function renderGroupReportDetailRow(record) {
       <td>${escapeHtml(record.emp_code || "-")}</td>
       <td>${escapeHtml(record.employee_name || record.employee?.fullname || "-")}</td>
       <td>${escapeHtml(record.pile_no || record.pile || "-")}</td>
-      <td>${numberText(record.water_weight || record.water || 0)}</td>
-      <td>${numberText(record.flower_weight || record.flower || 0)}</td>
-      <td>${isDurianFruit(record.fruit_type) ? formatDurianGradeBreakdown(record) : "-"}</td>
+      ${showStandardWeights ? `<td>${isDurianFruit(record.fruit_type) ? "-" : numberText(record.water_weight || record.water || 0)}</td><td>${isDurianFruit(record.fruit_type) ? "-" : numberText(record.flower_weight || record.flower || 0)}</td>` : ""}
+      ${showDurianWeight ? `<td>${isDurianFruit(record.fruit_type) ? numberText(getRecordDurianWeight(record)) : "-"}</td>` : ""}
       <td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td>
     </tr>
   `;
@@ -13938,6 +13949,15 @@ function renderSummaryGroupReport(moduleItem) {
   const totals = isTimeReport ? getTimeGroupReportTotals(groupRows) : getGroupReportTotals(groupRows);
   const groupOptions = ["all", ...(isTimeReport ? getTimeGroupReportGroups() : getGroupReportPayGroups())];
   const fruitOptions = [{ id: "all", label: "ทั้งหมด" }, ...productionFruitOptions.map((item) => ({ id: item.id, label: item.label }))];
+  const showStandardWeights = groupReportFruit !== "durian";
+  const showDurianWeight = groupReportFruit === "all" || groupReportFruit === "durian";
+  const groupWeightLabels = groupReportFruit === "all"
+    ? { water: "น้ำหนักช่อง 1", flower: "น้ำหนักช่อง 2" }
+    : getProductionFieldLabels(groupReportFruit);
+  const summaryColumnCount = 9 + (showStandardWeights ? 2 : 0) + (showDurianWeight ? 1 : 0);
+  const fruitColumnCount = summaryColumnCount + 1;
+  const employeeColumnCount = 10 + (showStandardWeights ? 2 : 0) + (showDurianWeight ? 1 : 0);
+  const detailColumnCount = 7 + (showStandardWeights ? 2 : 0) + (showDurianWeight ? 1 : 0);
 
   return `
     <section class="summary-page group-report-page">
@@ -14050,8 +14070,8 @@ function renderSummaryGroupReport(moduleItem) {
           <div class="table-heading">สรุปตามกลุ่ม</div>
           <div class="table-scroll">
             <table class="group-report-compact-table">
-              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th><th>น้ำ</th><th>ดอก</th><th>น้ำหนักทุเรียน</th><th>รวม</th><th>เงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
-              <tbody>${groupRows.length ? groupRows.map((row) => renderGroupReportSummaryRow(row)).join("") : `<tr><td colspan="12" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+              <thead><tr><th>กลุ่ม</th><th>คน</th><th>รายการ</th>${showStandardWeights ? `<th>${escapeHtml(groupWeightLabels.waterShort || groupWeightLabels.water || "ช่อง 1")}</th><th>${escapeHtml(groupWeightLabels.flowerShort || groupWeightLabels.flower || "ช่อง 2")}</th>` : ""}${showDurianWeight ? "<th>น้ำหนักทุเรียน</th>" : ""}<th>รวม</th><th>เงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
+              <tbody>${groupRows.length ? groupRows.map((row) => renderGroupReportSummaryRow(row)).join("") : `<tr><td colspan="${summaryColumnCount}" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
             </table>
           </div>
         </section>
@@ -14061,8 +14081,8 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">สรุปตามกลุ่มและผลไม้</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>น้ำหนักทุเรียน</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
-            <tbody>${fruitRows.length ? fruitRows.map((row) => renderGroupReportSummaryRow(row, true)).join("") : `<tr><td colspan="13" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <thead><tr><th>กลุ่ม</th><th>ผลไม้</th><th>จำนวนคน</th><th>รายการ</th>${showStandardWeights ? `<th>${escapeHtml(groupWeightLabels.water || "น้ำหนักช่อง 1")}</th><th>${escapeHtml(groupWeightLabels.flower || "น้ำหนักช่อง 2")}</th>` : ""}${showDurianWeight ? "<th>น้ำหนักทุเรียน</th>" : ""}<th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
+            <tbody>${fruitRows.length ? fruitRows.map((row) => renderGroupReportSummaryRow(row, true)).join("") : `<tr><td colspan="${fruitColumnCount}" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -14071,8 +14091,8 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">รายละเอียดพนักงานในกลุ่ม</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>น้ำหนักทุเรียน</th><th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
-            <tbody>${employeeRows.length ? employeeRows.map(renderGroupReportEmployeeRow).join("") : `<tr><td colspan="13" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <thead><tr><th>กลุ่ม</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th>${showStandardWeights ? `<th>${escapeHtml(groupWeightLabels.water || "น้ำหนักช่อง 1")}</th><th>${escapeHtml(groupWeightLabels.flower || "น้ำหนักช่อง 2")}</th>` : ""}${showDurianWeight ? "<th>น้ำหนักทุเรียน</th>" : ""}<th>รวม</th><th>รวมเงิน</th><th>เบี้ยขยัน</th><th>หักทั่วไป</th><th>หัก 3%</th><th>สุทธิ</th></tr></thead>
+            <tbody>${employeeRows.length ? employeeRows.map(renderGroupReportEmployeeRow).join("") : `<tr><td colspan="${employeeColumnCount}" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -14081,8 +14101,8 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-heading">รายละเอียดรายการ</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>วันที่</th><th>กลุ่ม</th><th>ผลไม้</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th><th>น้ำหนักน้ำ</th><th>น้ำหนักดอก</th><th>น้ำหนักทุเรียน</th><th>รวมเงิน</th></tr></thead>
-            <tbody>${records.length ? records.slice(0, 200).map(renderGroupReportDetailRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <thead><tr><th>วันที่</th><th>กลุ่ม</th><th>ผลไม้</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th>${showStandardWeights ? `<th>${escapeHtml(groupWeightLabels.water || "น้ำหนักช่อง 1")}</th><th>${escapeHtml(groupWeightLabels.flower || "น้ำหนักช่อง 2")}</th>` : ""}${showDurianWeight ? "<th>น้ำหนักทุเรียน</th>" : ""}<th>รวมเงิน</th></tr></thead>
+            <tbody>${records.length ? records.slice(0, 200).map(renderGroupReportDetailRow).join("") : `<tr><td colspan="${detailColumnCount}" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>
