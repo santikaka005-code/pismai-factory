@@ -11,6 +11,7 @@ import re
 import secrets
 import threading
 import time
+import textwrap
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -18,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
+from xml.sax.saxutils import escape as xml_escape
 
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as ExcelImage
@@ -3307,6 +3309,9 @@ def style_excel_report_sheet(sheet, header_rows: list[int], widths: list[int]) -
         sheet.column_dimensions[get_column_letter(index)].width = width
     sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
     sheet.page_setup.orientation = "landscape"
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
     sheet.freeze_panes = f"A{max(header_rows) + 1}" if header_rows else None
 
 
@@ -3984,6 +3989,29 @@ def build_group_report_excel(payload: dict) -> bytes:
             ] if show_standard_weights else [])
             + ([production_total_weight(record) if is_durian else "-"] if show_durian_weight else [])
         )
+
+    def excel_widths(headers: list[str]) -> list[int]:
+        preferred = {
+            "กลุ่ม": 20,
+            "รหัส": 14,
+            "ชื่อพนักงาน": 32,
+            "ผลไม้": 15,
+            "วันที่": 14,
+            "กอง": 9,
+            "จำนวนคน": 11,
+            "รายการ": 11,
+            "น้ำหนักน้ำ": 15,
+            "น้ำหนักดอก": 15,
+            "น้ำหนักทุเรียน": 16,
+            "น้ำหนักรวม": 15,
+            "รวม": 14,
+            "รวมเงิน": 16,
+            "เบี้ยขยัน": 14,
+            "หักทั่วไป": 14,
+            "หัก ณ ที่จ่าย 3%": 18,
+            "สุทธิ": 16,
+        }
+        return [preferred.get(str(header), 15) for header in headers]
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Group Report"
@@ -4002,31 +4030,35 @@ def build_group_report_excel(payload: dict) -> bytes:
 
     if options["summary"]:
         summary = workbook.create_sheet("Summary By Group")
-        summary.append(["กลุ่ม", "จำนวนคน", "รายการ", *weight_headers(), "รวม", "รวมเงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก ณ ที่จ่าย 3%", "สุทธิ"])
+        summary_headers = ["กลุ่ม", "จำนวนคน", "รายการ", *weight_headers(), "รวม", "รวมเงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก ณ ที่จ่าย 3%", "สุทธิ"]
+        summary.append(summary_headers)
         for row in group_rows:
             summary.append([row["pay_group"], len(row["employees"]), row["records"], *summary_weight_values(row), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("withholding_tax_amount", 0), row.get("net_amount", row["amount"])])
-        style_excel_report_sheet(summary, [1], [18] * summary.max_column)
+        style_excel_report_sheet(summary, [1], excel_widths(summary_headers))
 
     if options["fruit"]:
         fruit = workbook.create_sheet("Group By Fruit")
-        fruit.append(["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", *weight_headers(), "รวม", "รวมเงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก ณ ที่จ่าย 3%", "สุทธิ"])
+        fruit_headers = ["กลุ่ม", "ผลไม้", "จำนวนคน", "รายการ", *weight_headers(), "รวม", "รวมเงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก ณ ที่จ่าย 3%", "สุทธิ"]
+        fruit.append(fruit_headers)
         for row in fruit_rows:
             fruit.append([row["pay_group"], row["fruit_label"], len(row["employees"]), row["records"], *summary_weight_values(row), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("withholding_tax_amount", 0), row.get("net_amount", row["amount"])])
-        style_excel_report_sheet(fruit, [1], [18] * fruit.max_column)
+        style_excel_report_sheet(fruit, [1], excel_widths(fruit_headers))
 
     if options["employees"]:
         employees = workbook.create_sheet("Employees")
-        employees.append(["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", *weight_headers(), "รวม", "รวมเงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก ณ ที่จ่าย 3%", "สุทธิ"])
+        employee_headers = ["กลุ่ม", "รหัส", "ชื่อพนักงาน", "รายการ", *weight_headers(), "รวม", "รวมเงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก ณ ที่จ่าย 3%", "สุทธิ"]
+        employees.append(employee_headers)
         for row in employee_rows:
             employees.append([row["pay_group"], row["emp_code"], row["fullname"], row["records"], *summary_weight_values(row), row["total"], row["amount"], row.get("bonus_amount", 0), row.get("deduction_amount", 0), row.get("withholding_tax_amount", 0), row.get("net_amount", row["amount"])])
-        style_excel_report_sheet(employees, [1], [18] * employees.max_column)
+        style_excel_report_sheet(employees, [1], excel_widths(employee_headers))
 
     if options["details"]:
         details = workbook.create_sheet("Details")
-        details.append(["วันที่", "กลุ่ม", "ผลไม้", "รหัส", "ชื่อพนักงาน", "กอง", *weight_headers(), "น้ำหนักรวม", "รวมเงิน"])
+        detail_headers = ["วันที่", "กลุ่ม", "ผลไม้", "รหัส", "ชื่อพนักงาน", "กอง", *weight_headers(), "น้ำหนักรวม", "รวมเงิน"]
+        details.append(detail_headers)
         for record in records:
             details.append([record["record_date"], record["pay_group"], record["fruit_label"], record.get("emp_code", ""), record.get("employee_name", ""), record.get("pile_no") or record.get("pile", ""), *detail_weight_values(record), production_total_weight(record), safe_float(record.get("total_amount", record.get("grand_total", 0)))])
-        style_excel_report_sheet(details, [1], [18] * details.max_column)
+        style_excel_report_sheet(details, [1], excel_widths(detail_headers))
 
     output = BytesIO()
     workbook.save(output)
@@ -4047,6 +4079,14 @@ def build_group_report_pdf(payload: dict) -> bytes:
     grade_style.fontSize = 6
     grade_style.leading = 7
     grade_style.alignment = 1
+    cell_style = pdf_normal.clone("GroupReportCell")
+    cell_style.fontSize = 6.5
+    cell_style.leading = 8
+    cell_style.wordWrap = "CJK"
+    header_style = cell_style.clone("GroupReportHeaderCell")
+    header_style.fontName = THAI_FONT_BOLD
+    header_style.textColor = colors.white
+    header_style.alignment = 1
 
     def grade_cell(weights: dict | None):
         values = weights or {}
@@ -4056,8 +4096,13 @@ def build_group_report_pdf(payload: dict) -> bytes:
         return Paragraph(report_number(total), grade_style)
 
     def weight_headers() -> list[str]:
+        fruit_id = selected_production_fruit(payload)
+        short_standard_headers = {
+            "all": ["ช่อง 1", "ช่อง 2"],
+            "mango": ["ฝา", "หั่นเต๋า"],
+        }.get(fruit_id, ["น้ำ", "ดอก"])
         return (
-            ([water_label, flower_label] if show_standard_weights else [])
+            (short_standard_headers if show_standard_weights else [])
             + (["ทุเรียน"] if show_durian_weight else [])
         )
 
@@ -4084,11 +4129,66 @@ def build_group_report_pdf(payload: dict) -> bytes:
         payload,
     )
 
+    def group_column_widths(headers: list[str]) -> list[float]:
+        preferred = {
+            "กลุ่ม": 25,
+            "รหัส": 17,
+            "ชื่อ": 50,
+            "ผลไม้": 18,
+            "วันที่": 21,
+            "กอง": 11,
+            "คน": 11,
+            "รายการ": 13,
+            "ช่อง 1": 15,
+            "ช่อง 2": 15,
+            "ฝา": 15,
+            "หั่นเต๋า": 15,
+            "น้ำ": 15,
+            "ดอก": 15,
+            "ทุเรียน": 16,
+            "รวม": 16,
+            "เงิน": 19,
+            "รวมเงิน": 19,
+            "เบี้ยขยัน": 19,
+            "หักทั่วไป": 19,
+            "หัก 3%": 17,
+            "สุทธิ": 19,
+        }
+        widths = [preferred.get(str(header), 17) for header in headers]
+        total = sum(widths)
+        scale = min(1.0, 267 / total) if total else 1.0
+        return [width * scale * mm for width in widths]
+
+    def paragraph_cell(value, style, max_chars: int | None = None):
+        if isinstance(value, Paragraph):
+            return value
+        raw_text = str("-" if value is None or value == "" else value)
+        if max_chars and len(raw_text) > max_chars:
+            raw_text = "\n".join(
+                textwrap.wrap(
+                    raw_text,
+                    width=max_chars,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+            )
+        text = xml_escape(raw_text).replace("\n", "<br/>")
+        return Paragraph(text, style)
+
     def add_table(title: str, headers: list[str], rows: list[list], widths: list[float] | None = None):
-        table_rows = [headers] + rows
-        if len(table_rows) == 1:
-            table_rows.append(["-" for _ in headers])
-        col_widths = widths or [(267 / len(headers)) * mm for _ in headers]
+        wrapped_headers = [paragraph_cell(value, header_style) for value in headers]
+        wrap_limits = {"กลุ่ม": 10, "ชื่อ": 11, "ผลไม้": 9}
+        wrapped_rows = [
+            [
+                paragraph_cell(value, cell_style, wrap_limits.get(str(headers[index])))
+                for index, value in enumerate(row)
+            ]
+            for row in rows
+        ]
+        if not wrapped_rows:
+            wrapped_rows.append([paragraph_cell("-", cell_style) for _ in headers])
+        table_rows = [wrapped_headers] + wrapped_rows
+        col_widths = widths or group_column_widths(headers)
         table = Table(table_rows, repeatRows=1, colWidths=col_widths)
         set_pdf_table_style(table, 1)
         story.extend([Paragraph(title, section), table, Spacer(1, 7 * mm)])

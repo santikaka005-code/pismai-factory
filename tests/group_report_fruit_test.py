@@ -66,6 +66,14 @@ def test_group_excel_columns_follow_fruit_filter():
     assert "น้ำหนักน้ำ" not in durian_headers
     assert "น้ำหนักดอก" not in durian_headers
 
+    all_fruits = workbook_for("all")
+    employee_sheet = all_fruits["Employees"]
+    employee_headers = [cell.value for cell in employee_sheet[1]]
+    name_column = employee_headers.index("ชื่อพนักงาน") + 1
+    name_letter = employee_sheet.cell(1, name_column).column_letter
+    assert employee_sheet.column_dimensions[name_letter].width >= 30
+    assert employee_sheet.page_setup.fitToWidth == 1
+
 
 def test_group_pdf_builds_for_each_fruit():
     for fruit_type in ("all", "mangosteen", "durian"):
