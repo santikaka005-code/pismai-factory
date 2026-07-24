@@ -2489,7 +2489,7 @@ tr:last-child td {
 }
 
 .group-report-top-grid {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -2504,62 +2504,32 @@ tr:last-child td {
 }
 
 .group-report-top-grid .table-scroll {
-  overflow-x: clip;
+  overflow-x: auto;
   width: 100%;
 }
 
 .group-report-compact-table {
-  table-layout: fixed;
-  min-width: 0;
+  table-layout: auto;
+  min-width: 1060px;
   width: 100%;
-  max-width: 100%;
 }
 
 .group-report-compact-table th,
 .group-report-compact-table td {
-  padding: 8px 4px;
-  font-size: 11px;
-  line-height: 1.25;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.group-report-compact-table th:nth-child(1),
-.group-report-compact-table td:nth-child(1) {
-  width: 25%;
-}
-
-.group-report-compact-table th:nth-child(2),
-.group-report-compact-table td:nth-child(2),
-.group-report-compact-table th:nth-child(3),
-.group-report-compact-table td:nth-child(3) {
-  width: 9%;
-  text-align: center;
-}
-
-.group-report-compact-table th:nth-child(4),
-.group-report-compact-table td:nth-child(4),
-.group-report-compact-table th:nth-child(5),
-.group-report-compact-table td:nth-child(5),
-.group-report-compact-table th:nth-child(6),
-.group-report-compact-table td:nth-child(6) {
-  width: 11%;
-  text-align: right;
-}
-
-.group-report-compact-table th:nth-child(7),
-.group-report-compact-table td:nth-child(7) {
-  width: 13%;
-  text-align: right;
+  min-width: 82px;
+  padding: 11px 12px;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
 }
 
 .group-report-summary-card {
   max-width: 100%;
 }
 
-.group-report-summary-card th,
-.group-report-summary-card td {
-  min-width: 0;
+.group-report-summary-card th:first-child,
+.group-report-summary-card td:first-child {
+  min-width: 150px;
 }
 
 .group-report-top-grid .group-report-bars {
@@ -2574,13 +2544,7 @@ tr:last-child td {
 
 @media (max-width: 1180px) {
   .group-report-top-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-
-  .group-report-compact-table th,
-  .group-report-compact-table td {
-    padding-inline: 3px;
-    font-size: 10.5px;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
