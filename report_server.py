@@ -5915,7 +5915,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             existing_status, existing_rows = supabase_request(
                 "GET",
-                f"account_users?id=eq.{quote(str(account_id))}&select=id,username,role,user_level&limit=1",
+                f"account_users?id=eq.{quote(str(account_id))}&select=id,username,fullname,phone,role,user_level&limit=1",
             )
             if existing_status >= 400:
                 self.send_json({"error": existing_rows}, existing_status)
@@ -5930,7 +5930,10 @@ class ReportHandler(BaseHTTPRequestHandler):
             if existing_username in SYSTEM_ACCOUNT_USERNAMES or existing_level == "C7" or existing_role == "developer":
                 self.send_json({"error": "C7/developer account cannot be edited."}, 403)
                 return
-            account = account_from_payload(payload, include_password=bool(str(payload.get("password", ""))))
+            account_payload = dict(payload)
+            if not str(account_payload.get("phone", "")).strip() and str(existing.get("phone", "")).strip():
+                account_payload["phone"] = existing.get("phone")
+            account = account_from_payload(account_payload, include_password=bool(str(payload.get("password", ""))))
             if account.get("user_level") == "C7" or account.get("role") == "developer":
                 self.send_json({"error": "C7/developer accounts can only be managed by the system."}, 403)
                 return

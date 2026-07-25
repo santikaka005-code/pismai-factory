@@ -2382,8 +2382,11 @@ function activeAdminCount(accountUsers) {
 }
 
 function validateAccountPayload(payload, existingId = null) {
+  const existingAccount = existingId
+    ? getAccountUsers().find((accountUser) => Number(accountUser.id) === Number(existingId))
+    : null;
   const fullname = String(payload.fullname || "").trim();
-  const phone = String(payload.phone || "").trim();
+  const phone = String(payload.phone || existingAccount?.phone || "").trim();
   const username = String(payload.username || "").trim();
   const password = String(payload.password || "");
   const confirmPassword = String(payload.confirm_password || "");
@@ -2391,8 +2394,12 @@ function validateAccountPayload(payload, existingId = null) {
   const roleOption = accountRoleOptionByKey(roleKey);
   const level = String(payload.level || "C1").toUpperCase();
 
-  if (!fullname || !phone || !username) {
+  if (!fullname || !username || (!existingId && !phone)) {
     throw new Error("กรุณากรอกชื่อ-นามสกุล เบอร์โทร และ Username ให้ครบ");
+  }
+
+  if (!phone) {
+    throw new Error("บัญชีนี้ยังไม่มีเบอร์โทรเดิม กรุณากรอกเบอร์โทรก่อนบันทึก");
   }
 
   if (roleOption.role === developerRoleOption.role) {
@@ -6371,7 +6378,7 @@ function renderAccountForm(accountUser) {
         </label>
         <label class="field">
           <span>Phone</span>
-          <input name="phone" value="${isEditing ? escapeHtml(accountUser.phone) : ""}" required />
+          <input name="phone" value="${isEditing ? escapeHtml(accountUser.phone) : ""}" placeholder="${isEditing ? "เว้นว่างเพื่อใช้เบอร์เดิม" : ""}" ${isEditing ? "" : "required"} />
         </label>
         <label class="field">
           <span>Username</span>
