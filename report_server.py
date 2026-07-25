@@ -14,7 +14,7 @@ import time
 import textwrap
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
@@ -150,6 +150,46 @@ def accounting_actor(handler: BaseHTTPRequestHandler, minimum_level: int = 4) ->
     actor = verify_session_token(handler.headers.get("X-Session-Token", ""))
     level = int("".join(filter(str.isdigit, str(actor.get("level", "C1")))) or "1") if actor else 0
     return actor if actor and level >= minimum_level else None
+
+
+PRODUCTION_SELF_EDIT_WINDOW_SECONDS = 5 * 60
+
+
+def account_level_number(value: object) -> int:
+    match = re.search(r"\d+", str(value or "C1"))
+    return int(match.group()) if match else 1
+
+
+def production_record_owned_by_actor(record: dict, actor: dict, actor_account: dict) -> bool:
+    owner = str(record.get("created_by") or "").strip().casefold()
+    aliases = {
+        str(actor.get("username") or "").strip().casefold(),
+        str(actor_account.get("username") or "").strip().casefold(),
+        str(actor_account.get("fullname") or "").strip().casefold(),
+    }
+    aliases.discard("")
+    return bool(owner and owner in aliases)
+
+
+def production_record_within_self_edit_window(
+    record: dict,
+    actor: dict,
+    actor_account: dict,
+    now: datetime | None = None,
+) -> bool:
+    if not production_record_owned_by_actor(record, actor, actor_account):
+        return False
+    try:
+        created_at = datetime.fromisoformat(str(record.get("created_at") or "").replace("Z", "+00:00"))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return False
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    elapsed_seconds = (current_time.astimezone(timezone.utc) - created_at.astimezone(timezone.utc)).total_seconds()
+    return -30 <= elapsed_seconds <= PRODUCTION_SELF_EDIT_WINDOW_SECONDS
 
 
 def secret_room_actor(handler: BaseHTTPRequestHandler) -> dict | None:
@@ -5142,9 +5182,9 @@ class ReportHandler(BaseHTTPRequestHandler):
 
         production_record_match = re.fullmatch(r"/api/production-records/(\d+)", parsed.path)
         if production_record_match:
-            actor = accounting_actor(self, 4)
+            actor = accounting_actor(self, 1)
             if not actor:
-                self.send_json({"error": "C4 or higher session is required."}, 403)
+                self.send_json({"error": "A signed-in session is required."}, 403)
                 return
             record_id = int(production_record_match.group(1))
             incoming = payload.get("record")
@@ -5181,6 +5221,17 @@ class ReportHandler(BaseHTTPRequestHandler):
             actor_account = actor_rows[0] if actor_status < 400 and isinstance(actor_rows, list) and actor_rows else {}
             actor_name = str(actor_account.get("fullname") or actor.get("username") or "System")
             actor_username = str(actor_account.get("username") or actor.get("username") or "")
+            actor_level = account_level_number(actor_account.get("user_level") or actor.get("level"))
+            if actor_level < 4 and not production_record_within_self_edit_window(
+                before,
+                actor,
+                actor_account,
+            ):
+                self.send_json(
+                    {"error": "C1-C3 may edit only their own production records within 5 minutes of creation."},
+                    403,
+                )
+                return
 
             protected_record = {
                 **incoming,
@@ -5561,6 +5612,10 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/wage-rates":
+            actor = accounting_actor(self, 4)
+            if not actor:
+                self.send_json({"error": "C4 or higher session is required to manage wage rates."}, 403)
+                return
             wage_rate = {
                 "item_type": str(payload.get("item_type", "")).strip(),
                 "rate": payload.get("rate", 0),
@@ -5951,6 +6006,40 @@ class ReportHandler(BaseHTTPRequestHandler):
                 "PATCH",
                 f"deduction_records?id=eq.{quote(str(deduction_id))}",
                 deduction,
+                prefer="return=representation",
+            )
+            self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/wage-rates":
+            actor = accounting_actor(self, 4)
+            if not actor:
+                self.send_json({"error": "C4 or higher session is required to manage wage rates."}, 403)
+                return
+            wage_rate_id = payload.get("id")
+            if wage_rate_id in [None, ""]:
+                self.send_json({"error": "id is required."}, 400)
+                return
+            wage_rate = {
+                "item_type": str(payload.get("item_type", "")).strip(),
+                "rate": payload.get("rate", 0),
+                "effective_date": str(payload.get("effective_date", "")).strip(),
+                "note": str(payload.get("note", "")).strip() or None,
+            }
+            if not wage_rate["item_type"] or not wage_rate["effective_date"]:
+                self.send_json({"error": "item_type and effective_date are required."}, 400)
+                return
+            try:
+                if float(wage_rate["rate"] or 0) <= 0:
+                    self.send_json({"error": "rate must be greater than 0."}, 400)
+                    return
+            except (TypeError, ValueError):
+                self.send_json({"error": "rate must be a number."}, 400)
+                return
+            status, body = supabase_request(
+                "PATCH",
+                f"wage_rates?id=eq.{quote(str(wage_rate_id))}",
+                wage_rate,
                 prefer="return=representation",
             )
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)

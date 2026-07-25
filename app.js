@@ -518,6 +518,7 @@ let backupMessage = "";
 let backupMessageType = "success";
 let wageRateFilter = "all";
 let currentRateDate = new Date().toISOString().slice(0, 10);
+let editingWageRateId = null;
 let pileManagementMessage = "";
 let pileManagementMessageType = "success";
 let settingsPileSummaryDate = new Date().toISOString().slice(0, 10);
@@ -1104,8 +1105,50 @@ function canDeleteEmployees(user) {
 }
 
 function canEditProductionRecords(user) {
+  return Boolean(user);
+}
+
+function canManageAllProductionRecords(user) {
   const levelNumber = Number(String(getUserLevel(user)).replace(/\D/g, "")) || 1;
   return levelNumber >= 4;
+}
+
+function canDeleteProductionRecords(user) {
+  return canManageAllProductionRecords(user);
+}
+
+function canManageWageRates(user) {
+  const levelNumber = Number(String(getUserLevel(user)).replace(/\D/g, "")) || 1;
+  return levelNumber >= 4 || isTopLevelUser(user);
+}
+
+const PRODUCTION_SELF_EDIT_WINDOW_MS = 5 * 60 * 1000;
+
+function normalizeProductionEditorIdentity(value) {
+  return String(value || "").trim().toLocaleLowerCase("th-TH");
+}
+
+function isProductionRecordOwnedByUser(record, user) {
+  const owner = normalizeProductionEditorIdentity(record?.created_by);
+  if (!owner || !user) return false;
+  return [user.fullname, user.username]
+    .map(normalizeProductionEditorIdentity)
+    .filter(Boolean)
+    .includes(owner);
+}
+
+function getProductionRecordEditRemainingMs(record, nowMs = Date.now()) {
+  const createdAt = Date.parse(String(record?.created_at || ""));
+  if (!Number.isFinite(createdAt)) return -1;
+  const remainingMs = PRODUCTION_SELF_EDIT_WINDOW_MS - Math.max(0, nowMs - createdAt);
+  return remainingMs >= 0 ? remainingMs : -1;
+}
+
+function canEditProductionRecord(user, record, nowMs = Date.now()) {
+  if (!user || !record) return false;
+  if (canManageAllProductionRecords(user)) return true;
+  return isProductionRecordOwnedByUser(record, user) &&
+    getProductionRecordEditRemainingMs(record, nowMs) >= 0;
 }
 
 function canExportFullDetails(user) {
@@ -1789,6 +1832,20 @@ async function createCloudWageRate(payload) {
     saveWageRates([...merged.values()]);
   }
   return created[0] || null;
+}
+
+async function updateCloudWageRate(id, payload) {
+  const data = await cloudApiRequest("/api/wage-rates", {
+    method: "PUT",
+    body: JSON.stringify({ ...payload, id })
+  });
+  const updated = Array.isArray(data.data) ? data.data.map(normalizeCloudWageRate) : [];
+  if (updated.length) {
+    const updatedRate = updated[0];
+    saveWageRates(getWageRates().map((rate) => (Number(rate.id) === Number(id) ? updatedRate : rate)));
+    return updatedRate;
+  }
+  return null;
 }
 
 function normalizeCloudEmployee(employee) {
@@ -2897,6 +2954,33 @@ async function apiCreateWageRate(payload, createdBy) {
   const createdCloudRate = await createCloudWageRate(wageRate);
   if (!createdCloudRate) throw new Error("บันทึกอัตราค่าจ้างลงฐานข้อมูลไม่สำเร็จ");
   return createdCloudRate;
+}
+
+async function apiUpdateWageRate(id, payload, updatedBy) {
+  const itemType = String(payload.item_type);
+  const rate = Number(payload.rate);
+  const effectiveDate = String(payload.effective_date);
+  const validItemTypes = getWageRateTypeOptions().map((option) => option.value);
+
+  if (!Number(id)) throw new Error("ไม่พบรายการอัตราค่าจ้างที่ต้องการแก้ไข");
+  if (!validItemTypes.includes(itemType)) {
+    throw new Error("กรุณาเลือกชนิดงานค่าจ้างที่มีอยู่ในระบบ");
+  }
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new Error("Rate must be greater than 0.");
+  }
+  if (!effectiveDate) {
+    throw new Error("Effective date is required.");
+  }
+
+  const updatedCloudRate = await updateCloudWageRate(id, {
+    item_type: itemType,
+    rate,
+    effective_date: effectiveDate,
+    updated_by: updatedBy
+  });
+  if (!updatedCloudRate) throw new Error("แก้ไขอัตราค่าจ้างลงฐานข้อมูลไม่สำเร็จ");
+  return updatedCloudRate;
 }
 
 function apiGetCurrentRate(itemType, productionDate) {
@@ -4568,7 +4652,7 @@ function renderModuleContent(user, moduleItem) {
     return wrapSettingsSubpage(renderTimeEmployees(user, moduleItem));
   }
   if (moduleItem.id === "wage-rates") {
-    return wrapSettingsSubpage(renderWageRateForm());
+    return wrapSettingsSubpage(renderWageRateForm(user));
   }
   if (moduleItem.id === "settings-pile-summary") {
     return wrapSettingsSubpage(renderSettingsPileSummary(user, moduleItem));
@@ -7047,10 +7131,11 @@ function renderProductionFruitMenu(user) {
   `;
 }
 
-function getProductionEditorRecords() {
+function getProductionEditorRecords(user) {
   const search = productionEditorEmployeeSearch.trim().toLocaleLowerCase("th-TH");
   return getProductionRecords()
     .filter((record) => {
+      if (!canEditProductionRecord(user, record)) return false;
       if (getRecordDate(record) !== productionEditorDate) return false;
       if (productionFruitTypeForRecord(record) !== productionEditorFruit) return false;
       if (!search) return true;
@@ -7069,12 +7154,17 @@ function getProductionEditorRecords() {
 
 function renderProductionEditor(user, moduleItem) {
   if (!canEditProductionRecords(user)) {
-    return `<section class="panel"><div class="alert alert-error">หน้านี้อนุญาตเฉพาะบัญชีระดับ C4 ขึ้นไป</div></section>`;
+    return `<section class="panel"><div class="alert alert-error">กรุณาเข้าสู่ระบบก่อนแก้ไขข้อมูลผลผลิต</div></section>`;
   }
 
-  const records = getProductionEditorRecords();
-  const editingRecord = getProductionRecords().find((record) => Number(record.id) === Number(editingProductionRecordId));
-  const deletingRecord = getProductionRecords().find((record) => Number(record.id) === Number(deletingProductionRecordId));
+  const canManageAll = canManageAllProductionRecords(user);
+  const records = getProductionEditorRecords(user);
+  const editingRecord = getProductionRecords().find(
+    (record) => Number(record.id) === Number(editingProductionRecordId) && canEditProductionRecord(user, record)
+  );
+  const deletingRecord = canDeleteProductionRecords(user)
+    ? getProductionRecords().find((record) => Number(record.id) === Number(deletingProductionRecordId))
+    : null;
   const labels = getProductionFieldLabels(productionEditorFruit);
   const isDurian = productionEditorFruit === "durian";
   const employees = getEmployees().slice().sort((a, b) => String(a.emp_code).localeCompare(String(b.emp_code), undefined, { numeric: true }));
@@ -7087,7 +7177,9 @@ function renderProductionEditor(user, moduleItem) {
       <div class="summary-header">
         <div>
           <h2>แก้ไขข้อมูลผลผลิต</h2>
-          <p>สิทธิ์ C4 ขึ้นไป ทุกการแก้ไขต้องระบุเหตุผลและถูกบันทึกค่าเดิมกับค่าใหม่ใน Audit Log</p>
+          <p>${canManageAll
+            ? "C4 ขึ้นไปแก้ไขรายการของทุกคนได้ตลอดเวลา และลบรายการได้"
+            : "C1-C3 แก้ไขได้เฉพาะรายการที่ตนเองบันทึก ภายใน 5 นาทีหลังบันทึก"} ทุกการแก้ไขถูกบันทึกค่าเดิมกับค่าใหม่ใน Audit Log</p>
         </div>
         <button class="btn btn-outline" data-close-production-editor type="button">กลับหน้าเลือกผลไม้</button>
       </div>
@@ -7133,7 +7225,7 @@ function renderProductionEditor(user, moduleItem) {
           </form>
         </section>` : ""}
 
-      ${deletingRecord ? `
+      ${canManageAll && deletingRecord ? `
         <section class="panel production-delete-panel">
           <div class="panel-head">
             <div>
@@ -7161,7 +7253,12 @@ function renderProductionEditor(user, moduleItem) {
               const activeClass = Number(record.id) === Number(editingProductionRecordId)
                 ? "is-editing"
                 : Number(record.id) === Number(deletingProductionRecordId) ? "is-deleting" : "";
-              return `<tr class="${activeClass}"><td>${escapeHtml(record.record_time || "-")}</td><td><strong>${escapeHtml(record.emp_code || "-")}</strong></td><td>${escapeHtml(record.employee_name || employee?.fullname || "-")}</td><td>${normalizeProductionPileNumber(record.pile_no ?? record.pile) || "-"}</td><td>${escapeHtml(weights)}</td><td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td><td>${escapeHtml(record.created_by || "-")}</td><td><div class="production-row-actions"><button class="btn btn-small btn-outline" data-select-production-edit="${record.id}" type="button">แก้ไข</button><button class="btn btn-small btn-danger" data-select-production-delete="${record.id}" type="button">ลบ</button></div></td></tr>`;
+              const remainingMinutes = Math.max(1, Math.ceil(getProductionRecordEditRemainingMs(record) / 60000));
+              const editLabel = canManageAll ? "แก้ไข" : `แก้ไข (เหลือ ${remainingMinutes} นาที)`;
+              const deleteButton = canManageAll
+                ? `<button class="btn btn-small btn-danger" data-select-production-delete="${record.id}" type="button">ลบ</button>`
+                : "";
+              return `<tr class="${activeClass}"><td>${escapeHtml(record.record_time || "-")}</td><td><strong>${escapeHtml(record.emp_code || "-")}</strong></td><td>${escapeHtml(record.employee_name || employee?.fullname || "-")}</td><td>${normalizeProductionPileNumber(record.pile_no ?? record.pile) || "-"}</td><td>${escapeHtml(weights)}</td><td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td><td>${escapeHtml(record.created_by || "-")}</td><td><div class="production-row-actions"><button class="btn btn-small btn-outline" data-select-production-edit="${record.id}" type="button">${editLabel}</button>${deleteButton}</div></td></tr>`;
             }).join("") : `<tr><td colspan="8" class="empty-cell">ไม่พบข้อมูลตามตัวกรอง</td></tr>`}</tbody>
           </table>
         </div>
@@ -7171,8 +7268,8 @@ function renderProductionEditor(user, moduleItem) {
 }
 
 async function deleteProductionEditorRecord(user, formElement) {
-  if (!canEditProductionRecords(user)) {
-    productionEditorMessage = "บัญชีนี้ไม่มีสิทธิ์ลบข้อมูลผลผลิต";
+  if (!canDeleteProductionRecords(user)) {
+    productionEditorMessage = "เฉพาะบัญชีระดับ C4 ขึ้นไปเท่านั้นที่ลบข้อมูลผลผลิตได้";
     productionEditorMessageType = "error";
     render();
     return;
@@ -7218,16 +7315,17 @@ async function deleteProductionEditorRecord(user, formElement) {
 }
 
 async function saveProductionEditorRecord(user, formElement) {
-  if (!canEditProductionRecords(user)) {
-    productionEditorMessage = "บัญชีนี้ไม่มีสิทธิ์แก้ไขข้อมูลผลผลิต";
-    productionEditorMessageType = "error";
-    render();
-    return;
-  }
   const existingRecord = getProductionRecords().find((record) => Number(record.id) === Number(editingProductionRecordId));
   if (!existingRecord) {
     productionEditorMessage = "ไม่พบรายการที่ต้องการแก้ไข กรุณาโหลดข้อมูลใหม่";
     productionEditorMessageType = "error";
+    render();
+    return;
+  }
+  if (!canEditProductionRecord(user, existingRecord)) {
+    productionEditorMessage = "C1-C3 แก้ไขได้เฉพาะรายการที่ตนเองบันทึกและยังไม่เกิน 5 นาที";
+    productionEditorMessageType = "error";
+    editingProductionRecordId = null;
     render();
     return;
   }
@@ -7458,12 +7556,12 @@ function renderProductionSummary(user) {
         ...record,
         employee_name: employeeMap.get(record.employee_id)?.fullname || ""
       })),
-      canEditProductionRecords(user)
+      user
     )}
   `;
 }
 
-function renderProductionRecordsTable(records, showEdit) {
+function renderProductionRecordsTable(records, editUser = null) {
   const labels = getProductionFieldLabels();
   const durianMode = isDurianFruit();
   return `
@@ -7478,7 +7576,7 @@ function renderProductionRecordsTable(records, showEdit) {
           <tbody>
             ${
               records.length
-                ? records.map((record) => renderProductionManagementRow(record, showEdit)).join("")
+                ? records.map((record) => renderProductionManagementRow(record, editUser)).join("")
                 : `<tr><td colspan="${durianMode ? 8 : 9}" class="empty-cell">ยังไม่มีรายการผลผลิตวันที่ ${escapeHtml(productionRecordDate)}</td></tr>`
             }
           </tbody>
@@ -7488,9 +7586,10 @@ function renderProductionRecordsTable(records, showEdit) {
   `;
 }
 
-function renderProductionManagementRow(record, showEdit) {
+function renderProductionManagementRow(record, editUser) {
   const employee = getEmployees().find((item) => item.id === record.employee_id);
   const locked = isProductionRecordLocked(record);
+  const showEdit = editUser ? canEditProductionRecord(editUser, record) : false;
 
   return `
     <tr>
@@ -8001,7 +8100,7 @@ function setProductionMessage(message, type = "success") {
 function bindProductionManagementEvents(user) {
   document.querySelector("[data-open-production-editor]")?.addEventListener("click", () => {
     if (!canEditProductionRecords(user)) {
-      setProductionMessage("หน้านี้อนุญาตเฉพาะบัญชีระดับ C4 ขึ้นไป", "error");
+      setProductionMessage("กรุณาเข้าสู่ระบบก่อนแก้ไขข้อมูลผลผลิต", "error");
       render();
       return;
     }
@@ -8058,8 +8157,15 @@ function bindProductionManagementEvents(user) {
 
   document.querySelectorAll("[data-select-production-edit]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (!canEditProductionRecords(user)) return;
-      editingProductionRecordId = Number(button.dataset.selectProductionEdit);
+      const recordId = Number(button.dataset.selectProductionEdit);
+      const record = getProductionRecords().find((item) => Number(item.id) === recordId);
+      if (!canEditProductionRecord(user, record)) {
+        productionEditorMessage = "สิทธิ์แก้ไขรายการนี้หมดเวลาแล้ว หรือไม่ใช่รายการที่คุณบันทึก";
+        productionEditorMessageType = "error";
+        render();
+        return;
+      }
+      editingProductionRecordId = recordId;
       deletingProductionRecordId = null;
       productionEditorMessage = "";
       render();
@@ -8075,7 +8181,7 @@ function bindProductionManagementEvents(user) {
 
   document.querySelectorAll("[data-select-production-delete]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (!canEditProductionRecords(user)) return;
+      if (!canDeleteProductionRecords(user)) return;
       deletingProductionRecordId = Number(button.dataset.selectProductionDelete);
       editingProductionRecordId = null;
       productionEditorMessage = "";
@@ -8269,13 +8375,12 @@ function bindProductionManagementEvents(user) {
 
   document.querySelectorAll("[data-edit-production]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (!canEditProductionRecords(user)) {
-        setProductionMessage("แก้ไขข้อมูลผลผลิตได้ตั้งแต่ระดับ C4 ขึ้นไป", "error");
+      const record = getProductionRecords().find((item) => Number(item.id) === Number(button.dataset.editProduction));
+      if (!canEditProductionRecord(user, record)) {
+        setProductionMessage("C1-C3 แก้ไขได้เฉพาะรายการที่ตนเองบันทึกภายใน 5 นาที", "error");
         render();
         return;
       }
-      const record = getProductionRecords().find((item) => Number(item.id) === Number(button.dataset.editProduction));
-      if (!record) return;
       productionEditorOpen = true;
       productionEditorDate = getRecordDate(record);
       productionEditorFruit = productionFruitTypeForRecord(record);
@@ -8749,10 +8854,14 @@ function editProductionRecord(recordId, user) {
   }
 }
 
-function renderWageRateForm() {
+function renderWageRateForm(user) {
   const wageRateTypeOptions = getWageRateTypeOptions();
   const rates = apiGetWageRates(wageRateFilter);
   const allRates = apiGetWageRates("all");
+  const canManage = canManageWageRates(user);
+  const editingRate = editingWageRateId
+    ? allRates.find((rate) => Number(rate.id) === Number(editingWageRateId))
+    : null;
   const latestByType = new Map();
   wageRateTypeOptions.forEach((option) => {
     latestByType.set(option.value, allRates.find((rate) => rate.item_type === option.value) || null);
@@ -8781,30 +8890,31 @@ function renderWageRateForm() {
 
     <section class="panel">
       <div class="section-title-row">
-        <h3>เพิ่มอัตราใหม่</h3>
-        <p class="muted-text">ตั้งหนึ่งครั้งและใช้ต่อเนื่องตั้งแต่วันที่เริ่มใช้ จนกว่าจะเพิ่มอัตราใหม่</p>
+        <h3>${editingRate ? `แก้ไขอัตรา #${editingRate.id}` : "เพิ่มอัตราใหม่"}</h3>
+        <p class="muted-text">${canManage ? "บัญชี C4 ขึ้นไปสามารถเพิ่มหรือแก้ไขอัตราค่าจ้างได้" : "หน้านี้ดูข้อมูลได้เท่านั้น การเพิ่ม/แก้ไขใช้บัญชี C4 ขึ้นไป"}</p>
       </div>
       <form class="rate-form" id="wageRateForm">
         <label class="field">
           <span>ชนิดงาน / ผลไม้</span>
-          <select name="item_type" required>
+          <select name="item_type" required ${canManage ? "" : "disabled"}>
             ${wageRateTypeOptions
-              .map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`)
+              .map((option) => `<option value="${escapeHtml(option.value)}" ${editingRate?.item_type === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`)
               .join("")}
           </select>
         </label>
 
         <label class="field">
           <span>อัตราค่าจ้างต่อหน่วย</span>
-          <input name="rate" type="number" min="0.01" step="0.01" required />
+          <input name="rate" type="number" min="0.01" step="0.01" value="${editingRate ? escapeHtml(String(editingRate.rate)) : ""}" required ${canManage ? "" : "disabled"} />
         </label>
 
         <label class="field">
           <span>วันที่เริ่มใช้ (ใช้ต่อเนื่อง)</span>
-          <input name="effective_date" type="date" value="${escapeHtml(currentRateDate)}" required />
+          <input name="effective_date" type="date" value="${escapeHtml(editingRate?.effective_date || currentRateDate)}" required ${canManage ? "" : "disabled"} />
         </label>
 
-        <button class="btn btn-primary form-submit" type="submit">เพิ่มอัตรา</button>
+        <button class="btn btn-primary form-submit" type="submit" ${canManage ? "" : "disabled"}>${editingRate ? "บันทึกการแก้ไข" : "เพิ่มอัตรา"}</button>
+        ${editingRate ? `<button class="btn btn-outline" id="cancelWageRateEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
       </form>
     </section>
 
@@ -8829,17 +8939,17 @@ function renderWageRateForm() {
       <div class="table-scroll">
         <table>
           <thead>
-            <tr><th>ID</th><th>ชนิดงาน</th><th>Rate</th><th>Effective</th><th>Created By</th><th>Created</th></tr>
+            <tr><th>ID</th><th>ชนิดงาน</th><th>Rate</th><th>Effective</th><th>Created By</th><th>Created</th><th>จัดการ</th></tr>
           </thead>
           <tbody>
-            ${rates.length ? rates.map(renderWageRateRow).join("") : `<tr><td colspan="6" class="empty-cell">No wage rates found.</td></tr>`}
+            ${rates.length ? rates.map((rate) => renderWageRateRow(rate, canManage)).join("") : `<tr><td colspan="7" class="empty-cell">No wage rates found.</td></tr>`}
           </tbody>
         </table>
       </div>
     </section>
   `;
 }
-function renderWageRateRow(wageRate) {
+function renderWageRateRow(wageRate, canManage = false) {
   return `
     <tr>
       <td>${wageRate.id}</td>
@@ -8848,6 +8958,7 @@ function renderWageRateRow(wageRate) {
       <td>${escapeHtml(wageRate.effective_date)}</td>
       <td>${escapeHtml(wageRate.created_by)}</td>
       <td>${formatDate(wageRate.created_at)}</td>
+      <td>${canManage ? `<button class="btn btn-small btn-outline" data-edit-wage-rate="${wageRate.id}" type="button">แก้ไข</button>` : `<span class="muted-text">C4+</span>`}</td>
     </tr>
   `;
 }
@@ -8863,11 +8974,27 @@ function bindWageRateEvents(user) {
     render();
   });
 
+  document.querySelectorAll("[data-edit-wage-rate]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!canManageWageRates(user)) {
+        window.alert("บัญชี C4 ขึ้นไปเท่านั้นที่แก้ไขอัตราค่าจ้างได้");
+        return;
+      }
+      editingWageRateId = Number(button.dataset.editWageRate);
+      render();
+    });
+  });
+
+  document.querySelector("#cancelWageRateEdit")?.addEventListener("click", () => {
+    editingWageRateId = null;
+    render();
+  });
+
   document.querySelector("#wageRateForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
 
-    if (!isTopLevelUser(user)) {
-      window.alert("Only C6/C7 can add wage rates.");
+    if (!canManageWageRates(user)) {
+      window.alert("บัญชี C4 ขึ้นไปเท่านั้นที่เพิ่มหรือแก้ไขอัตราค่าจ้างได้");
       return;
     }
 
@@ -8879,7 +9006,12 @@ function bindWageRateEvents(user) {
     };
 
     try {
-      await apiCreateWageRate(payload, user.fullname);
+      if (editingWageRateId) {
+        await apiUpdateWageRate(editingWageRateId, payload, user.fullname);
+        editingWageRateId = null;
+      } else {
+        await apiCreateWageRate(payload, user.fullname);
+      }
       render();
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Save failed.");
