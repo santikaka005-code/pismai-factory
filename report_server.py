@@ -4789,19 +4789,21 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
         metric_style = getSampleStyleSheet()["BodyText"]
         metric_style.fontName = THAI_FONT
         metric_style.fontSize = 8
-        metric_style.leading = 12
+        metric_style.leading = 21
         metrics = [
             Paragraph(f"<font color='#64748B'>พนักงาน</font><br/><font size='16' color='#047857'><b>{total_employees:,} คน</b></font>", metric_style),
             Paragraph(f"<font color='#64748B'>ชั่วโมงทำงาน</font><br/><font size='16' color='#1D4ED8'><b>{total_hours:,.1f} ชม.</b></font>", metric_style),
             Paragraph(f"<font color='#64748B'>รายได้ก่อนหัก</font><br/><font size='16' color='#C2410C'><b>{money(total_amount)} บาท</b></font>", metric_style),
             Paragraph(f"<font color='#64748B'>ยอดรับสุทธิ</font><br/><font size='16' color='#15803D'><b>{money(total_net)} บาท</b></font>", metric_style),
         ]
-        metric_table = Table([metrics], colWidths=[66.75 * mm] * 4, rowHeights=[21 * mm])
+        metric_table = Table([metrics], colWidths=[66.75 * mm] * 4, rowHeights=[24 * mm])
         metric_table.setStyle(TableStyle([
             ("BOX", (0, 0), (-1, -1), 0.4, line_color),
             ("INNERGRID", (0, 0), (-1, -1), 0.4, line_color),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
             ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#ECFDF5")),
             ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#EFF6FF")),
             ("BACKGROUND", (2, 0), (2, 0), colors.HexColor("#FFF7ED")),
