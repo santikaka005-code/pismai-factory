@@ -4784,7 +4784,8 @@ tr:last-child td {
   background: var(--primary);
 }
 
-.deduction-tabs .module-tab.bonus-tab {
+.deduction-tabs .module-tab.bonus-tab.active {
+  color: #ffffff;
   background: #067647;
 }
 
