@@ -37,7 +37,7 @@ DATA = {
 
 def workbook_headers(content):
     workbook = load_workbook(BytesIO(content))
-    return [cell.value for cell in workbook.active[5]]
+    return [cell.value for cell in workbook.active[14] if cell.value]
 
 
 def test_personal_records_are_filtered_by_fruit():

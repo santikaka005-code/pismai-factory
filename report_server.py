@@ -2200,100 +2200,278 @@ def build_employee_range_excel(
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "สรุปรายบุคคล"
-
-    sheet["A1"] = f"{COMPANY_NAME} - รายงานสรุปรายบุคคล"
-    sheet["A2"] = f"ชื่อ: {employee.get('emp_code', '-')} - {employee.get('fullname', '-')}"
-    sheet["A3"] = f"ผลไม้: {selected_production_fruit_label({'fruit_type': fruit_type})} | ช่วงวันที่: {start_date} ถึง {end_date}"
-    for cell_ref in ["A1", "A2", "A3"]:
-        sheet[cell_ref].font = Font(bold=True, size=14 if cell_ref == "A1" else 11)
-
     is_durian = str(fruit_type or "all").lower() == "durian"
     water_label, flower_label = production_report_weight_labels({"fruit_type": fruit_type})
-    headers = (
-        ["วันที่", "น้ำหนักทุเรียน", "รวมเป็นเงิน"]
-        if is_durian
-        else ["วันที่", water_label, flower_label, "น้ำหนักรวม", "รวมเป็นเงิน"]
+    total_water = sum(summary["water_weight"] for summary in daily_summaries)
+    total_flower = sum(summary["flower_weight"] for summary in daily_summaries)
+    total_weight = sum(
+        summary.get("total_weight", summary["flower_weight"] + summary["water_weight"])
+        for summary in daily_summaries
     )
-    amount_column = len(headers)
-    sheet.append([])
-    sheet.append(headers)
-    header_row = 5
+    font_name = "Sarabun"
+    dark_green = "064E3B"
+    brand_green = "0F8A55"
+    pale_green = "D1FAE5"
+    light_gray = "F8FAFC"
+    border_color = "D9E2EA"
+    orange = "C2410C"
+    thin = Side(style="thin", color=border_color)
+    medium = Side(style="medium", color=dark_green)
+    table_border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    for summary in daily_summaries:
-        if is_durian:
-            sheet.append([
-                summary["date"],
-                summary.get("total_weight", 0),
-                summary["total_amount"],
-            ])
-        else:
-            sheet.append([
+    sheet.sheet_view.showGridLines = False
+    sheet.merge_cells("A1:B3")
+    sheet["A1"] = "PF"
+    sheet["A1"].fill = PatternFill("solid", fgColor=brand_green)
+    sheet["A1"].font = Font(name=font_name, bold=True, size=25, color="FFFFFF")
+    sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    sheet.merge_cells("C1:J2")
+    sheet["C1"] = COMPANY_NAME
+    sheet["C1"].fill = PatternFill("solid", fgColor=dark_green)
+    sheet["C1"].font = Font(name=font_name, bold=True, size=20, color="FFFFFF")
+    sheet["C1"].alignment = Alignment(horizontal="left", vertical="center")
+    sheet.merge_cells("C3:J3")
+    sheet["C3"] = "รายงานสรุปผลผลิตรายบุคคล • Employee Production Report"
+    sheet["C3"].fill = PatternFill("solid", fgColor=dark_green)
+    sheet["C3"].font = Font(name=font_name, size=10, color="D1FAE5")
+    sheet["C3"].alignment = Alignment(horizontal="left", vertical="center")
+    add_excel_logo(sheet, "I1")
+
+    sheet.merge_cells("A5:J5")
+    sheet["A5"] = "ข้อมูลพนักงานและช่วงรายงาน"
+    sheet["A5"].fill = PatternFill("solid", fgColor=pale_green)
+    sheet["A5"].font = Font(name=font_name, bold=True, size=12, color="065F46")
+    sheet["A5"].alignment = Alignment(vertical="center")
+
+    info_rows = [
+        ("A6", "รหัสพนักงาน", "B6:C6", str(employee.get("emp_code") or "-")),
+        ("D6", "ชื่อ-นามสกุล", "E6:G6", employee.get("fullname") or "-"),
+        ("H6", "กลุ่ม", "I6:J6", employee.get("group_name") or employee.get("department") or "-"),
+        ("A7", "ช่วงวันที่", "B7:C7", f"{start_date} ถึง {end_date}"),
+        ("D7", "ประเภทผลไม้", "E7:G7", selected_production_fruit_label({"fruit_type": fruit_type})),
+        ("H7", "จำนวนวันมีรายการ", "I7:J7", len(daily_summaries)),
+    ]
+    for label_cell, label, value_range, value in info_rows:
+        sheet[label_cell] = label
+        sheet[label_cell].font = Font(name=font_name, bold=True, size=10, color="64748B")
+        sheet.merge_cells(value_range)
+        value_cell = sheet[value_range.split(":")[0]]
+        value_cell.value = value
+        value_cell.font = Font(name=font_name, size=10, color="1E293B")
+        value_cell.alignment = Alignment(vertical="center", wrap_text=True)
+    sheet["B6"].number_format = "@"
+    for row in sheet.iter_rows(min_row=6, max_row=7, min_col=1, max_col=10):
+        for cell in row:
+            cell.fill = PatternFill("solid", fgColor=light_gray)
+            cell.border = table_border
+            if cell.alignment is None:
+                cell.alignment = Alignment(vertical="center")
+
+    cards = [
+        ("A9:B9", "A10:B11", "วันมีรายการ", len(daily_summaries), "ECFDF5", "047857", '0 "วัน"'),
+        ("D9:E9", "D10:E11", "น้ำหนักรวม", total_weight, "EFF6FF", "1D4ED8", '#,##0.00 "กก."'),
+        ("G9:H9", "G10:H11", "รายได้ก่อนหัก", gross_amount, "FFF7ED", orange, '#,##0.00 "บาท"'),
+        ("I9:J9", "I10:J11", "รับสุทธิ", net_amount, "F0FDF4", "15803D", '#,##0.00 "บาท"'),
+    ]
+    for label_range, value_range, label, value, fill_color, font_color, number_format in cards:
+        sheet.merge_cells(label_range)
+        sheet.merge_cells(value_range)
+        label_cell = sheet[label_range.split(":")[0]]
+        value_cell = sheet[value_range.split(":")[0]]
+        label_cell.value = label
+        value_cell.value = value
+        for row in sheet[label_range.split(":")[0]:value_range.split(":")[1]]:
+            for cell in row:
+                cell.fill = PatternFill("solid", fgColor=fill_color)
+                cell.border = table_border
+        label_cell.font = Font(name=font_name, bold=True, size=10, color="64748B")
+        label_cell.alignment = Alignment(horizontal="center", vertical="center")
+        value_cell.font = Font(name=font_name, bold=True, size=17, color=font_color)
+        value_cell.alignment = Alignment(horizontal="center", vertical="center")
+        value_cell.number_format = number_format
+
+    sheet.merge_cells("A13:J13")
+    sheet["A13"] = "รายละเอียดผลผลิตรายวัน"
+    sheet["A13"].fill = PatternFill("solid", fgColor=dark_green)
+    sheet["A13"].font = Font(name=font_name, bold=True, size=12, color="FFFFFF")
+    sheet["A13"].alignment = Alignment(vertical="center")
+
+    header_row = 14
+    if is_durian:
+        table_ranges = [("A14:B14", "วันที่"), ("C14:F14", "น้ำหนักทุเรียน"), ("G14:J14", "รวมเป็นเงิน")]
+    else:
+        table_ranges = [
+            ("A14:B14", "วันที่"),
+            ("C14:D14", water_label),
+            ("E14:F14", flower_label),
+            ("G14:H14", "น้ำหนักรวม"),
+            ("I14:J14", "รวมเป็นเงิน"),
+        ]
+    for cell_range, label in table_ranges:
+        sheet.merge_cells(cell_range)
+        cell = sheet[cell_range.split(":")[0]]
+        cell.value = label
+        cell.fill = PatternFill("solid", fgColor=brand_green)
+        cell.font = Font(name=font_name, bold=True, size=10, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for row in sheet[cell_range]:
+            for part in row:
+                part.fill = PatternFill("solid", fgColor=brand_green)
+                part.border = table_border
+
+    data_start = 15
+    for offset, summary in enumerate(daily_summaries):
+        row_index = data_start + offset
+        row_ranges = (
+            [f"A{row_index}:B{row_index}", f"C{row_index}:F{row_index}", f"G{row_index}:J{row_index}"]
+            if is_durian
+            else [
+                f"A{row_index}:B{row_index}",
+                f"C{row_index}:D{row_index}",
+                f"E{row_index}:F{row_index}",
+                f"G{row_index}:H{row_index}",
+                f"I{row_index}:J{row_index}",
+            ]
+        )
+        values = (
+            [summary["date"], summary.get("total_weight", 0), summary["total_amount"]]
+            if is_durian
+            else [
                 summary["date"],
                 summary["water_weight"],
                 summary["flower_weight"],
                 summary.get("total_weight", summary["flower_weight"] + summary["water_weight"]),
                 summary["total_amount"],
-            ])
-
-    total_row = sheet.max_row + 1
-    sheet.cell(total_row, 1, "รวม")
-    if is_durian:
-        sheet.cell(total_row, 2, sum(summary.get("total_weight", 0) for summary in daily_summaries))
-    else:
-        sheet.cell(total_row, 2, sum(summary["water_weight"] for summary in daily_summaries))
-        sheet.cell(total_row, 3, sum(summary["flower_weight"] for summary in daily_summaries))
-        sheet.cell(total_row, 4, sum(summary.get("total_weight", summary["flower_weight"] + summary["water_weight"]) for summary in daily_summaries))
-    sheet.cell(total_row, amount_column, gross_amount)
-    bonus_row = total_row + 1
-    sheet.cell(bonus_row, 1, "เบี้ยขยัน")
-    sheet.cell(bonus_row, amount_column, bonus_amount)
-    deduct_row = total_row + 2
-    sheet.cell(deduct_row, 1, "หัก")
-    sheet.cell(deduct_row, amount_column, deduction_amount)
-    net_row = total_row + 3
-    sheet.cell(net_row, 1, "สุทธิ")
-    sheet.cell(net_row, amount_column, net_amount)
-
-    if deduction_rows:
-        detail_start = net_row + 2
-        sheet.cell(detail_start, 1, "รายการหัก")
-        sheet.cell(detail_start, 2, "จำนวนเงิน")
-        sheet.cell(detail_start, 3, "หมายเหตุ")
-        for index, deduction in enumerate(deduction_rows, 1):
-            row_index = detail_start + index
-            sheet.cell(row_index, 1, deduction.get("deduction_label", "-"))
-            sheet.cell(row_index, 2, safe_float(deduction.get("amount")))
-            sheet.cell(row_index, 3, deduction.get("note") or "-")
-
-    if bonus_rows:
-        bonus_detail_start = sheet.max_row + 2
-        sheet.cell(bonus_detail_start, 1, "รายการเบี้ยขยัน")
-        sheet.cell(bonus_detail_start, 2, "จำนวนเงิน")
-        sheet.cell(bonus_detail_start, 3, "หมายเหตุ")
-        for index, bonus in enumerate(bonus_rows, 1):
-            row_index = bonus_detail_start + index
-            sheet.cell(row_index, 1, bonus.get("deduction_label", "เบี้ยขยัน"))
-            sheet.cell(row_index, 2, safe_float(bonus.get("amount")))
-            sheet.cell(row_index, 3, bonus.get("note") or "-")
-
-    for cell in sheet[header_row]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill("solid", fgColor="E6F4F1")
-        cell.alignment = Alignment(horizontal="center")
-
-    for row_index in [total_row, deduct_row, net_row]:
-        for cell in sheet[row_index]:
-            cell.font = Font(bold=True)
-            cell.fill = PatternFill("solid", fgColor="F7FAFC")
-
-    for row in sheet.iter_rows(min_row=header_row + 1):
-        for cell in row:
-            if isinstance(cell.value, (int, float)):
+            ]
+        )
+        for cell_range, value in zip(row_ranges, values):
+            sheet.merge_cells(cell_range)
+            cell = sheet[cell_range.split(":")[0]]
+            cell.value = value
+            cell.font = Font(name=font_name, size=10, color="1E293B")
+            cell.alignment = Alignment(
+                horizontal="center" if cell_range.startswith("A") else "right",
+                vertical="center",
+            )
+            if not cell_range.startswith("A"):
                 cell.number_format = "#,##0.00"
+            for row in sheet[cell_range]:
+                for part in row:
+                    part.border = table_border
+                    if offset % 2:
+                        part.fill = PatternFill("solid", fgColor=light_gray)
 
-    for column_cells in sheet.columns:
-        max_length = max(len(str(cell.value or "")) for cell in column_cells)
-        sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(max_length + 3, 30)
+    total_row = data_start + len(daily_summaries)
+    total_ranges = (
+        [(f"A{total_row}:B{total_row}", "รวมทั้งสิ้น"), (f"C{total_row}:F{total_row}", total_weight), (f"G{total_row}:J{total_row}", gross_amount)]
+        if is_durian
+        else [
+            (f"A{total_row}:B{total_row}", "รวมทั้งสิ้น"),
+            (f"C{total_row}:D{total_row}", total_water),
+            (f"E{total_row}:F{total_row}", total_flower),
+            (f"G{total_row}:H{total_row}", total_weight),
+            (f"I{total_row}:J{total_row}", gross_amount),
+        ]
+    )
+    for cell_range, value in total_ranges:
+        sheet.merge_cells(cell_range)
+        cell = sheet[cell_range.split(":")[0]]
+        cell.value = value
+        cell.font = Font(name=font_name, bold=True, size=10, color=dark_green)
+        cell.alignment = Alignment(horizontal="right" if not cell_range.startswith("A") else "left", vertical="center")
+        if not cell_range.startswith("A"):
+            cell.number_format = "#,##0.00"
+        for row in sheet[cell_range]:
+            for part in row:
+                part.fill = PatternFill("solid", fgColor="DDEFE4")
+                part.border = Border(top=medium, bottom=medium)
+
+    summary_start = total_row + 2
+    sheet.merge_cells(start_row=summary_start, start_column=1, end_row=summary_start, end_column=10)
+    sheet.cell(summary_start, 1, "สรุปการจ่ายเงิน")
+    sheet.cell(summary_start, 1).fill = PatternFill("solid", fgColor=pale_green)
+    sheet.cell(summary_start, 1).font = Font(name=font_name, bold=True, size=12, color="065F46")
+    payment_rows = [
+        ("รายได้ก่อนหัก", gross_amount, "FFF7ED", orange),
+        ("เงินเพิ่ม / เบี้ยขยัน", bonus_amount, "F0FDF4", "15803D"),
+        ("รายการหัก", deduction_amount, "FEF2F2", "B91C1C"),
+        ("ยอดรับสุทธิ", net_amount, dark_green, "FFFFFF"),
+    ]
+    for offset, (label, amount, fill_color, font_color) in enumerate(payment_rows, 1):
+        row_index = summary_start + offset
+        sheet.merge_cells(start_row=row_index, start_column=1, end_row=row_index, end_column=8)
+        sheet.merge_cells(start_row=row_index, start_column=9, end_row=row_index, end_column=10)
+        sheet.cell(row_index, 1, label)
+        sheet.cell(row_index, 9, amount)
+        for cell in sheet[row_index]:
+            cell.fill = PatternFill("solid", fgColor=fill_color)
+            cell.border = table_border
+            cell.font = Font(name=font_name, bold=offset == 4, size=11 if offset == 4 else 10, color=font_color)
+            cell.alignment = Alignment(horizontal="right" if cell.column >= 9 else "left", vertical="center")
+        sheet.cell(row_index, 9).number_format = '#,##0.00 "บาท"'
+
+    detail_row = summary_start + len(payment_rows) + 2
+    details = [
+        ("รายการหัก", deduction_rows, "-"),
+        ("รายการเงินเพิ่ม / เบี้ยขยัน", bonus_rows, "เบี้ยขยัน"),
+    ]
+    for title, rows, default_label in details:
+        if not rows:
+            continue
+        sheet.merge_cells(start_row=detail_row, start_column=1, end_row=detail_row, end_column=10)
+        sheet.cell(detail_row, 1, title)
+        sheet.cell(detail_row, 1).fill = PatternFill("solid", fgColor=dark_green)
+        sheet.cell(detail_row, 1).font = Font(name=font_name, bold=True, size=11, color="FFFFFF")
+        detail_row += 1
+        for cell_range, label in [
+            (f"A{detail_row}:D{detail_row}", "รายการ"),
+            (f"E{detail_row}:F{detail_row}", "จำนวนเงิน"),
+            (f"G{detail_row}:J{detail_row}", "หมายเหตุ"),
+        ]:
+            sheet.merge_cells(cell_range)
+            cell = sheet[cell_range.split(":")[0]]
+            cell.value = label
+            cell.fill = PatternFill("solid", fgColor=brand_green)
+            cell.font = Font(name=font_name, bold=True, size=10, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for item in rows:
+            detail_row += 1
+            for cell_range, value in [
+                (f"A{detail_row}:D{detail_row}", item.get("deduction_label", default_label)),
+                (f"E{detail_row}:F{detail_row}", safe_float(item.get("amount"))),
+                (f"G{detail_row}:J{detail_row}", item.get("note") or "-"),
+            ]:
+                sheet.merge_cells(cell_range)
+                cell = sheet[cell_range.split(":")[0]]
+                cell.value = value
+                cell.font = Font(name=font_name, size=10, color="1E293B")
+                cell.border = table_border
+                cell.alignment = Alignment(horizontal="right" if cell_range.startswith("E") else "left", vertical="center", wrap_text=True)
+                if cell_range.startswith("E"):
+                    cell.number_format = '#,##0.00 "บาท"'
+        detail_row += 2
+
+    widths = [13, 7, 13, 7, 13, 7, 13, 7, 14, 9]
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    for row_index in range(1, sheet.max_row + 1):
+        sheet.row_dimensions[row_index].height = 22
+    for row_index in [1, 2, 3]:
+        sheet.row_dimensions[row_index].height = 23
+    for row_index in [5, 13, header_row, summary_start]:
+        sheet.row_dimensions[row_index].height = 25
+    sheet.freeze_panes = "A15"
+    sheet.print_title_rows = "1:14"
+    sheet.print_area = f"A1:J{sheet.max_row}"
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.oddFooter.left.text = SYSTEM_NAME
+    sheet.oddFooter.center.text = "รายงานสรุปผลผลิตรายบุคคล"
+    sheet.oddFooter.right.text = "หน้า &P จาก &N"
+    sheet.sheet_view.zoomScale = 85
 
     output = BytesIO()
     workbook.save(output)
@@ -4294,27 +4472,118 @@ def build_time_group_report_excel(payload: dict) -> bytes:
     records = payload.get("time_group_records", []) or []
     workbook = Workbook()
     overview = workbook.active
-    overview.title = "Time Group Report"
-    overview.merge_cells("A1:H1")
-    overview["A1"] = COMPANY_NAME
-    overview["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
-    overview.merge_cells("A2:H2")
-    overview["A2"] = "Time Group Report"
-    overview["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
-    overview.merge_cells("A3:H3")
-    overview["A3"] = f"Date range {format_report_date(start_date)} - {format_report_date(end_date)} | Group {payload.get('group_label', 'All groups')}"
-    overview.merge_cells("A4:H4")
-    overview["A4"] = export_meta_text(payload)
-    overview.append([])
-    style_excel_report_sheet(overview, [1], [22, 16, 16, 18, 14, 14, 16, 16])
+    overview.title = "ภาพรวม"
+    font_name = "Sarabun"
+    dark_green = "075B44"
+    brand_green = "0F8A55"
+    mint = "D1FAE5"
+    pale = "F8FAFC"
+    line_color = "D8E2EA"
+    thin = Side(style="thin", color=line_color)
+    medium = Side(style="medium", color=dark_green)
+    table_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def group_employee_count(row: dict) -> int:
+        value = row.get("employees", 0)
+        if isinstance(value, (int, float)):
+            return int(value)
+        group_name = str(row.get("pay_group") or "")
+        return len({
+            str(item.get("emp_code") or item.get("fullname") or "")
+            for item in employee_rows
+            if str(item.get("pay_group") or "") == group_name
+        })
+
+    total_employees = len({
+        str(row.get("emp_code") or row.get("fullname") or "")
+        for row in employee_rows
+        if row.get("emp_code") or row.get("fullname")
+    })
+    total_hours = sum(safe_float(row.get("normal_hours")) + safe_float(row.get("ot_hours")) for row in group_rows)
+    total_amount = sum(safe_float(row.get("amount")) for row in group_rows)
+    total_bonus = sum(safe_float(row.get("bonus_amount")) for row in group_rows)
+    total_deduction = sum(safe_float(row.get("deduction_amount")) for row in group_rows)
+    total_net = sum(safe_float(row.get("net_amount", row.get("amount"))) for row in group_rows)
+
+    def setup_sheet(sheet, subtitle: str, last_column: str, freeze_at: str | None = None):
+        sheet.sheet_view.showGridLines = False
+        sheet.merge_cells(f"A1:B3")
+        sheet["A1"] = "PF"
+        sheet["A1"].fill = PatternFill("solid", fgColor=brand_green)
+        sheet["A1"].font = Font(name=font_name, bold=True, size=25, color="FFFFFF")
+        sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        sheet.merge_cells(f"C1:{last_column}2")
+        sheet["C1"] = COMPANY_NAME
+        sheet["C1"].fill = PatternFill("solid", fgColor=dark_green)
+        sheet["C1"].font = Font(name=font_name, bold=True, size=20, color="FFFFFF")
+        sheet["C1"].alignment = Alignment(horizontal="left", vertical="center")
+        sheet.merge_cells(f"C3:{last_column}3")
+        sheet["C3"] = subtitle
+        sheet["C3"].fill = PatternFill("solid", fgColor=dark_green)
+        sheet["C3"].font = Font(name=font_name, size=10, color=mint)
+        sheet["C3"].alignment = Alignment(horizontal="left", vertical="center")
+        add_excel_logo(sheet, "A1")
+        sheet.freeze_panes = freeze_at
+        sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.page_setup.orientation = "landscape"
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.oddFooter.left.text = SYSTEM_NAME
+        sheet.oddFooter.center.text = "รายงานแบบกลุ่มตามเวลา"
+        sheet.oddFooter.right.text = "หน้า &P จาก &N"
+        for row_index in (1, 2, 3):
+            sheet.row_dimensions[row_index].height = 23
+
+    setup_sheet(overview, "รายงานแบบกลุ่มตามเวลา • Time Group Report", "L", "A13")
+    overview.merge_cells("A5:L5")
+    overview["A5"] = (
+        f"ช่วงรายงาน {format_report_date(start_date)} - {format_report_date(end_date)}"
+        f"  |  กลุ่ม {payload.get('group_label') or 'ทุกกลุ่ม'}  |  {export_meta_text(payload)}"
+    )
+    overview["A5"].fill = PatternFill("solid", fgColor=mint)
+    overview["A5"].font = Font(name=font_name, bold=True, size=10, color=dark_green)
+    overview["A5"].alignment = Alignment(vertical="center", wrap_text=True)
+    overview.row_dimensions[5].height = 28
 
     if options["summary"]:
-        summary = workbook.create_sheet("Summary By Group")
-        summary.append(["Group", "Employees", "Records", "Net time", "Normal hours", "OT hours", "Normal amount", "OT amount", "Total amount", "Attendance bonus", "Deduct", "Net amount"])
+        cards = [
+            ("A7:C7", "A8:C9", "จำนวนพนักงาน", total_employees, "ECFDF5", "047857", '0 "คน"'),
+            ("D7:F7", "D8:F9", "ชั่วโมงทำงาน", total_hours, "EFF6FF", "1D4ED8", '#,##0.0 "ชม."'),
+            ("G7:I7", "G8:I9", "รายได้ก่อนหัก", total_amount, "FFF7ED", "C2410C", '#,##0.00 "บาท"'),
+            ("J7:L7", "J8:L9", "ยอดรับสุทธิ", total_net, "F0FDF4", "15803D", '#,##0.00 "บาท"'),
+        ]
+        for label_range, value_range, label, value, fill_color, font_color, number_format in cards:
+            overview.merge_cells(label_range)
+            overview.merge_cells(value_range)
+            label_cell = overview[label_range.split(":")[0]]
+            value_cell = overview[value_range.split(":")[0]]
+            label_cell.value = label
+            value_cell.value = value
+            for row in overview[f"{label_range.split(':')[0]}:{value_range.split(':')[1]}"]:
+                for cell in row:
+                    cell.fill = PatternFill("solid", fgColor=fill_color)
+                    cell.border = table_border
+            label_cell.font = Font(name=font_name, bold=True, size=10, color="64748B")
+            label_cell.alignment = Alignment(horizontal="center", vertical="center")
+            value_cell.font = Font(name=font_name, bold=True, size=17, color=font_color)
+            value_cell.alignment = Alignment(horizontal="center", vertical="center")
+            value_cell.number_format = number_format
+
+        overview.merge_cells("A11:L11")
+        overview["A11"] = "สรุปตามกลุ่ม"
+        overview["A11"].fill = PatternFill("solid", fgColor=dark_green)
+        overview["A11"].font = Font(name=font_name, bold=True, size=12, color="FFFFFF")
+        overview["A11"].alignment = Alignment(vertical="center")
+        overview.append([])
+        overview.append([
+            "กลุ่ม", "พนักงาน", "รายการ", "เวลาสุทธิ", "ชม.ปกติ", "OT",
+            "ค่าแรงปกติ", "ค่า OT", "ก่อนหัก", "เงินเพิ่ม", "รายการหัก", "สุทธิ",
+        ])
         for row in group_rows:
-            summary.append([
+            overview.append([
                 row.get("pay_group", "-"),
-                row.get("employees", 0),
+                group_employee_count(row),
                 row.get("records", 0),
                 minutes_text(row.get("net_minutes", 0)),
                 safe_float(row.get("normal_hours")),
@@ -4326,15 +4595,63 @@ def build_time_group_report_excel(payload: dict) -> bytes:
                 safe_float(row.get("deduction_amount")),
                 safe_float(row.get("net_amount", row.get("amount"))),
             ])
-        style_excel_report_sheet(summary, [1], [20, 12, 12, 16, 14, 14, 16, 16, 16, 16, 14, 16])
+        summary_header = 13
+        summary_total = overview.max_row + 1
+        overview.cell(summary_total, 1, "รวมทั้งหมด")
+        overview.merge_cells(start_row=summary_total, start_column=1, end_row=summary_total, end_column=3)
+        overview.cell(summary_total, 5, sum(safe_float(row.get("normal_hours")) for row in group_rows))
+        overview.cell(summary_total, 6, sum(safe_float(row.get("ot_hours")) for row in group_rows))
+        overview.cell(summary_total, 7, sum(safe_float(row.get("normal_amount")) for row in group_rows))
+        overview.cell(summary_total, 8, sum(safe_float(row.get("ot_amount")) for row in group_rows))
+        overview.cell(summary_total, 9, total_amount)
+        overview.cell(summary_total, 10, total_bonus)
+        overview.cell(summary_total, 11, total_deduction)
+        overview.cell(summary_total, 12, total_net)
+        for cell in overview[summary_header]:
+            cell.fill = PatternFill("solid", fgColor=brand_green)
+            cell.font = Font(name=font_name, bold=True, size=9, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = table_border
+        for row_index in range(summary_header + 1, summary_total):
+            for cell in overview[row_index]:
+                cell.font = Font(name=font_name, size=9, color="1E293B")
+                cell.border = table_border
+                cell.alignment = Alignment(
+                    horizontal="right" if cell.column >= 2 else "left",
+                    vertical="center",
+                    wrap_text=True,
+                )
+                if row_index % 2 == 1:
+                    cell.fill = PatternFill("solid", fgColor=pale)
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0.00"
+        for cell in overview[summary_total]:
+            cell.fill = PatternFill("solid", fgColor=mint)
+            cell.font = Font(name=font_name, bold=True, size=9, color=dark_green)
+            cell.border = Border(top=medium, bottom=medium)
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
+        overview.row_dimensions[summary_header].height = 28
+        overview.print_title_rows = "1:13"
+    else:
+        overview.merge_cells("A7:L9")
+        overview["A7"] = "ไม่ได้เลือกส่วนสรุปตามกลุ่ม"
+        overview["A7"].font = Font(name=font_name, italic=True, color="64748B")
+        overview["A7"].alignment = Alignment(horizontal="center", vertical="center")
 
     if options["employees"]:
-        employees = workbook.create_sheet("Employees")
-        employees.append(["Group", "Emp code", "Fullname", "Days", "Net time", "Normal hours", "OT hours", "Total amount", "Attendance bonus", "Deduct", "Net amount"])
+        employees = workbook.create_sheet("สรุปพนักงาน")
+        setup_sheet(employees, "สรุปรายบุคคลแยกตามกลุ่ม", "K", "A6")
+        employees.append([])
+        employees.append([
+            "กลุ่ม", "รหัสพนักงาน", "ชื่อ-นามสกุล", "วันทำงาน", "เวลาสุทธิ",
+            "ชม.ปกติ", "OT", "ก่อนหัก", "เงินเพิ่ม", "รายการหัก", "สุทธิ",
+        ])
         for row in employee_rows:
             employees.append([
                 row.get("pay_group", "-"),
-                row.get("emp_code", "-"),
+                str(row.get("emp_code") or "-"),
                 row.get("fullname", "-"),
                 row.get("records", 0),
                 minutes_text(row.get("net_minutes", 0)),
@@ -4345,24 +4662,50 @@ def build_time_group_report_excel(payload: dict) -> bytes:
                 safe_float(row.get("deduction_amount")),
                 safe_float(row.get("net_amount", row.get("amount"))),
             ])
-        style_excel_report_sheet(employees, [1], [20, 14, 28, 10, 16, 14, 14, 16, 16, 14, 16])
+        style_excel_report_sheet(employees, [5], [20, 15, 28, 12, 16, 14, 12, 16, 15, 15, 16])
+        employees["B6"].number_format = "@"
+        employees.print_title_rows = "1:5"
 
     if options["details"]:
-        details = workbook.create_sheet("Details")
-        details.append(["Date", "Group", "Emp code", "Fullname", "Clock in", "Clock out", "Net time", "OT rate", "Total amount"])
+        details = workbook.create_sheet("รายละเอียดเวลา")
+        setup_sheet(details, "รายละเอียดเวลาเข้า-ออก", "J", "A6")
+        details.append([])
+        details.append(["วันที่", "กลุ่ม", "รหัสพนักงาน", "ชื่อ-นามสกุล", "เวลาเข้า", "เวลาออก", "เวลาสุทธิ", "อัตรา OT", "ยอดเงิน", "สถานะ"])
         for record in records:
+            status_parts = []
+            if is_late_time(record.get("clock_in")):
+                status_parts.append("มาสาย")
+            if is_early_out_time(record.get("clock_out")):
+                status_parts.append("ออกก่อน")
             details.append([
                 record.get("record_date", ""),
                 record.get("employee_type_label", ""),
-                record.get("emp_code", ""),
+                str(record.get("emp_code") or ""),
                 record.get("fullname", ""),
                 record.get("clock_in", ""),
                 record.get("clock_out", ""),
                 minutes_text(record.get("net_minutes", 0)),
                 safe_float(record.get("ot_hourly_rate")),
                 safe_float(record.get("total_amount")),
+                " / ".join(status_parts) or "ปกติ",
             ])
-        style_excel_report_sheet(details, [1], [14, 18, 14, 28, 12, 12, 16, 12, 16])
+        style_excel_report_sheet(details, [5], [14, 20, 15, 27, 12, 12, 16, 13, 16, 16])
+        details["C6"].number_format = "@"
+        details.print_title_rows = "1:5"
+
+    widths = [20, 12, 12, 16, 14, 12, 16, 15, 16, 15, 15, 16]
+    for index, width in enumerate(widths, 1):
+        overview.column_dimensions[get_column_letter(index)].width = width
+    overview.print_area = f"A1:L{overview.max_row}"
+    overview.page_setup.orientation = "landscape"
+    overview.page_setup.paperSize = overview.PAPERSIZE_A4
+    overview.sheet_properties.pageSetUpPr.fitToPage = True
+    overview.page_setup.fitToWidth = 1
+    overview.page_setup.fitToHeight = 0
+    overview.oddFooter.left.text = SYSTEM_NAME
+    overview.oddFooter.center.text = "รายงานแบบกลุ่มตามเวลา"
+    overview.oddFooter.right.text = "หน้า &P จาก &N"
+    overview.sheet_view.zoomScale = 80
 
     output = BytesIO()
     workbook.save(output)
@@ -4375,38 +4718,137 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
     group_rows = payload.get("time_group_rows", []) or []
     employee_rows = payload.get("time_employee_rows", []) or []
     records = payload.get("time_group_records", []) or []
-    _, _, _, section = pdf_styles()
+    _, _, pdf_normal, section = pdf_styles()
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=landscape(A4),
         leftMargin=15 * mm,
         rightMargin=15 * mm,
-        topMargin=14 * mm,
-        bottomMargin=16 * mm,
+        topMargin=31 * mm,
+        bottomMargin=18 * mm,
     )
-    story = report_header_story(
-        "Time Group Report",
-        f"Date range {format_report_date(start_date)} - {format_report_date(end_date)} | Group {payload.get('group_label', 'All groups')}",
-        payload,
-    )
+    story = []
+    dark_green = colors.HexColor("#075B44")
+    brand_green = colors.HexColor("#0F8A55")
+    mint = colors.HexColor("#D1FAE5")
+    pale = colors.HexColor("#F8FAFC")
+    line_color = colors.HexColor("#D8E2EA")
 
-    def add_table(title: str, headers: list[str], rows: list[list], widths: list[float] | None = None):
+    def group_employee_count(row: dict) -> int:
+        value = row.get("employees", 0)
+        if isinstance(value, (int, float)):
+            return int(value)
+        group_name = str(row.get("pay_group") or "")
+        return len({
+            str(item.get("emp_code") or item.get("fullname") or "")
+            for item in employee_rows
+            if str(item.get("pay_group") or "") == group_name
+        })
+
+    total_employees = len({
+        str(row.get("emp_code") or row.get("fullname") or "")
+        for row in employee_rows
+        if row.get("emp_code") or row.get("fullname")
+    })
+    total_normal_hours = sum(safe_float(row.get("normal_hours")) for row in group_rows)
+    total_ot_hours = sum(safe_float(row.get("ot_hours")) for row in group_rows)
+    total_hours = total_normal_hours + total_ot_hours
+    total_amount = sum(safe_float(row.get("amount")) for row in group_rows)
+    total_bonus = sum(safe_float(row.get("bonus_amount")) for row in group_rows)
+    total_deduction = sum(safe_float(row.get("deduction_amount")) for row in group_rows)
+    total_net = sum(safe_float(row.get("net_amount", row.get("amount"))) for row in group_rows)
+
+    meta = Table(
+        [[
+            Paragraph(
+                f"<b>ช่วงรายงาน</b><br/>{format_report_date(start_date)} - {format_report_date(end_date)}",
+                pdf_normal,
+            ),
+            Paragraph(
+                f"<b>ตัวกรอง</b><br/>{xml_escape(str(payload.get('group_label') or 'ทุกกลุ่ม'))}",
+                pdf_normal,
+            ),
+            Paragraph(f"<b>ข้อมูลการพิมพ์</b><br/>{xml_escape(export_meta_text(payload))}", pdf_normal),
+        ]],
+        colWidths=[78 * mm, 68 * mm, 121 * mm],
+    )
+    meta.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), mint),
+        ("BOX", (0, 0), (-1, -1), 0.4, line_color),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, line_color),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([meta, Spacer(1, 5 * mm)])
+
+    if options["summary"]:
+        metric_style = getSampleStyleSheet()["BodyText"]
+        metric_style.fontName = THAI_FONT
+        metric_style.fontSize = 8
+        metric_style.leading = 12
+        metrics = [
+            Paragraph(f"<font color='#64748B'>พนักงาน</font><br/><font size='16' color='#047857'><b>{total_employees:,} คน</b></font>", metric_style),
+            Paragraph(f"<font color='#64748B'>ชั่วโมงทำงาน</font><br/><font size='16' color='#1D4ED8'><b>{total_hours:,.1f} ชม.</b></font>", metric_style),
+            Paragraph(f"<font color='#64748B'>รายได้ก่อนหัก</font><br/><font size='16' color='#C2410C'><b>{money(total_amount)} บาท</b></font>", metric_style),
+            Paragraph(f"<font color='#64748B'>ยอดรับสุทธิ</font><br/><font size='16' color='#15803D'><b>{money(total_net)} บาท</b></font>", metric_style),
+        ]
+        metric_table = Table([metrics], colWidths=[66.75 * mm] * 4, rowHeights=[21 * mm])
+        metric_table.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.4, line_color),
+            ("INNERGRID", (0, 0), (-1, -1), 0.4, line_color),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#ECFDF5")),
+            ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#EFF6FF")),
+            ("BACKGROUND", (2, 0), (2, 0), colors.HexColor("#FFF7ED")),
+            ("BACKGROUND", (3, 0), (3, 0), colors.HexColor("#F0FDF4")),
+        ]))
+        story.extend([metric_table, Spacer(1, 5 * mm)])
+
+    def add_table(
+        title: str,
+        headers: list[str],
+        rows: list[list],
+        widths: list[float] | None = None,
+        total_row: list | None = None,
+    ):
+        if story:
+            story.append(Spacer(1, 2 * mm))
         table_rows = [headers] + rows
-        if len(table_rows) == 1:
+        if total_row is not None:
+            table_rows.append(total_row)
+        elif len(table_rows) == 1:
             table_rows.append(["-" for _ in headers])
         col_widths = widths or [(267 / len(headers)) * mm for _ in headers]
         table = Table(table_rows, repeatRows=1, colWidths=col_widths)
         set_pdf_table_style(table, 1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), brand_green),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, pale]),
+            ("GRID", (0, 0), (-1, -1), 0.35, line_color),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        if total_row is not None:
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, -1), (-1, -1), mint),
+                ("TEXTCOLOR", (0, -1), (-1, -1), dark_green),
+                ("FONTNAME", (0, -1), (-1, -1), THAI_FONT_BOLD),
+                ("LINEABOVE", (0, -1), (-1, -1), 1, dark_green),
+            ]))
         story.extend([Paragraph(title, section), table, Spacer(1, 7 * mm)])
 
     if options["summary"]:
         add_table(
-            "Summary By Group",
-            ["Group", "Employees", "Records", "Net time", "Normal", "OT", "Total", "Bonus", "Deduct", "Net"],
+            "สรุปตามกลุ่ม",
+            ["กลุ่ม", "พนักงาน", "รายการ", "เวลาสุทธิ", "ชม.ปกติ", "OT", "ก่อนหัก", "เงินเพิ่ม", "รายการหัก", "สุทธิ"],
             [[
                 row.get("pay_group", "-"),
-                report_number(row.get("employees", 0), 0),
+                report_number(group_employee_count(row), 0),
                 report_number(row.get("records", 0), 0),
                 minutes_text(row.get("net_minutes", 0)),
                 report_number(row.get("normal_hours", 0)),
@@ -4416,15 +4858,28 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
                 money(row.get("deduction_amount", 0)),
                 money(row.get("net_amount", row.get("amount", 0))),
             ] for row in group_rows],
+            [38 * mm, 18 * mm, 18 * mm, 25 * mm, 22 * mm, 18 * mm, 30 * mm, 27 * mm, 27 * mm, 30 * mm],
+            [
+                "รวมทั้งหมด",
+                report_number(total_employees, 0),
+                report_number(sum(safe_float(row.get("records")) for row in group_rows), 0),
+                minutes_text(sum(safe_float(row.get("net_minutes")) for row in group_rows)),
+                report_number(total_normal_hours),
+                report_number(total_ot_hours),
+                money(total_amount),
+                money(total_bonus),
+                money(total_deduction),
+                money(total_net),
+            ],
         )
 
     if options["employees"]:
         add_table(
-            "Employee Details",
-            ["Group", "Code", "Name", "Days", "Net time", "Normal", "OT", "Total", "Bonus", "Deduct", "Net"],
+            "สรุปรายบุคคล",
+            ["กลุ่ม", "รหัส", "ชื่อพนักงาน", "วัน", "เวลาสุทธิ", "ชม.ปกติ", "OT", "ก่อนหัก", "เงินเพิ่ม", "รายการหัก", "สุทธิ"],
             [[
                 row.get("pay_group", "-"),
-                row.get("emp_code", "-"),
+                str(row.get("emp_code") or "-"),
                 row.get("fullname", "-"),
                 report_number(row.get("records", 0), 0),
                 minutes_text(row.get("net_minutes", 0)),
@@ -4435,28 +4890,78 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
                 money(row.get("deduction_amount", 0)),
                 money(row.get("net_amount", row.get("amount", 0))),
             ] for row in employee_rows],
+            [31 * mm, 21 * mm, 34 * mm, 14 * mm, 22 * mm, 19 * mm, 15 * mm, 27 * mm, 25 * mm, 25 * mm, 28 * mm],
         )
 
     if options["details"]:
+        if options["summary"] or options["employees"]:
+            story.append(PageBreak())
         add_table(
-            "Time Records",
-            ["Date", "Group", "Code", "Name", "In", "Out", "Net", "OT rate", "Total"],
+            "รายละเอียดเวลาเข้า-ออก",
+            ["วันที่", "กลุ่ม", "รหัส", "ชื่อพนักงาน", "เข้า", "ออก", "เวลาสุทธิ", "อัตรา OT", "ยอดเงิน", "สถานะ"],
             [[
-                record.get("record_date", ""),
+                format_report_date(record.get("record_date", "")),
                 record.get("employee_type_label", ""),
-                record.get("emp_code", ""),
+                str(record.get("emp_code") or ""),
                 record.get("fullname", ""),
                 record.get("clock_in", ""),
                 record.get("clock_out", ""),
                 minutes_text(record.get("net_minutes", 0)),
                 report_number(record.get("ot_hourly_rate", 0), 0),
                 money(record.get("total_amount", 0)),
+                " / ".join(
+                    label
+                    for condition, label in [
+                        (is_late_time(record.get("clock_in")), "มาสาย"),
+                        (is_early_out_time(record.get("clock_out")), "ออกก่อน"),
+                    ]
+                    if condition
+                ) or "ปกติ",
             ] for record in records],
+            [25 * mm, 35 * mm, 22 * mm, 38 * mm, 18 * mm, 18 * mm, 24 * mm, 20 * mm, 25 * mm, 24 * mm],
         )
 
-    if len(story) <= 4:
-        story.append(Paragraph("No selected report sections.", section))
-    doc.build(story)
+    if not any(options.values()):
+        story.append(Paragraph("ไม่ได้เลือกส่วนรายงานสำหรับส่งออก", section))
+
+    def draw_page(canvas_obj, document):
+        page_width, page_height = landscape(A4)
+        canvas_obj.saveState()
+        canvas_obj.setFillColor(dark_green)
+        canvas_obj.rect(0, page_height - 22 * mm, page_width, 22 * mm, fill=1, stroke=0)
+        logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+        if logo_path.exists():
+            try:
+                canvas_obj.drawImage(
+                    str(logo_path),
+                    12 * mm,
+                    page_height - 19 * mm,
+                    width=15 * mm,
+                    height=15 * mm,
+                    preserveAspectRatio=True,
+                    mask="auto",
+                )
+            except Exception:
+                pass
+        canvas_obj.setFont(THAI_FONT_BOLD, 15)
+        canvas_obj.setFillColor(colors.white)
+        canvas_obj.drawString(31 * mm, page_height - 10 * mm, COMPANY_NAME)
+        canvas_obj.setFont(THAI_FONT, 8)
+        canvas_obj.setFillColor(mint)
+        canvas_obj.drawString(31 * mm, page_height - 16 * mm, "รายงานแบบกลุ่มตามเวลา")
+        canvas_obj.setStrokeColor(brand_green)
+        canvas_obj.line(15 * mm, 12 * mm, page_width - 15 * mm, 12 * mm)
+        canvas_obj.setFont(THAI_FONT, 7.5)
+        canvas_obj.setFillColor(colors.HexColor("#475467"))
+        canvas_obj.drawString(
+            15 * mm,
+            7 * mm,
+            f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | {export_meta_text(payload)}",
+        )
+        canvas_obj.drawRightString(page_width - 15 * mm, 7 * mm, f"หน้า {document.page}")
+        canvas_obj.restoreState()
+
+    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
     return buffer.getvalue()
 
 
