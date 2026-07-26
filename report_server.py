@@ -5526,47 +5526,141 @@ def build_time_summary_excel(payload: dict) -> bytes:
     department_label = payload.get("department_label") or payload.get("department") or "ทุกแผนก"
     workbook = Workbook()
     overview = workbook.active
-    overview.title = "Time Summary"
-    overview.merge_cells("A1:H1")
-    overview["A1"] = COMPANY_NAME
-    overview["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
-    overview.merge_cells("A2:H2")
-    overview["A2"] = "รายงานสรุปเวลาเข้างาน"
-    overview["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
-    overview.merge_cells("A3:H3")
-    overview["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | แผนก {department_label}"
-    overview.merge_cells("A4:H4")
-    overview["A4"] = export_meta_text(payload)
-    add_excel_logo(overview, "I1")
-    overview.append([])
-    overview.append(["หัวข้อ", "ค่า"])
-    overview.append(["จำนวนรายการ", summary["records"]])
-    overview.append(["จำนวนพนักงาน", summary["employees"]])
-    overview.append(["จำนวนวัน", summary["days"]])
-    overview.append(["เวลาทำงานสุทธิ", summary["net_minutes"] / 60])
-    overview.append(["เวลาพักรวม", summary["break_minutes"] / 60])
-    overview.append(["มาสาย", summary["late"]])
-    overview.append(["ออกก่อน", summary["early"]])
-    style_excel_report_sheet(overview, [6], [30, 22, 14, 14, 14, 14, 14, 14, 14])
+    overview.title = "ภาพรวม"
+    font_name = "Sarabun"
+    dark_green = "075B44"
+    brand_green = "0F8A55"
+    mint = "D1FAE5"
+    pale = "F8FAFC"
+    line_color = "D8E2EA"
+    thin = Side(style="thin", color=line_color)
+    medium = Side(style="medium", color=dark_green)
+    table_border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    daily = workbook.create_sheet("Daily Summary")
+    def setup_time_sheet(sheet, subtitle: str, last_column: str, freeze_at: str | None = None):
+        sheet.sheet_view.showGridLines = False
+        sheet.merge_cells("A1:B3")
+        sheet["A1"] = "PF"
+        sheet["A1"].fill = PatternFill("solid", fgColor=brand_green)
+        sheet["A1"].font = Font(name=font_name, bold=True, size=25, color="FFFFFF")
+        sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        sheet.merge_cells(f"C1:{last_column}2")
+        sheet["C1"] = COMPANY_NAME
+        sheet["C1"].fill = PatternFill("solid", fgColor=dark_green)
+        sheet["C1"].font = Font(name=font_name, bold=True, size=20, color="FFFFFF")
+        sheet["C1"].alignment = Alignment(horizontal="left", vertical="center")
+        sheet.merge_cells(f"C3:{last_column}3")
+        sheet["C3"] = subtitle
+        sheet["C3"].fill = PatternFill("solid", fgColor=dark_green)
+        sheet["C3"].font = Font(name=font_name, size=10, color=mint)
+        sheet["C3"].alignment = Alignment(horizontal="left", vertical="center")
+        add_excel_logo(sheet, "A1")
+        sheet.freeze_panes = freeze_at
+        sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.page_setup.orientation = "landscape"
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.oddFooter.left.text = SYSTEM_NAME
+        sheet.oddFooter.center.text = "รายงานสรุปเวลาเข้างาน"
+        sheet.oddFooter.right.text = "หน้า &P จาก &N"
+        for row_index in (1, 2, 3):
+            sheet.row_dimensions[row_index].height = 23
+
+    setup_time_sheet(overview, "รายงานสรุปเวลาเข้างาน • Attendance Summary", "L", "A13")
+    overview.merge_cells("A5:L5")
+    overview["A5"] = (
+        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
+        f"  |  แผนก {department_label}  |  {export_meta_text(payload)}"
+    )
+    overview["A5"].fill = PatternFill("solid", fgColor=mint)
+    overview["A5"].font = Font(name=font_name, bold=True, size=10, color=dark_green)
+    overview["A5"].alignment = Alignment(vertical="center", wrap_text=True)
+    overview.row_dimensions[5].height = 28
+    cards = [
+        ("A7:C7", "A8:C9", "จำนวนพนักงาน", summary["employees"], "ECFDF5", "047857", '0 "คน"'),
+        ("D7:F7", "D8:F9", "ชั่วโมงทำงานสุทธิ", summary["net_minutes"] / 60, "EFF6FF", "1D4ED8", '#,##0.0 "ชม."'),
+        ("G7:I7", "G8:I9", "จำนวนรายการ", summary["records"], "FFF7ED", "C2410C", '0 "รายการ"'),
+        ("J7:L7", "J8:L9", "มาสาย / ออกก่อน", f"{summary['late']} / {summary['early']} ครั้ง", "F0FDF4", "15803D", "@"),
+    ]
+    for label_range, value_range, label, value, fill_color, font_color, number_format in cards:
+        overview.merge_cells(label_range)
+        overview.merge_cells(value_range)
+        label_cell = overview[label_range.split(":")[0]]
+        value_cell = overview[value_range.split(":")[0]]
+        label_cell.value = label
+        value_cell.value = value
+        for row in overview[f"{label_range.split(':')[0]}:{value_range.split(':')[1]}"]:
+            for cell in row:
+                cell.fill = PatternFill("solid", fgColor=fill_color)
+                cell.border = table_border
+        label_cell.font = Font(name=font_name, bold=True, size=10, color="64748B")
+        label_cell.alignment = Alignment(horizontal="center", vertical="center")
+        value_cell.font = Font(name=font_name, bold=True, size=17, color=font_color)
+        value_cell.alignment = Alignment(horizontal="center", vertical="center")
+        value_cell.number_format = number_format
+    overview.merge_cells("A11:L11")
+    overview["A11"] = "สรุปรายวัน"
+    overview["A11"].fill = PatternFill("solid", fgColor=dark_green)
+    overview["A11"].font = Font(name=font_name, bold=True, size=12, color="FFFFFF")
+    overview.append([])
+    overview.append(["วันที่", "จำนวนรายการ", "จำนวนพนักงาน", "ชั่วโมงสุทธิ", "มาสาย", "ออกก่อน"])
+    for row in daily_rows:
+        overview.append([row["date"], row["records"], len(row["employees"]), row["net_minutes"] / 60, row["late"], row["early"]])
+    total_row = overview.max_row + 1
+    overview.cell(total_row, 1, "รวมทั้งหมด")
+    overview.cell(total_row, 2, summary["records"])
+    overview.cell(total_row, 3, summary["employees"])
+    overview.cell(total_row, 4, summary["net_minutes"] / 60)
+    overview.cell(total_row, 5, summary["late"])
+    overview.cell(total_row, 6, summary["early"])
+    style_excel_report_sheet(overview, [13], [18] * 12)
+    for cell in overview[total_row]:
+        if cell.value is not None:
+            cell.fill = PatternFill("solid", fgColor=mint)
+            cell.font = Font(name=font_name, bold=True, color=dark_green)
+            cell.border = Border(top=medium, bottom=medium)
+
+    daily = workbook.create_sheet("สรุปรายวัน")
+    setup_time_sheet(daily, "สรุปเวลาเข้างานแยกตามวัน", "F", "A6")
+    daily.append([])
     daily.append(["วันที่", "จำนวนรายการ", "จำนวนพนักงาน", "ชั่วโมงสุทธิ", "มาสาย", "ออกก่อน"])
     for row in daily_rows:
         daily.append([row["date"], row["records"], len(row["employees"]), row["net_minutes"] / 60, row["late"], row["early"]])
-    style_excel_report_sheet(daily, [1], [15, 16, 18, 16, 12, 12])
+    style_excel_report_sheet(daily, [5], [16, 16, 18, 18, 14, 14])
 
-    employee_sheet = workbook.create_sheet("Employee Summary")
+    employee_sheet = workbook.create_sheet("สรุปพนักงาน")
+    setup_time_sheet(employee_sheet, "สรุปเวลาเข้างานรายบุคคล", "J", "A6")
+    employee_sheet.append([])
     employee_sheet.append(["รหัสพนักงาน", "ชื่อพนักงาน", "แผนก", "จำนวนวัน", "จำนวนรายการ", "ชั่วโมงสุทธิ", "มาสาย", "ออกก่อน", "เข้าเร็วสุด", "ออกช้าสุด"])
     for row in employee_rows:
-        employee_sheet.append([row["emp_code"], row["fullname"], row["department"], len(row["days"]), row["records"], row["net_minutes"] / 60, row["late"], row["early"], row["first_in"], row["last_out"]])
-    style_excel_report_sheet(employee_sheet, [1], [16, 25, 16, 12, 14, 14, 12, 12, 14, 14])
+        employee_sheet.append([str(row["emp_code"]), row["fullname"], row["department"], len(row["days"]), row["records"], row["net_minutes"] / 60, row["late"], row["early"], row["first_in"], row["last_out"]])
+    style_excel_report_sheet(employee_sheet, [5], [17, 31, 18, 12, 15, 17, 13, 13, 15, 15])
+    for row_index in range(6, employee_sheet.max_row + 1):
+        employee_sheet.cell(row_index, 1).number_format = "@"
+        name_cell = employee_sheet.cell(row_index, 2)
+        name_cell.font = Font(name=font_name, bold=True, size=10, color=dark_green)
+        name_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-    detail = workbook.create_sheet("Details")
+    detail = workbook.create_sheet("รายละเอียด")
+    setup_time_sheet(detail, "รายละเอียดเวลาเข้า-ออก • ชื่อจากทะเบียนพนักงาน", "J", "A6")
+    detail.append([])
     detail.append(["วันที่", "รหัสพนักงาน", "ชื่อพนักงาน", "แผนก", "เข้า", "ออก", "พัก(นาที)", "สุทธิ(นาที)", "ชั่วโมง", "ผู้บันทึก"])
     for record in records:
         net_minutes = safe_float(record.get("net_minutes"))
-        detail.append([record.get("record_date", ""), record.get("emp_code", ""), record.get("fullname", ""), record.get("department", ""), record.get("clock_in", ""), record.get("clock_out", ""), safe_float(record.get("break_minutes")), net_minutes, net_minutes / 60, record.get("created_by", "")])
-    style_excel_report_sheet(detail, [1], [14, 16, 25, 16, 12, 12, 12, 14, 12, 20])
+        detail.append([record.get("record_date", ""), str(record.get("emp_code") or ""), record.get("fullname", ""), record.get("department", ""), record.get("clock_in", ""), record.get("clock_out", ""), safe_float(record.get("break_minutes")), net_minutes, net_minutes / 60, record.get("created_by", "")])
+    style_excel_report_sheet(detail, [5], [15, 17, 31, 18, 12, 12, 14, 16, 14, 20])
+    for row_index in range(6, detail.max_row + 1):
+        detail.cell(row_index, 2).number_format = "@"
+        name_cell = detail.cell(row_index, 3)
+        name_cell.font = Font(name=font_name, bold=True, size=10, color=dark_green)
+        name_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    for index, width in enumerate([18] * 12, 1):
+        overview.column_dimensions[get_column_letter(index)].width = width
+    overview.print_area = f"A1:L{overview.max_row}"
+    overview.print_title_rows = "1:13"
+    overview.sheet_view.zoomScale = 80
 
     output = BytesIO()
     workbook.save(output)
@@ -5578,38 +5672,69 @@ def build_time_summary_pdf(payload: dict) -> bytes:
     records = filtered_time_records(payload)
     summary, daily_rows, employee_rows = summarize_time(records)
     department_label = payload.get("department_label") or payload.get("department") or "ทุกแผนก"
-    _, _, _, section = pdf_styles()
+    _, _, pdf_normal, section = pdf_styles()
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=landscape(A4),
-        leftMargin=15 * mm,
-        rightMargin=15 * mm,
-        topMargin=14 * mm,
-        bottomMargin=16 * mm,
+        leftMargin=14 * mm,
+        rightMargin=14 * mm,
+        topMargin=31 * mm,
+        bottomMargin=18 * mm,
     )
-    story = report_header_story(
-        "รายงานสรุปเวลาเข้างาน",
-        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | แผนก {department_label}",
-        payload,
+    story = []
+    dark_green = colors.HexColor("#075B44")
+    brand_green = colors.HexColor("#0F8A55")
+    mint = colors.HexColor("#D1FAE5")
+    pale = colors.HexColor("#F8FAFC")
+    line_color = colors.HexColor("#D8E2EA")
+    meta = Table(
+        [[
+            Paragraph(f"<b>ช่วงรายงาน</b><br/>{format_report_date(start_date)} - {format_report_date(end_date)}", pdf_normal),
+            Paragraph(f"<b>แผนก</b><br/>{xml_escape(str(department_label))}", pdf_normal),
+            Paragraph(f"<b>ข้อมูลการพิมพ์</b><br/>{xml_escape(export_meta_text(payload))}", pdf_normal),
+        ]],
+        colWidths=[78 * mm, 64 * mm, 127 * mm],
     )
-    overview = Table(
-        [
-            ["รายการ", "พนักงาน", "จำนวนวัน", "เวลาสุทธิ", "เวลาพัก", "มาสาย", "ออกก่อน"],
-            [
-                report_number(summary["records"], 0),
-                report_number(summary["employees"], 0),
-                report_number(summary["days"], 0),
-                minutes_text(summary["net_minutes"]),
-                minutes_text(summary["break_minutes"]),
-                report_number(summary["late"], 0),
-                report_number(summary["early"], 0),
-            ],
-        ],
-        colWidths=[28 * mm, 28 * mm, 28 * mm, 43 * mm, 43 * mm, 28 * mm, 28 * mm],
-    )
-    set_pdf_table_style(overview, 0)
-    story += [Paragraph("ภาพรวม", section), overview, Spacer(1, 7 * mm)]
+    meta.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), mint),
+        ("GRID", (0, 0), (-1, -1), 0.35, line_color),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([meta, Spacer(1, 5 * mm)])
+    metric_style = getSampleStyleSheet()["BodyText"]
+    metric_style.fontName = THAI_FONT
+    metric_style.fontSize = 8
+    metric_style.leading = 20
+    metric_values = [
+        ("พนักงาน", f"{report_number(summary['employees'], 0)} คน", "#047857"),
+        ("เวลาทำงานสุทธิ", minutes_text(summary["net_minutes"]), "#1D4ED8"),
+        ("จำนวนรายการ", f"{report_number(summary['records'], 0)} รายการ", "#C2410C"),
+        ("มาสาย / ออกก่อน", f"{report_number(summary['late'], 0)} / {report_number(summary['early'], 0)} ครั้ง", "#15803D"),
+    ]
+    metric_cells = [
+        Paragraph(
+            f"<font color='#64748B'>{label}</font><br/><font size='15' color='{color}'><b>{value}</b></font>",
+            metric_style,
+        )
+        for label, value, color in metric_values
+    ]
+    metric_table = Table([metric_cells], colWidths=[67.25 * mm] * 4, rowHeights=[23 * mm])
+    metric_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.35, line_color),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#ECFDF5")),
+        ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#EFF6FF")),
+        ("BACKGROUND", (2, 0), (2, 0), colors.HexColor("#FFF7ED")),
+        ("BACKGROUND", (3, 0), (3, 0), colors.HexColor("#F0FDF4")),
+    ]))
+    story.extend([metric_table, Spacer(1, 5 * mm)])
 
     daily_table_rows = [["วันที่", "รายการ", "พนักงาน", "เวลาสุทธิ", "มาสาย", "ออกก่อน"]]
     for row in daily_rows:
@@ -5618,17 +5743,75 @@ def build_time_summary_pdf(payload: dict) -> bytes:
         daily_table_rows.append(["-", "0", "0", "0 ชม. 0 นาที", "0", "0"])
     daily_table = Table(daily_table_rows, repeatRows=1, colWidths=[38 * mm, 32 * mm, 35 * mm, 55 * mm, 32 * mm, 32 * mm])
     set_pdf_table_style(daily_table, 1)
+    daily_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), brand_green),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, pale]),
+        ("GRID", (0, 0), (-1, -1), 0.35, line_color),
+    ]))
     story += [Paragraph("สรุปรายวัน", section), daily_table, Spacer(1, 7 * mm)]
 
     employee_table_rows = [["รหัส", "ชื่อพนักงาน", "แผนก", "วัน", "รายการ", "เวลาสุทธิ", "สาย", "ออกก่อน"]]
     for row in employee_rows[:80]:
-        employee_table_rows.append([row["emp_code"], row["fullname"], row["department"], report_number(len(row["days"]), 0), report_number(row["records"], 0), minutes_text(row["net_minutes"]), report_number(row["late"], 0), report_number(row["early"], 0)])
+        employee_table_rows.append([
+            str(row["emp_code"]),
+            Paragraph(
+                f"<b><font color='#075B44'>{xml_escape(str(row['fullname'] or '-'))}</font></b>",
+                pdf_normal,
+            ),
+            row["department"],
+            report_number(len(row["days"]), 0),
+            report_number(row["records"], 0),
+            minutes_text(row["net_minutes"]),
+            report_number(row["late"], 0),
+            report_number(row["early"], 0),
+        ])
     if len(employee_table_rows) == 1:
         employee_table_rows.append(["-", "-", "-", "0", "0", "0 ชม. 0 นาที", "0", "0"])
-    employee_table = Table(employee_table_rows, repeatRows=1, colWidths=[24 * mm, 48 * mm, 34 * mm, 20 * mm, 25 * mm, 45 * mm, 20 * mm, 25 * mm])
+    employee_table = Table(employee_table_rows, repeatRows=1, colWidths=[24 * mm, 58 * mm, 34 * mm, 20 * mm, 25 * mm, 42 * mm, 20 * mm, 24 * mm])
     set_pdf_table_style(employee_table, 3)
+    employee_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), brand_green),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, pale]),
+        ("GRID", (0, 0), (-1, -1), 0.35, line_color),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ALIGN", (1, 1), (1, -1), "LEFT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
     story += [Paragraph("สรุปรายพนักงาน", section), employee_table]
-    doc.build(story)
+
+    def draw_page(canvas_obj, document):
+        page_width, page_height = landscape(A4)
+        canvas_obj.saveState()
+        canvas_obj.setFillColor(dark_green)
+        canvas_obj.rect(0, page_height - 22 * mm, page_width, 22 * mm, fill=1, stroke=0)
+        logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+        if logo_path.exists():
+            try:
+                canvas_obj.drawImage(
+                    str(logo_path), 12 * mm, page_height - 19 * mm,
+                    width=15 * mm, height=15 * mm, preserveAspectRatio=True, mask="auto",
+                )
+            except Exception:
+                pass
+        canvas_obj.setFont(THAI_FONT_BOLD, 15)
+        canvas_obj.setFillColor(colors.white)
+        canvas_obj.drawString(31 * mm, page_height - 10 * mm, COMPANY_NAME)
+        canvas_obj.setFont(THAI_FONT, 8)
+        canvas_obj.setFillColor(mint)
+        canvas_obj.drawString(31 * mm, page_height - 16 * mm, "รายงานสรุปเวลาเข้างาน")
+        canvas_obj.setStrokeColor(brand_green)
+        canvas_obj.line(14 * mm, 12 * mm, page_width - 14 * mm, 12 * mm)
+        canvas_obj.setFont(THAI_FONT, 7.5)
+        canvas_obj.setFillColor(colors.HexColor("#475467"))
+        canvas_obj.drawString(
+            14 * mm, 7 * mm,
+            f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | {export_meta_text(payload)}",
+        )
+        canvas_obj.drawRightString(page_width - 14 * mm, 7 * mm, f"หน้า {document.page}")
+        canvas_obj.restoreState()
+
+    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
     return buffer.getvalue()
 
 
