@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 
 from openpyxl import load_workbook
+from pypdf import PdfReader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import report_server
@@ -76,6 +77,11 @@ def test_personal_exports_use_selected_fruit_columns():
     )
     assert mangosteen_pdf.startswith(b"%PDF")
     assert durian_pdf.startswith(b"%PDF")
+    for content in [mangosteen_pdf, durian_pdf]:
+        reader = PdfReader(BytesIO(content))
+        assert len(reader.pages) == 1
+        page = reader.pages[0]
+        assert float(page.mediabox.width) > float(page.mediabox.height)
 
 
 if __name__ == "__main__":

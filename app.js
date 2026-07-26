@@ -9313,6 +9313,7 @@ function renderPersonalPileRow(item, fruitId = personalReportFruitFilter) {
 
 function buildPersonalReportPayload() {
   const range = normalizeDateRange(personalReportStartDate, personalReportEndDate);
+  const user = getSession()?.user;
   return {
     employee_id: Number(personalReportEmployeeId),
     start_date: range.startDate,
@@ -9320,7 +9321,9 @@ function buildPersonalReportPayload() {
     fruit_type: personalReportFruitFilter,
     employees: getEmployees(),
     production_records: getProductionRecords(),
-    deduction_records: getAdjustmentRecordsForRange("production", range.startDate, range.endDate)
+    deduction_records: getAdjustmentRecordsForRange("production", range.startDate, range.endDate),
+    printed_by: user?.fullname || user?.username || "ระบบรายงาน",
+    printed_by_position: getExportPositionLabel(user)
   };
 }
 
@@ -12577,7 +12580,7 @@ function renderPersonalReportFilter(context) {
                 Export Excel ${escapeHtml(selectedFruit?.label || "ผลผลิต")}
               </button>
               <button class="btn btn-primary report-primary-button" id="exportPersonalPdf" type="button" ${context.selectedEmployee ? "" : "disabled"}>
-                Export PDF ${escapeHtml(selectedFruit?.label || "ผลผลิต")}
+                Export ใบสรุป PDF ${escapeHtml(selectedFruit?.label || "ผลผลิต")}
               </button>
               `
               : `
@@ -12609,8 +12612,8 @@ function renderPersonalReportFilter(context) {
                   `
                   : `
                     <button class="time-export-choice" id="exportPersonalProductionPdf" type="button">
-                      <strong>Export รายงานน้ำหนัก</strong>
-                      <span>ไฟล์ PDF รายงานผลงาน/น้ำหนักเฉพาะพนักงานที่เลือก</span>
+                      <strong>Export ใบสรุปผลผลิต</strong>
+                      <span>ไฟล์ PDF A4 แนวนอน ซ้ายต้นฉบับ / ขวาสำเนาสำหรับเซ็นรับเงิน</span>
                     </button>
                   `
               }
@@ -12957,7 +12960,7 @@ function bindPersonalReportEvents() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(buildPersonalReportPayload())
       });
-      setPersonalReportMessage("ดาวน์โหลด PDF รายงานน้ำหนักรายบุคคลแล้ว");
+      setPersonalReportMessage("ดาวน์โหลด PDF ใบสรุปผลผลิต ต้นฉบับ/สำเนาแล้ว");
       personalReportExportMenuOpen = false;
       render();
     } catch (error) {
@@ -12976,7 +12979,7 @@ function bindPersonalReportEvents() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(buildPersonalReportPayload())
       });
-      setPersonalReportMessage("ดาวน์โหลด PDF รายบุคคลแล้ว");
+      setPersonalReportMessage("ดาวน์โหลด PDF ใบสรุปผลผลิต ต้นฉบับ/สำเนาแล้ว");
       render();
     } catch (error) {
       personalReportExportError(error);

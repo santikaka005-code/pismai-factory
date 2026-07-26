@@ -67,7 +67,12 @@ const reportContext = {
 const filterHtml = context.renderPersonalReportFilter(reportContext);
 assert.match(filterHtml, /id="personalReportFruit"/);
 assert.match(filterHtml, /class="personal-report-actions"/);
-assert.match(filterHtml, /Export PDF มังคุด/);
+assert.match(filterHtml, /Export .*PDF มังคุด/);
+
+context.personalReportExportMenuOpen = true;
+const openExportMenuHtml = context.renderPersonalReportFilter(reportContext);
+assert.match(openExportMenuHtml, /id="exportPersonalProductionPdf"/);
+assert.match(openExportMenuHtml, /A4/);
 
 const mangosteenHtml = context.renderPersonalProductionSummaryTab(reportContext);
 assert.equal(context.lastFruit, "mangosteen");

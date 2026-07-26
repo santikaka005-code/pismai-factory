@@ -1727,7 +1727,7 @@ def _build_employee_range_pdf_legacy(
     return buffer.getvalue()
 
 
-def build_employee_range_pdf(
+def _build_employee_range_pdf_report(
     data: dict,
     start_date: str,
     end_date: str,
@@ -1917,6 +1917,242 @@ def build_employee_range_pdf(
         canvas.restoreState()
 
     doc.build(story, onFirstPage=draw_footer, onLaterPages=draw_footer)
+    return buffer.getvalue()
+
+
+def build_employee_range_pdf(
+    data: dict,
+    start_date: str,
+    end_date: str,
+    employee_id: int,
+    fruit_type: str = "all",
+) -> bytes:
+    employee = find_employee(data, employee_id) or {}
+    records = employee_range_records(data, start_date, end_date, employee_id, fruit_type)
+    daily_summaries = employee_daily_summaries(records)
+    record_counts: dict[str, int] = {}
+    for record in records:
+        record_date = str(record.get("record_date") or record.get("date") or "")
+        record_counts[record_date] = record_counts.get(record_date, 0) + 1
+
+    total_water = sum(item["water_weight"] for item in daily_summaries)
+    total_flower = sum(item["flower_weight"] for item in daily_summaries)
+    total_weight = sum(
+        item.get("total_weight", item["water_weight"] + item["flower_weight"])
+        for item in daily_summaries
+    )
+    gross_amount = sum(item["total_amount"] for item in daily_summaries)
+    deduction_rows = deduction_records_for(
+        data, "production", employee_id, employee.get("emp_code"), start_date, end_date
+    )
+    bonus_rows = bonus_records_for(
+        data, "production", employee_id, employee.get("emp_code"), start_date, end_date
+    )
+    deduction_amount = deduction_total(deduction_rows)
+    bonus_amount = deduction_total(bonus_rows)
+    net_amount = max(0, gross_amount + bonus_amount - deduction_amount)
+    fruit_label = selected_production_fruit_label({"fruit_type": fruit_type})
+    water_label, flower_label = production_report_weight_labels({"fruit_type": fruit_type})
+    is_durian = str(fruit_type or "all").lower() == "durian"
+    printed_by = str(data.get("printed_by") or "ระบบรายงาน").strip()
+    printed_by_position = str(data.get("printed_by_position") or "ฝ่ายทรัพยากรบุคคล").strip()
+    printed_by_text = " ".join(value for value in [printed_by, printed_by_position] if value)
+    now = datetime.now()
+
+    buffer = BytesIO()
+    page_width, page_height = landscape(A4)
+    pdf = canvas.Canvas(buffer, pagesize=landscape(A4))
+    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    margin = 8 * mm
+    gap = 7 * mm
+    divider_x = page_width / 2
+    panel_width = (page_width - (margin * 2) - gap) / 2
+    panel_height = page_height - (margin * 2)
+
+    def fit_text(value: object, max_width: float, size: float, bold: bool = False) -> tuple[str, float]:
+        font_name = THAI_FONT_BOLD if bold else THAI_FONT
+        text_value = str(value or "-")
+        fitted_size = size
+        while fitted_size > 5.5 and pdfmetrics.stringWidth(text_value, font_name, fitted_size) > max_width:
+            fitted_size -= 0.25
+        if pdfmetrics.stringWidth(text_value, font_name, fitted_size) <= max_width:
+            return text_value, fitted_size
+        while text_value and pdfmetrics.stringWidth(f"{text_value}...", font_name, fitted_size) > max_width:
+            text_value = text_value[:-1]
+        return f"{text_value}...", fitted_size
+
+    def text(x: float, y: float, value: object, size=8, bold=False, fill="#111827", max_width=None):
+        shown, shown_size = fit_text(value, max_width, size, bold) if max_width else (str(value), size)
+        pdf.setFillColor(colors.HexColor(fill))
+        pdf.setFont(THAI_FONT_BOLD if bold else THAI_FONT, shown_size)
+        pdf.drawString(x, y, shown)
+
+    def right_text(x: float, y: float, value: object, size=8, bold=False, fill="#111827", max_width=None):
+        shown, shown_size = fit_text(value, max_width, size, bold) if max_width else (str(value), size)
+        pdf.setFillColor(colors.HexColor(fill))
+        pdf.setFont(THAI_FONT_BOLD if bold else THAI_FONT, shown_size)
+        pdf.drawRightString(x, y, shown)
+
+    def draw_panel(x: float, y: float, is_copy: bool = False):
+        pdf.setStrokeColor(colors.HexColor("#0F7A3D"))
+        pdf.setLineWidth(1)
+        pdf.roundRect(x, y, panel_width, panel_height, 6, stroke=1, fill=0)
+        if is_copy:
+            pdf.saveState()
+            pdf.translate(x + panel_width / 2, y + panel_height / 2)
+            pdf.rotate(30)
+            pdf.setFillColor(colors.Color(0.06, 0.48, 0.24, alpha=0.08))
+            pdf.setFont(THAI_FONT_BOLD, 58)
+            pdf.drawCentredString(0, 0, "สำเนา")
+            pdf.restoreState()
+
+        cursor_y = y + panel_height - 12 * mm
+        if logo_path.exists():
+            try:
+                pdf.drawImage(
+                    str(logo_path),
+                    x + 5 * mm,
+                    cursor_y - 3 * mm,
+                    width=17 * mm,
+                    height=17 * mm,
+                    preserveAspectRatio=True,
+                    mask="auto",
+                )
+            except Exception:
+                pass
+        text(x + 25 * mm, cursor_y + 6 * mm, COMPANY_NAME, 11, True, "#0F7A3D", panel_width - 31 * mm)
+        text(x + 25 * mm, cursor_y, "ใบสรุปผลผลิตและค่าแรง", 10, True, "#0F7A3D")
+        text(x + 25 * mm, cursor_y - 5 * mm, "ต้นฉบับ" if not is_copy else "สำเนา", 8, True, "#667085")
+        pdf.setStrokeColor(colors.HexColor("#B8D8D1"))
+        pdf.line(x + 5 * mm, cursor_y - 9 * mm, x + panel_width - 5 * mm, cursor_y - 9 * mm)
+
+        meta_y = cursor_y - 17 * mm
+        receipt_number = f"PR-{start_date.replace('-', '')}-{employee.get('emp_code', '-')}"
+        text(x + 5 * mm, meta_y, f"เลขที่: {receipt_number}", 7.3, True, max_width=58 * mm)
+        text(x + 5 * mm, meta_y - 5 * mm, f"ช่วงวันที่: {format_report_date(start_date)} - {format_report_date(end_date)}", 7.3)
+        right_text(x + panel_width - 5 * mm, meta_y, f"ออกโดย: {printed_by_text}", 7.2, max_width=63 * mm)
+        right_text(x + panel_width - 5 * mm, meta_y - 5 * mm, now.strftime("%d/%m/%Y %H:%M"), 7.2)
+
+        employee_y = meta_y - 15 * mm
+        text(x + 5 * mm, employee_y, f"รหัสพนักงาน: {employee.get('emp_code', '-')}", 8, True, max_width=40 * mm)
+        text(x + 48 * mm, employee_y, f"ชื่อ: {employee.get('fullname', '-')}", 8, True, max_width=panel_width - 55 * mm)
+        text(x + 5 * mm, employee_y - 5 * mm, f"ผลไม้: {fruit_label}", 7.5)
+        right_text(
+            x + panel_width - 5 * mm,
+            employee_y - 5 * mm,
+            f"{len(daily_summaries)} วัน / {len(records)} รายการ",
+            7.5,
+            True,
+        )
+
+        table_y = employee_y - 13 * mm
+        if is_durian:
+            headers = ["วันที่", "รายการ", "น้ำหนักทุเรียน", "รวมเงิน"]
+            col_widths = [29, 21, 39, 34]
+        else:
+            headers = ["วันที่", "รายการ", water_label, flower_label, "รวม", "รวมเงิน"]
+            col_widths = [24, 16, 22, 22, 21, 25]
+        inner_width = panel_width - 10 * mm
+        scale = inner_width / (sum(col_widths) * mm)
+        col_widths = [width * mm * scale for width in col_widths]
+        pdf.setFillColor(colors.HexColor("#0F7A3D"))
+        pdf.rect(x + 5 * mm, table_y, inner_width, 7 * mm, stroke=0, fill=1)
+        col_x = x + 6 * mm
+        for header, width in zip(headers, col_widths):
+            text(col_x, table_y + 2.2 * mm, header, 6.2, True, "#FFFFFF", width - 2 * mm)
+            col_x += width
+
+        row_y = table_y - 6 * mm
+        visible_rows = daily_summaries[:10]
+        for row_index, item in enumerate(visible_rows):
+            if row_index % 2:
+                pdf.setFillColor(colors.HexColor("#F3FBF9"))
+                pdf.rect(x + 5 * mm, row_y - 1 * mm, inner_width, 5.5 * mm, stroke=0, fill=1)
+            pdf.setStrokeColor(colors.HexColor("#D8E5E1"))
+            pdf.line(x + 5 * mm, row_y - 1 * mm, x + panel_width - 5 * mm, row_y - 1 * mm)
+            if is_durian:
+                values = [
+                    format_report_date(item["date"]),
+                    record_counts.get(item["date"], 0),
+                    report_number(item.get("total_weight", 0)),
+                    report_number(item["total_amount"], 0),
+                ]
+            else:
+                values = [
+                    format_report_date(item["date"]),
+                    record_counts.get(item["date"], 0),
+                    report_number(item["water_weight"]),
+                    report_number(item["flower_weight"]),
+                    report_number(item.get("total_weight", 0)),
+                    report_number(item["total_amount"], 0),
+                ]
+            col_x = x + 6 * mm
+            for value, width in zip(values, col_widths):
+                text(col_x, row_y + 1 * mm, value, 6.2, max_width=width - 2 * mm)
+                col_x += width
+            row_y -= 5.5 * mm
+        if len(daily_summaries) > len(visible_rows):
+            text(
+                x + 6 * mm,
+                row_y + 1 * mm,
+                f"มีเพิ่มอีก {len(daily_summaries) - len(visible_rows)} วัน รวมอยู่ในยอดด้านล่าง",
+                6.2,
+                False,
+                "#667085",
+            )
+
+        adjustment_y = y + 66 * mm
+        adjustments = [
+            *[("เงินเพิ่ม", row.get("deduction_label", "เบี้ยขยัน"), row.get("amount", 0)) for row in bonus_rows],
+            *[("หัก", row.get("deduction_label", "-"), row.get("amount", 0)) for row in deduction_rows],
+        ]
+        if adjustments:
+            text(x + 6 * mm, adjustment_y, "รายการปรับยอด", 6.8, True, "#344054")
+            for index, (kind, label, amount) in enumerate(adjustments[:3]):
+                color = "#166534" if kind == "เงินเพิ่ม" else "#B42318"
+                text(
+                    x + 28 * mm,
+                    adjustment_y - (index * 4.2 * mm),
+                    f"{kind}: {label} {report_number(amount, 0)} บาท",
+                    6.3,
+                    False,
+                    color,
+                    panel_width - 36 * mm,
+                )
+            if len(adjustments) > 3:
+                right_text(
+                    x + panel_width - 6 * mm,
+                    adjustment_y,
+                    f"+{len(adjustments) - 3} รายการ",
+                    6.2,
+                    True,
+                    "#667085",
+                )
+
+        summary_y = y + 35 * mm
+        pdf.setFillColor(colors.HexColor("#E9F5EE"))
+        pdf.roundRect(x + 5 * mm, summary_y, panel_width - 10 * mm, 19 * mm, 4, stroke=0, fill=1)
+        text(x + 8 * mm, summary_y + 13 * mm, f"น้ำหนักรวม {report_number(total_weight)} กก.", 7.5, True, "#064E25")
+        text(x + 8 * mm, summary_y + 7.5 * mm, f"รวมก่อนปรับ {report_number(gross_amount, 0)} บาท", 7.5, True, "#064E25")
+        right_text(x + panel_width - 8 * mm, summary_y + 13 * mm, f"เบี้ยขยัน {report_number(bonus_amount, 0)} บาท", 7.2, True, "#166534")
+        right_text(x + panel_width - 8 * mm, summary_y + 7.5 * mm, f"หัก {report_number(deduction_amount, 0)} บาท", 7.2, True, "#B42318")
+        right_text(x + panel_width - 8 * mm, summary_y + 2 * mm, f"ยอดรับสุทธิ {report_number(net_amount, 0)} บาท", 10.5, True, "#064E25")
+
+        sign_y = y + 12 * mm
+        pdf.setStrokeColor(colors.HexColor("#111827"))
+        pdf.line(x + 14 * mm, sign_y + 5 * mm, x + 54 * mm, sign_y + 5 * mm)
+        pdf.line(x + panel_width - 54 * mm, sign_y + 5 * mm, x + panel_width - 14 * mm, sign_y + 5 * mm)
+        text(x + 25 * mm, sign_y, "ผู้รับเงิน", 7)
+        text(x + panel_width - 43 * mm, sign_y, "ผู้จ่ายเงิน", 7)
+
+    draw_panel(margin, margin, False)
+    pdf.setDash(3, 3)
+    pdf.setStrokeColor(colors.HexColor("#667085"))
+    pdf.line(divider_x, margin, divider_x, page_height - margin)
+    pdf.setDash()
+    draw_panel(divider_x + gap / 2, margin, True)
+    pdf.showPage()
+    pdf.save()
     return buffer.getvalue()
 
 
@@ -6162,6 +6398,8 @@ class ReportHandler(BaseHTTPRequestHandler):
                 "employees": payload.get("employees", []),
                 "production_records": payload.get("production_records", []),
                 "deduction_records": payload.get("deduction_records", []),
+                "printed_by": payload.get("printed_by", ""),
+                "printed_by_position": payload.get("printed_by_position", ""),
             }
             start_date = payload.get("start_date", datetime.now().date().isoformat())
             end_date = payload.get("end_date", start_date)
