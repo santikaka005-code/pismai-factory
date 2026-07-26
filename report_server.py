@@ -3990,14 +3990,18 @@ def selected_export_fields(payload: dict, section: str, definitions: list[tuple[
 
 
 def employee_name_for_record(payload: dict, record: dict) -> str:
-    if record.get("employee_name"):
-        return str(record.get("employee_name"))
     employees = payload.get("employees") or []
-    employee_id = record.get("employee_id")
+    employee_id = str(record.get("employee_id") or "").strip()
+    emp_code = str(record.get("emp_code") or "").strip()
     for employee in employees:
-        if employee.get("id") == employee_id or str(employee.get("emp_code")) == str(record.get("emp_code")):
-            return str(employee.get("fullname") or "")
-    return ""
+        registered_id = str(employee.get("id") or "").strip()
+        registered_code = str(employee.get("emp_code") or "").strip()
+        if (
+            (employee_id and registered_id and registered_id == employee_id)
+            or (emp_code and registered_code and registered_code == emp_code)
+        ):
+            return str(employee.get("fullname") or record.get("employee_name") or record.get("fullname") or "-")
+    return str(record.get("employee_name") or record.get("fullname") or "-")
 
 
 def production_summary_context(payload: dict) -> tuple[str, str, list[dict], list[dict], dict, int]:
@@ -4019,19 +4023,58 @@ def build_production_summary_excel(payload: dict) -> bytes:
     water_label, flower_label = production_report_weight_labels(payload)
     workbook = Workbook()
     overview = workbook.active
-    overview.title = "Production Summary"
-    overview.merge_cells("A1:G1")
-    overview["A1"] = COMPANY_NAME
-    overview["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
-    overview.merge_cells("A2:G2")
-    overview["A2"] = "รายงานสรุปผลผลิตและน้ำหนัก"
-    overview["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
-    overview.merge_cells("A3:G3")
-    overview["A3"] = f"ผลไม้ {selected_production_fruit_label(payload)} | ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
-    overview.merge_cells("A4:G4")
-    overview["A4"] = export_meta_text(payload)
-    add_excel_logo(overview, "H1")
+    overview.title = "ภาพรวม"
+    font_name = "Sarabun"
+    dark_green = "075B44"
+    brand_green = "0F8A55"
+    mint = "D1FAE5"
+    pale = "F8FAFC"
+    line_color = "D8E2EA"
+    thin = Side(style="thin", color=line_color)
+    medium = Side(style="medium", color=dark_green)
+    table_border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
+    def setup_summary_sheet(sheet, subtitle: str, last_column: str, freeze_at: str | None = None):
+        sheet.sheet_view.showGridLines = False
+        sheet.merge_cells("A1:B3")
+        sheet["A1"] = "PF"
+        sheet["A1"].fill = PatternFill("solid", fgColor=brand_green)
+        sheet["A1"].font = Font(name=font_name, bold=True, size=25, color="FFFFFF")
+        sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        sheet.merge_cells(f"C1:{last_column}2")
+        sheet["C1"] = COMPANY_NAME
+        sheet["C1"].fill = PatternFill("solid", fgColor=dark_green)
+        sheet["C1"].font = Font(name=font_name, bold=True, size=20, color="FFFFFF")
+        sheet["C1"].alignment = Alignment(horizontal="left", vertical="center")
+        sheet.merge_cells(f"C3:{last_column}3")
+        sheet["C3"] = subtitle
+        sheet["C3"].fill = PatternFill("solid", fgColor=dark_green)
+        sheet["C3"].font = Font(name=font_name, size=10, color=mint)
+        sheet["C3"].alignment = Alignment(horizontal="left", vertical="center")
+        add_excel_logo(sheet, "A1")
+        sheet.freeze_panes = freeze_at
+        sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.page_setup.orientation = "landscape"
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.oddFooter.left.text = SYSTEM_NAME
+        sheet.oddFooter.center.text = "รายงานสรุปข้อมูลหลัก"
+        sheet.oddFooter.right.text = "หน้า &P จาก &N"
+        for row_index in (1, 2, 3):
+            sheet.row_dimensions[row_index].height = 23
+
+    setup_summary_sheet(overview, "รายงานสรุปข้อมูลหลัก • Production Summary", "L", "A13")
+    overview.merge_cells("A5:L5")
+    overview["A5"] = (
+        f"ผลไม้ {selected_production_fruit_label(payload)}"
+        f"  |  ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
+        f"  |  {export_meta_text(payload)}"
+    )
+    overview["A5"].fill = PatternFill("solid", fgColor=mint)
+    overview["A5"].font = Font(name=font_name, bold=True, size=10, color=dark_green)
+    overview["A5"].alignment = Alignment(vertical="center", wrap_text=True)
+    overview.row_dimensions[5].height = 28
     overview_fields = selected_export_fields(
         payload,
         "overview",
@@ -4045,12 +4088,37 @@ def build_production_summary_excel(payload: dict) -> bytes:
             ("records", "จำนวนรายการ", len(records)),
         ],
     )
-    overview.append([])
     if sections["overview"] and overview_fields:
-        overview.append(["หัวข้อ", "ค่า"])
-        for _, label, value in overview_fields:
-            overview.append([label, value])
-        style_excel_report_sheet(overview, [6], [30, 22, 14, 14, 14, 14, 14, 14])
+        metric_values = {key: (label, value) for key, label, value in overview_fields}
+        cards = [
+            ("A7:C7", "A8:C9", metric_values.get("totalWeight", ("น้ำหนักรวม", totals["total_weight"])), "ECFDF5", "047857", '#,##0.00 "กก."'),
+            ("D7:F7", "D8:F9", metric_values.get("amount", ("ยอดเงินรวม", totals["amount"])), "FFF7ED", "C2410C", '#,##0.00 "บาท"'),
+            ("G7:I7", "G8:I9", metric_values.get("employees", ("พนักงาน", employee_count)), "EFF6FF", "1D4ED8", '0 "คน"'),
+            ("J7:L7", "J8:L9", metric_values.get("records", ("จำนวนรายการ", len(records))), "F0FDF4", "15803D", '0 "รายการ"'),
+        ]
+        for label_range, value_range, (label, value), fill_color, font_color, number_format in cards:
+            overview.merge_cells(label_range)
+            overview.merge_cells(value_range)
+            label_cell = overview[label_range.split(":")[0]]
+            value_cell = overview[value_range.split(":")[0]]
+            label_cell.value = label
+            value_cell.value = value
+            for row in overview[f"{label_range.split(':')[0]}:{value_range.split(':')[1]}"]:
+                for cell in row:
+                    cell.fill = PatternFill("solid", fgColor=fill_color)
+                    cell.border = table_border
+            label_cell.font = Font(name=font_name, bold=True, size=10, color="64748B")
+            label_cell.alignment = Alignment(horizontal="center", vertical="center")
+            value_cell.font = Font(name=font_name, bold=True, size=17, color=font_color)
+            value_cell.alignment = Alignment(horizontal="center", vertical="center")
+            value_cell.number_format = number_format
+
+    if sections["piles"]:
+        overview.merge_cells("A11:L11")
+        overview["A11"] = "สรุปตามกอง"
+        overview["A11"].fill = PatternFill("solid", fgColor=dark_green)
+        overview["A11"].font = Font(name=font_name, bold=True, size=12, color="FFFFFF")
+        overview["A11"].alignment = Alignment(vertical="center")
 
     if sections["piles"]:
         pile_defs = selected_export_fields(
@@ -4066,10 +4134,11 @@ def build_production_summary_excel(payload: dict) -> bytes:
             ],
         )
         if pile_defs:
-            pile_sheet = workbook.create_sheet("Pile Summary")
-            pile_sheet.append([label for _, label, _ in pile_defs])
+            overview_pile_header = 13
+            for column, (_, label, _) in enumerate(pile_defs, 1):
+                overview.cell(overview_pile_header, column, label)
             for row in pile_rows:
-                pile_sheet.append([getter(row) for _, _, getter in pile_defs])
+                overview.append([getter(row) for _, _, getter in pile_defs])
             total_row = {
                 "pile": "รวม",
                 "incoming": totals["incoming"],
@@ -4078,8 +4147,25 @@ def build_production_summary_excel(payload: dict) -> bytes:
                 "total_weight": totals["total_weight"],
                 "amount": totals["amount"],
             }
+            overview.append([getter(total_row) for _, _, getter in pile_defs])
+            style_excel_report_sheet(overview, [overview_pile_header], [18] * 12)
+            for cell in overview[overview.max_row]:
+                if cell.value is not None:
+                    cell.fill = PatternFill("solid", fgColor=mint)
+                    cell.font = Font(name=font_name, bold=True, color=dark_green)
+                    cell.border = Border(top=medium, bottom=medium)
+
+            pile_sheet = workbook.create_sheet("สรุปตามกอง")
+            setup_summary_sheet(pile_sheet, "สรุปผลผลิตแยกตามกอง", get_column_letter(max(3, len(pile_defs))), "A6")
+            pile_sheet.append([])
+            pile_sheet.append([label for _, label, _ in pile_defs])
+            for row in pile_rows:
+                pile_sheet.append([getter(row) for _, _, getter in pile_defs])
             pile_sheet.append([getter(total_row) for _, _, getter in pile_defs])
-            style_excel_report_sheet(pile_sheet, [1], [18] * max(1, len(pile_defs)))
+            style_excel_report_sheet(pile_sheet, [5], [20] * max(1, len(pile_defs)))
+            for cell in pile_sheet[pile_sheet.max_row]:
+                cell.fill = PatternFill("solid", fgColor=mint)
+                cell.font = Font(name=font_name, bold=True, color=dark_green)
 
     if sections["details"]:
         detail_defs = selected_export_fields(
@@ -4100,11 +4186,38 @@ def build_production_summary_excel(payload: dict) -> bytes:
             ],
         )
         if detail_defs:
-            detail_sheet = workbook.create_sheet("Details")
+            detail_sheet = workbook.create_sheet("รายละเอียด")
+            last_column = get_column_letter(max(3, len(detail_defs)))
+            setup_summary_sheet(detail_sheet, "รายละเอียดผลผลิต • ชื่อจากทะเบียนพนักงาน", last_column, "A6")
+            detail_sheet.append([])
             detail_sheet.append([label for _, label, _ in detail_defs])
             for record in records:
                 detail_sheet.append([getter(record) for _, _, getter in detail_defs])
-            style_excel_report_sheet(detail_sheet, [1], [16] * max(1, len(detail_defs)))
+            detail_widths = {
+                "date": 15, "time": 11, "empCode": 17, "employeeName": 31, "pile": 10,
+                "water": 16, "flower": 16, "grades": 27, "total": 16, "amount": 17, "createdBy": 18,
+            }
+            style_excel_report_sheet(
+                detail_sheet,
+                [5],
+                [detail_widths.get(key, 16) for key, _, _ in detail_defs],
+            )
+            for column, (key, _, _) in enumerate(detail_defs, 1):
+                if key == "empCode":
+                    for row_index in range(6, detail_sheet.max_row + 1):
+                        detail_sheet.cell(row_index, column).number_format = "@"
+                if key == "employeeName":
+                    for row_index in range(6, detail_sheet.max_row + 1):
+                        cell = detail_sheet.cell(row_index, column)
+                        cell.font = Font(name=font_name, bold=True, size=10, color=dark_green)
+                        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            detail_sheet.print_title_rows = "1:5"
+
+    for index, width in enumerate([18] * 12, 1):
+        overview.column_dimensions[get_column_letter(index)].width = width
+    overview.print_area = f"A1:L{overview.max_row}"
+    overview.print_title_rows = "1:13" if sections["piles"] else "1:5"
+    overview.sheet_view.zoomScale = 80
 
     output = BytesIO()
     workbook.save(output)
@@ -4115,21 +4228,40 @@ def build_production_summary_pdf(payload: dict) -> bytes:
     start_date, end_date, records, pile_rows, totals, employee_count = production_summary_context(payload)
     sections = selected_export_sections(payload)
     water_label, flower_label = production_report_weight_labels(payload)
-    _, _, _, section = pdf_styles()
+    _, _, pdf_normal, section = pdf_styles()
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=landscape(A4),
-        leftMargin=15 * mm,
-        rightMargin=15 * mm,
-        topMargin=14 * mm,
-        bottomMargin=16 * mm,
+        leftMargin=14 * mm,
+        rightMargin=14 * mm,
+        topMargin=31 * mm,
+        bottomMargin=18 * mm,
     )
-    story = report_header_story(
-        "รายงานสรุปผลผลิตและน้ำหนัก",
-        f"ผลไม้ {selected_production_fruit_label(payload)} | ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}",
-        payload,
+    story = []
+    dark_green = colors.HexColor("#075B44")
+    brand_green = colors.HexColor("#0F8A55")
+    mint = colors.HexColor("#D1FAE5")
+    pale = colors.HexColor("#F8FAFC")
+    line_color = colors.HexColor("#D8E2EA")
+    meta = Table(
+        [[
+            Paragraph(f"<b>ผลไม้</b><br/>{xml_escape(selected_production_fruit_label(payload))}", pdf_normal),
+            Paragraph(f"<b>ช่วงรายงาน</b><br/>{format_report_date(start_date)} - {format_report_date(end_date)}", pdf_normal),
+            Paragraph(f"<b>ข้อมูลการพิมพ์</b><br/>{xml_escape(export_meta_text(payload))}", pdf_normal),
+        ]],
+        colWidths=[64 * mm, 78 * mm, 127 * mm],
     )
+    meta.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), mint),
+        ("GRID", (0, 0), (-1, -1), 0.35, line_color),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([meta, Spacer(1, 5 * mm)])
 
     overview_fields = selected_export_fields(
         payload,
@@ -4145,12 +4277,48 @@ def build_production_summary_pdf(payload: dict) -> bytes:
         ],
     )
     if sections["overview"] and overview_fields:
-        overview = Table(
-            [["หัวข้อ", "ค่า"], *[[label, value] for _, label, value in overview_fields]],
-            colWidths=[78 * mm, 45 * mm],
+        field_map = {key: (label, value) for key, label, value in overview_fields}
+        preferred = ["totalWeight", "amount", "employees", "records"]
+        card_fields = [field_map[key] for key in preferred if key in field_map]
+        card_fields.extend(
+            (label, value)
+            for key, label, value in overview_fields
+            if key not in preferred and (label, value) not in card_fields
         )
-        set_pdf_table_style(overview, 1)
-        story += [Paragraph("ภาพรวม", section), overview, Spacer(1, 7 * mm)]
+        card_fields = card_fields[:4]
+        card_colors = [
+            ("#ECFDF5", "#047857"),
+            ("#FFF7ED", "#C2410C"),
+            ("#EFF6FF", "#1D4ED8"),
+            ("#F0FDF4", "#15803D"),
+        ]
+        metric_style = getSampleStyleSheet()["BodyText"]
+        metric_style.fontName = THAI_FONT
+        metric_style.fontSize = 8
+        metric_style.leading = 20
+        metric_cells = []
+        for index, (label, value) in enumerate(card_fields):
+            metric_cells.append(Paragraph(
+                f"<font color='#64748B'>{xml_escape(str(label))}</font>"
+                f"<br/><font size='15' color='{card_colors[index][1]}'><b>{xml_escape(str(value))}</b></font>",
+                metric_style,
+            ))
+        if metric_cells:
+            metric_table = Table(
+                [metric_cells],
+                colWidths=[(269 / len(metric_cells)) * mm] * len(metric_cells),
+                rowHeights=[23 * mm],
+            )
+            metric_commands = [
+                ("GRID", (0, 0), (-1, -1), 0.35, line_color),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ]
+            for index, (fill_color, _) in enumerate(card_colors[:len(metric_cells)]):
+                metric_commands.append(("BACKGROUND", (index, 0), (index, 0), colors.HexColor(fill_color)))
+            metric_table.setStyle(TableStyle(metric_commands))
+            story.extend([metric_table, Spacer(1, 5 * mm)])
 
     if sections["piles"]:
         pile_defs = selected_export_fields(
@@ -4174,6 +4342,15 @@ def build_production_summary_pdf(payload: dict) -> bytes:
             col_width = (267 / len(pile_defs)) * mm
             pile_table = Table(pile_table_rows, repeatRows=1, colWidths=[col_width] * len(pile_defs))
             set_pdf_table_style(pile_table, 1)
+            pile_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), brand_green),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, pale]),
+                ("BACKGROUND", (0, -1), (-1, -1), mint),
+                ("TEXTCOLOR", (0, -1), (-1, -1), dark_green),
+                ("FONTNAME", (0, -1), (-1, -1), THAI_FONT_BOLD),
+                ("LINEABOVE", (0, -1), (-1, -1), 1, dark_green),
+                ("GRID", (0, 0), (-1, -1), 0.35, line_color),
+            ]))
             story += [Paragraph("สรุปตามกอง", section), pile_table, Spacer(1, 4 * mm)]
 
     if sections["details"]:
@@ -4195,18 +4372,104 @@ def build_production_summary_pdf(payload: dict) -> bytes:
             ],
         )
         if detail_defs:
+            if sections["overview"] or sections["piles"]:
+                story.append(PageBreak())
+                logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+                logo_flowable = (
+                    Image(str(logo_path), width=15 * mm, height=15 * mm)
+                    if logo_path.exists()
+                    else Paragraph("<b>PF</b>", pdf_normal)
+                )
+                detail_page_header = Table(
+                    [[
+                        logo_flowable,
+                        Paragraph(
+                            f"<font color='#FFFFFF' size='15'><b>{xml_escape(COMPANY_NAME)}</b></font>"
+                            "<br/><font color='#D1FAE5'>รายงานสรุปข้อมูลหลัก - รายละเอียดรายการ</font>",
+                            pdf_normal,
+                        ),
+                    ]],
+                    colWidths=[22 * mm, 247 * mm],
+                    rowHeights=[20 * mm],
+                )
+                detail_page_header.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, -1), dark_green),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ]))
+                story.extend([detail_page_header, Spacer(1, 4 * mm)])
             detail_rows = [[label for _, label, _ in detail_defs]]
             for record in records[:100]:
                 detail_rows.append([getter(record) for _, _, getter in detail_defs])
-            col_width = (267 / len(detail_defs)) * mm
-            detail_table = Table(detail_rows, repeatRows=1, colWidths=[col_width] * len(detail_defs))
+            width_weights = {
+                "date": 25, "time": 17, "empCode": 24, "employeeName": 53, "pile": 14,
+                "water": 26, "flower": 26, "grades": 45, "total": 28, "amount": 31, "createdBy": 29,
+            }
+            raw_widths = [width_weights.get(key, 24) for key, _, _ in detail_defs]
+            width_scale = 267 / sum(raw_widths)
+            detail_widths = [width * width_scale * mm for width in raw_widths]
+            name_column = next(
+                (index for index, (key, _, _) in enumerate(detail_defs) if key == "employeeName"),
+                None,
+            )
+            if name_column is not None:
+                for row in detail_rows[1:]:
+                    row[name_column] = Paragraph(
+                        f"<b><font color='#075B44'>{xml_escape(str(row[name_column] or '-'))}</font></b>",
+                        pdf_normal,
+                    )
+            detail_table = Table(detail_rows, repeatRows=1, colWidths=detail_widths)
             set_pdf_table_style(detail_table, max(1, len(detail_defs) - 3))
-            story += [Paragraph("รายละเอียดรายการ", section), detail_table]
+            detail_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), brand_green),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, pale]),
+                ("GRID", (0, 0), (-1, -1), 0.35, line_color),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            if name_column is not None:
+                detail_table.setStyle(TableStyle([
+                    ("ALIGN", (name_column, 1), (name_column, -1), "LEFT"),
+                ]))
+            story += [Paragraph("รายละเอียดรายการ - ชื่อพนักงานจากทะเบียน", section), detail_table]
 
-    if len(story) <= 4:
+    if not any(sections.values()):
         story.append(Paragraph("ไม่มีฟิลด์ที่เลือกสำหรับรายงานนี้", section))
 
-    doc.build(story)
+    def draw_page(canvas_obj, document):
+        page_width, page_height = landscape(A4)
+        canvas_obj.saveState()
+        canvas_obj.setFillColor(dark_green)
+        canvas_obj.rect(0, page_height - 22 * mm, page_width, 22 * mm, fill=1, stroke=0)
+        logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+        if logo_path.exists():
+            try:
+                canvas_obj.drawImage(
+                    str(logo_path), 12 * mm, page_height - 19 * mm,
+                    width=15 * mm, height=15 * mm, preserveAspectRatio=True, mask="auto",
+                )
+            except Exception:
+                pass
+        canvas_obj.setFont(THAI_FONT_BOLD, 15)
+        canvas_obj.setFillColor(colors.white)
+        canvas_obj.drawString(31 * mm, page_height - 10 * mm, COMPANY_NAME)
+        canvas_obj.setFont(THAI_FONT, 8)
+        canvas_obj.setFillColor(mint)
+        canvas_obj.drawString(31 * mm, page_height - 16 * mm, "รายงานสรุปข้อมูลหลัก")
+        canvas_obj.setStrokeColor(brand_green)
+        canvas_obj.line(14 * mm, 12 * mm, page_width - 14 * mm, 12 * mm)
+        canvas_obj.setFont(THAI_FONT, 7.5)
+        canvas_obj.setFillColor(colors.HexColor("#475467"))
+        canvas_obj.drawString(
+            14 * mm, 7 * mm,
+            f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | {export_meta_text(payload)}",
+        )
+        canvas_obj.drawRightString(page_width - 14 * mm, 7 * mm, f"หน้า {document.page}")
+        canvas_obj.restoreState()
+
+    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
     return buffer.getvalue()
 
 
