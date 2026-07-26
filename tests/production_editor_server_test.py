@@ -1,5 +1,6 @@
 import unittest
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,14 +28,40 @@ class ProductionEditorServerTest(unittest.TestCase):
         self.assertEqual(result["created_by"], "admin")
         self.assertEqual(result["reason"], "correct weight")
 
-    def test_route_requires_c4_and_creates_audit_before_success(self):
+    def test_edit_route_allows_signed_in_users_and_enforces_self_edit_window(self):
         source = Path("report_server.py").read_text(encoding="utf-8")
         route = source[source.index('production_record_match = re.fullmatch'):source.index('if parsed.path == "/api/state"')]
 
-        self.assertIn("accounting_actor(self, 4)", route)
+        self.assertIn("accounting_actor(self, 1)", route)
+        self.assertIn("production_record_within_self_edit_window", route)
+        self.assertIn("actor_level < 4", route)
         self.assertIn('"action": "UPDATE_PRODUCTION"', route)
         self.assertIn("expected_updated_at", route)
         self.assertIn("production change was rolled back", route)
+
+    def test_c1_to_c3_can_edit_only_their_own_record_within_five_minutes(self):
+        actor = {"username": "operator", "level": "C2"}
+        account = {"username": "operator", "fullname": "Operator One", "user_level": "C2"}
+        now = datetime(2026, 7, 25, 10, 5, tzinfo=timezone.utc)
+
+        self.assertTrue(report_server.production_record_within_self_edit_window(
+            {"created_by": "Operator One", "created_at": "2026-07-25T10:00:01Z"},
+            actor,
+            account,
+            now,
+        ))
+        self.assertFalse(report_server.production_record_within_self_edit_window(
+            {"created_by": "Other User", "created_at": "2026-07-25T10:04:30Z"},
+            actor,
+            account,
+            now,
+        ))
+        self.assertFalse(report_server.production_record_within_self_edit_window(
+            {"created_by": "Operator One", "created_at": "2026-07-25T09:59:59Z"},
+            actor,
+            account,
+            now,
+        ))
 
     def test_delete_route_requires_c4_logs_and_restores_on_audit_failure(self):
         source = Path("report_server.py").read_text(encoding="utf-8")
