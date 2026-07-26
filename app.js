@@ -516,6 +516,15 @@ let accountMessage = "";
 let accountMessageType = "success";
 let backupMessage = "";
 let backupMessageType = "success";
+let backupUnlocked = false;
+let backupAccessCode = "";
+let backupActiveTab = "backup";
+let backupSnapshot = null;
+let backupSelectedFile = null;
+let backupSelectedData = null;
+let backupFileValidation = null;
+let backupRestoreConfirmOpen = false;
+let backupBusy = false;
 let wageRateFilter = "all";
 let currentRateDate = new Date().toISOString().slice(0, 10);
 let editingWageRateId = null;
@@ -4272,6 +4281,9 @@ function render() {
     auditLogUnlocked = false;
     auditLogMessage = "";
   }
+  if (lastRenderedRoute === "backup" && route !== "backup") {
+    resetBackupSecurityState();
+  }
 
   if (!session && route !== "login") {
     location.hash = "#/login";
@@ -4671,7 +4683,7 @@ function renderModuleContent(user, moduleItem) {
     return wrapSettingsSubpage(renderAuditLog(moduleItem));
   }
   if (moduleItem.id === "backup") {
-    return wrapSettingsSubpage(renderBackupModule(moduleItem));
+    return wrapSettingsSubpage(renderBackupModule(user, moduleItem));
   }
   if (moduleItem.id === "pile-management") {
     return renderPileManagement(moduleItem);
@@ -4706,6 +4718,7 @@ function bindAppEvents(user, moduleItem) {
   document.querySelector("#logoutButton")?.addEventListener("click", () => {
     auditLogUnlocked = false;
     auditLogMessage = "";
+    resetBackupSecurityState();
     clearSession();
     onlineUserCount = 0;
     updateOnlineUserBadges();
@@ -6794,23 +6807,131 @@ function bindAuditLogPasswordEvents() {
   });
 }
 
-function buildBackupData() {
-  return {
-    exported_at: new Date().toISOString(),
-    app: "Pismai Factory Wage",
-    version: 1,
-    data: {
-      employees: getEmployees(),
-      time_employees: getTimeEmployees(),
-      wage_rates: getWageRates(),
-      production_records: getProductionRecords(),
-      production_sessions: getProductionSessions(),
-      time_records: getTimeRecords(),
-      deduction_records: getDeductionRecords(),
-      deduction_applications: deductionApplications,
-      audit_logs: getAuditLogs(),
-      account_users: getAccountUsers()
+const BACKUP_DATA_KEYS = [
+  "account_users",
+  "employees",
+  "time_employees",
+  "wage_rates",
+  "production_sessions",
+  "production_records",
+  "time_records",
+  "deduction_records",
+  "deduction_applications",
+  "audit_logs",
+  "community_posts",
+  "secret_messages"
+];
+
+function resetBackupSecurityState() {
+  backupUnlocked = false;
+  backupAccessCode = "";
+  backupActiveTab = "backup";
+  backupSnapshot = null;
+  backupSelectedFile = null;
+  backupSelectedData = null;
+  backupFileValidation = null;
+  backupRestoreConfirmOpen = false;
+  backupBusy = false;
+  backupMessage = "";
+}
+
+function backupPayloadData(payload = backupSnapshot) {
+  return payload?.data && typeof payload.data === "object" ? payload.data : {};
+}
+
+function backupRows(data, key) {
+  return Array.isArray(data?.[key]) ? data[key] : [];
+}
+
+function backupGroupSummaries(data = backupPayloadData()) {
+  return [
+    {
+      label: "ข้อมูลพนักงาน",
+      detail: "พนักงานเหมาน้ำหนักและพนักงานตามเวลา",
+      count: backupRows(data, "employees").length + backupRows(data, "time_employees").length,
+      icon: "บุคคล"
+    },
+    {
+      label: "บัญชีผู้ใช้และสิทธิ์",
+      detail: "บัญชี ตำแหน่ง ระดับสิทธิ์ และสถานะ",
+      count: backupRows(data, "account_users").length,
+      icon: "สิทธิ์"
+    },
+    {
+      label: "ผลผลิตและเวลาทำงาน",
+      detail: "รายการผลิต กองงาน และบันทึกเวลา",
+      count:
+        backupRows(data, "production_records").length +
+        backupRows(data, "production_sessions").length +
+        backupRows(data, "time_records").length,
+      icon: "ข้อมูล"
+    },
+    {
+      label: "อัตราค่าจ้างและประวัติระบบ",
+      detail: "อัตราค่าจ้าง รายการหัก และ Audit Log",
+      count:
+        backupRows(data, "wage_rates").length +
+        backupRows(data, "deduction_records").length +
+        backupRows(data, "deduction_applications").length +
+        backupRows(data, "audit_logs").length,
+      icon: "ระบบ"
     }
+  ];
+}
+
+function backupTotalRows(data = backupPayloadData()) {
+  return BACKUP_DATA_KEYS.reduce((sum, key) => sum + backupRows(data, key).length, 0);
+}
+
+function formatBackupFileSize(bytes) {
+  const size = Number(bytes || 0);
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toLocaleString("th-TH", { maximumFractionDigits: 1 })} MB`;
+  return `${Math.max(1, Math.ceil(size / 1024)).toLocaleString("th-TH")} KB`;
+}
+
+function formatBackupDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return `${date.toLocaleDateString("th-TH", { day: "2-digit", month: "short", year: "numeric" })} ${date.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+}
+
+function getBackupHistory() {
+  return getAuditLogs()
+    .filter((log) => ["EXPORT_DATABASE_BACKUP", "IMPORT_DATABASE_BACKUP"].includes(String(log.action || "").toUpperCase()))
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
+    .slice(0, 12);
+}
+
+function validateBackupPayload(parsed, file) {
+  const errors = [];
+  const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  const version = Number(parsed?.version || 1);
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    errors.push("ไฟล์ไม่มีโครงสร้างข้อมูลสำรองที่รองรับ");
+  }
+  if (![1, 2].includes(version)) {
+    errors.push(`เวอร์ชันไฟล์ ${version} ยังไม่รองรับ`);
+  }
+  if (Number(file?.size || 0) > 50 * 1024 * 1024) {
+    errors.push("ไฟล์มีขนาดเกิน 50 MB");
+  }
+
+  const includedKeys = BACKUP_DATA_KEYS.filter((key) => Array.isArray(data?.[key]));
+  if (!includedKeys.length) errors.push("ไม่พบชุดข้อมูลที่ระบบรู้จัก");
+  includedKeys.forEach((key) => {
+    if (data[key].some((row) => !row || typeof row !== "object" || Array.isArray(row))) {
+      errors.push(`ข้อมูลในชุด ${key} มีรูปแบบไม่ถูกต้อง`);
+    }
+  });
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    data: errors.length ? null : data,
+    version,
+    includedKeys,
+    totalRows: includedKeys.reduce((sum, key) => sum + data[key].length, 0)
   };
 }
 
@@ -6833,119 +6954,369 @@ function setBackupMessage(message, type = "success") {
   backupMessageType = type;
 }
 
-function renderBackupModule(moduleItem) {
-  const backupData = buildBackupData();
-  const counts = backupData.data;
+function renderBackupPasswordGate(user, moduleItem) {
   return `
-    <section class="panel">
-      <div class="panel-head">
+    <section class="backup-gate" aria-labelledby="backupGateTitle">
+      <div class="backup-gate-assurance">
+        <div class="backup-progress" aria-label="ขั้นตอนเข้าสู่เมนูสำรองข้อมูล">
+          <span>ตั้งค่า</span><i></i><strong>สำรองข้อมูล</strong><i></i><span>ยืนยันสิทธิ์</span>
+        </div>
+        <div class="backup-gate-copy">
+          <p class="eyebrow">SECURE DATABASE ACCESS</p>
+          <h2 id="backupGateTitle">ยืนยันก่อนเข้าสำรองข้อมูล</h2>
+          <p>ไฟล์สำรองมีข้อมูลสำคัญขององค์กร ระบบจึงต้องตรวจสอบสิทธิ์ก่อนเปิดเครื่องมือจัดการฐานข้อมูล</p>
+        </div>
+        <div class="backup-assurance-list">
+          <div><span class="backup-assurance-icon">✓</span><div><strong>เชื่อมต่อฐานข้อมูลส่วนกลาง</strong><small>ตรวจสอบรหัสกับระบบ Backup บนเซิร์ฟเวอร์โดยตรง</small></div></div>
+          <div><span class="backup-assurance-icon">✓</span><div><strong>บันทึกผู้ดำเนินการทุกครั้ง</strong><small>การสร้างไฟล์และ Import จะถูกบันทึกใน Audit Log</small></div></div>
+        </div>
+      </div>
+      <div class="backup-gate-auth">
         <div>
-          <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>สำรองและกู้คืนข้อมูลจากฐานกลาง Supabase จริง ใช้สำหรับย้ายเครื่อง ตรวจสอบย้อนหลัง และลดความเสี่ยงข้อมูลหาย</p>
+          <span class="backup-security-mark">ข้อมูลส่วนกลาง</span>
+          <h3>รหัสผ่านสำรองข้อมูล</h3>
+          <p>กรอกรหัส 4 หลักเพื่อเข้าสู่เมนูสำรองข้อมูล</p>
         </div>
-        <span class="badge badge-success">Supabase</span>
-      </div>
-      <div class="metrics-grid metrics-spaced">
-        <div class="metric-card"><span>Local Employees</span><strong>${counts.employees.length.toLocaleString("th-TH")}</strong><small>พนักงานเหมาน้ำหนัก</small></div>
-        <div class="metric-card"><span>Time Employees</span><strong>${counts.time_employees.length.toLocaleString("th-TH")}</strong><small>พนักงานตามเวลา</small></div>
-        <div class="metric-card"><span>Local Records</span><strong>${counts.production_records.length.toLocaleString("th-TH")}</strong><small>ใช้เทียบกับฐานกลาง</small></div>
-        <div class="metric-card"><span>Local Rates</span><strong>${counts.wage_rates.length.toLocaleString("th-TH")}</strong><small>รายการในเครื่อง</small></div>
-        <div class="metric-card"><span>Local Accounts</span><strong>${counts.account_users.length.toLocaleString("th-TH")}</strong><small>บัญชีที่ cache ไว้</small></div>
-      </div>
-    </section>
-    ${
-      backupMessage
-        ? `<div class="alert ${backupMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(backupMessage)}</div>`
-        : ""
-    }
-    <section class="panel">
-      <div class="section-title-row">
-        <div>
-          <h3>Database Backup / Restore</h3>
-          <p class="muted-text">Export จะดึงข้อมูลจาก Supabase โดยตรง ส่วน Import จะเขียนกลับเข้าฐานกลางตามไฟล์ backup</p>
-        </div>
-      </div>
-      <div class="settings-security-form settings-backup-form">
-        <label class="field">
-          <span>รหัสสำรองข้อมูล 4 หลัก</span>
-          <input id="backupAccessCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="กรอกรหัส" />
-        </label>
-        <div class="panel-actions">
-          <button class="btn btn-primary" id="exportBackup" type="button">Export Database</button>
-          <label class="btn btn-outline" for="importBackupFile">Import Database</label>
-        </div>
-        <input id="importBackupFile" type="file" accept="application/json,.json" hidden />
+        ${backupMessage ? `<div class="backup-inline-message ${backupMessageType === "error" ? "is-error" : "is-success"}" role="alert">${escapeHtml(backupMessage)}</div>` : ""}
+        <form id="backupGateForm" class="backup-gate-form">
+          <label>
+            <span>รหัสรักษาความปลอดภัย</span>
+            <div class="backup-password-control">
+              <input id="backupGateCode" name="backupGateCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" aria-label="รหัสสำรองข้อมูล 4 หลัก" />
+              <button id="backupTogglePassword" type="button" title="แสดงหรือซ่อนรหัส" aria-label="แสดงหรือซ่อนรหัส">◉</button>
+            </div>
+          </label>
+          <button class="btn btn-primary backup-gate-submit" type="submit" ${backupBusy ? "disabled" : ""}>${backupBusy ? "กำลังตรวจสอบ..." : "เข้าสู่เมนูสำรองข้อมูล"}</button>
+        </form>
+        <button class="btn btn-outline backup-gate-back" data-route="settings" type="button">← กลับหน้าตั้งค่า</button>
+        <div class="backup-connection-line"><span></span> ระบบพร้อมตรวจสอบกับ Supabase</div>
+        <div class="backup-gate-user"><strong>${escapeHtml(user?.fullname || user?.username || "ผู้ดูแลระบบ")}</strong><span>${escapeHtml(getUserLevel(user))}</span></div>
       </div>
     </section>
   `;
 }
 
-function bindBackupEvents(user) {
-  const codeInput = document.querySelector("#backupAccessCode");
-  codeInput?.addEventListener("input", () => {
-    codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 4);
-  });
+function renderBackupOverview() {
+  const groups = backupGroupSummaries();
+  const estimatedBytes = new Blob([JSON.stringify(backupSnapshot || {})]).size;
+  return `
+    <section class="backup-workspace-grid">
+      <div class="backup-primary-workspace">
+        <div class="backup-section-heading">
+          <div class="backup-section-icon">⇩</div>
+          <div><h3>สร้างไฟล์สำรองใหม่</h3><p>รวบรวมข้อมูลล่าสุดจาก Supabase เป็นไฟล์ JSON สำหรับกู้คืนผ่านระบบนี้</p></div>
+        </div>
+        <div class="backup-dataset-list">
+          ${groups.map((group) => `
+            <div class="backup-dataset-row">
+              <span class="backup-dataset-icon">${escapeHtml(group.icon)}</span>
+              <div><strong>${escapeHtml(group.label)}</strong><small>${escapeHtml(group.detail)}</small></div>
+              <b>${group.count.toLocaleString("th-TH")} รายการ</b>
+              <span class="backup-ready">พร้อม</span>
+            </div>
+          `).join("")}
+        </div>
+        <div class="backup-download-bar">
+          <div><span>ขนาดไฟล์โดยประมาณ</span><strong>${formatBackupFileSize(estimatedBytes)}</strong><small>${backupTotalRows().toLocaleString("th-TH")} รายการจากฐานข้อมูลกลาง</small></div>
+          <button class="btn btn-primary" id="exportBackup" type="button" ${backupBusy ? "disabled" : ""}>${backupBusy ? "กำลังสร้างไฟล์..." : "⇩ สร้างไฟล์สำรอง JSON"}</button>
+        </div>
+        <div class="backup-warning">เก็บไฟล์สำรองไว้ในพื้นที่ปลอดภัย ไฟล์นี้อาจมีข้อมูลบัญชีและข้อมูลการทำงานขององค์กร</div>
+      </div>
+      ${renderBackupStatusRail()}
+    </section>
+  `;
+}
 
-  document.querySelector("#exportBackup")?.addEventListener("click", async () => {
-    const accessCode = String(codeInput?.value || "");
-    if (accessCode.length !== 4) {
-      setBackupMessage("กรุณากรอกรหัสสำรองข้อมูล 4 หลัก", "error");
+function renderBackupImport() {
+  const validation = backupFileValidation;
+  const hasFile = Boolean(backupSelectedFile);
+  return `
+    <section class="backup-workspace-grid">
+      <div class="backup-primary-workspace">
+        <div class="backup-section-heading">
+          <div class="backup-section-icon">⇧</div>
+          <div><h3>Import และกู้คืนข้อมูล</h3><p>นำไฟล์สำรอง JSON กลับเข้าสู่ฐานข้อมูลส่วนกลาง โดยตรวจสอบไฟล์ก่อนทุกครั้ง</p></div>
+        </div>
+        <label class="backup-dropzone ${hasFile ? "has-file" : ""}" id="backupDropzone" for="importBackupFile">
+          <span class="backup-upload-icon">⇧</span>
+          <strong>${hasFile ? "เปลี่ยนไฟล์สำรอง" : "เลือกไฟล์สำรอง .JSON"}</strong>
+          <small>ลากไฟล์มาวาง หรือกดเพื่อเลือกไฟล์ ขนาดไม่เกิน 50 MB</small>
+        </label>
+        <input id="importBackupFile" type="file" accept="application/json,.json" hidden />
+        ${hasFile ? `
+          <div class="backup-selected-file ${validation?.valid ? "is-valid" : "is-invalid"}">
+            <span class="backup-file-icon">JSON</span>
+            <div><strong>${escapeHtml(backupSelectedFile.name)}</strong><small>${formatBackupFileSize(backupSelectedFile.size)} · เวอร์ชัน ${validation?.version || "-"}</small></div>
+            <b>${validation?.valid ? "ไฟล์ถูกต้อง" : "ตรวจไม่ผ่าน"}</b>
+          </div>
+          <div class="backup-validation-list">
+            <div><span>${validation?.includedKeys?.length ? "✓" : "!"}</span><strong>รูปแบบไฟล์และเวอร์ชัน</strong><b>${validation?.includedKeys?.length ? "ผ่าน" : "ไม่ผ่าน"}</b></div>
+            <div><span>${validation?.valid ? "✓" : "!"}</span><strong>จำนวนชุดข้อมูล</strong><b>${validation?.includedKeys?.length || 0} ชุด</b></div>
+            <div><span>${validation?.valid ? "✓" : "!"}</span><strong>ความสมบูรณ์ของข้อมูล</strong><b>${validation?.valid ? `${validation.totalRows.toLocaleString("th-TH")} รายการ` : "ไม่ผ่าน"}</b></div>
+          </div>
+          ${validation?.errors?.length ? `<div class="backup-validation-errors">${validation.errors.map((error) => `<span>${escapeHtml(error)}</span>`).join("")}</div>` : ""}
+          <div class="backup-import-actions">
+            <button class="btn btn-outline" id="recheckBackupFile" type="button">ตรวจสอบไฟล์อีกครั้ง</button>
+            <button class="btn backup-restore-button" id="openBackupRestoreConfirm" type="button" ${validation?.valid && !backupBusy ? "" : "disabled"}>เริ่มกู้คืนข้อมูล</button>
+          </div>
+        ` : `<div class="backup-import-empty">ยังไม่ได้เลือกไฟล์ ระบบจะไม่เปิดการกู้คืนจนกว่าไฟล์จะผ่านการตรวจสอบ</div>`}
+        <div class="backup-warning is-danger">การ Import จะเขียนทับข้อมูลที่มี ID เดียวกัน ระบบจะให้กรอกรหัสยืนยันอีกครั้งก่อนดำเนินการ</div>
+      </div>
+      ${renderBackupStatusRail()}
+    </section>
+  `;
+}
+
+function renderBackupHistory() {
+  const history = getBackupHistory();
+  return `
+    <section class="backup-history-panel">
+      <div class="backup-section-heading">
+        <div class="backup-section-icon">◷</div>
+        <div><h3>ประวัติการสำรองและกู้คืน</h3><p>แสดงกิจกรรม Backup และ Import ที่บันทึกไว้ใน Audit Log</p></div>
+      </div>
+      <div class="backup-history-table-wrap">
+        <table class="backup-history-table">
+          <thead><tr><th>วันที่และเวลา</th><th>การดำเนินการ</th><th>ผู้ดำเนินการ</th><th>รายละเอียด</th><th>สถานะ</th></tr></thead>
+          <tbody>
+            ${history.length ? history.map((log) => `
+              <tr>
+                <td data-label="วันที่และเวลา">${escapeHtml(formatBackupDateTime(log.created_at))}</td>
+                <td data-label="การดำเนินการ"><strong>${escapeHtml(getAuditLogActionLabel(log.action))}</strong></td>
+                <td data-label="ผู้ดำเนินการ">${escapeHtml(log.user_fullname || log.created_by || log.username || "-")}</td>
+                <td data-label="รายละเอียด">${escapeHtml(log.detail || "-")}</td>
+                <td data-label="สถานะ"><span class="backup-ready">สำเร็จ</span></td>
+              </tr>
+            `).join("") : `<tr><td class="empty-cell" colspan="5">ยังไม่มีประวัติ Backup หรือ Import</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function renderBackupStatusRail() {
+  const history = getBackupHistory();
+  const latestExport = history.find((log) => String(log.action).toUpperCase() === "EXPORT_DATABASE_BACKUP");
+  const latestImport = history.find((log) => String(log.action).toUpperCase() === "IMPORT_DATABASE_BACKUP");
+  return `
+    <aside class="backup-status-rail">
+      <h3>สถานะระบบ</h3>
+      <div class="backup-status-item"><span class="backup-status-icon">DB</span><div><strong>การเชื่อมต่อฐานข้อมูล</strong><small>Supabase (Primary)</small><b>● เชื่อมต่อปกติ</b></div></div>
+      <div class="backup-status-item"><span class="backup-status-icon">◷</span><div><strong>สำรองข้อมูลล่าสุด</strong><small>${latestExport ? formatBackupDateTime(latestExport.created_at) : "ยังไม่มีประวัติในเครื่องนี้"}</small><b>${latestExport ? "● สำเร็จ" : "รอการสำรอง"}</b></div></div>
+      <div class="backup-status-item"><span class="backup-status-icon">✓</span><div><strong>การตรวจสอบไฟล์</strong><small>${backupSelectedFile ? backupSelectedFile.name : "ยังไม่ได้เลือกไฟล์"}</small><b>${backupFileValidation?.valid ? "● ผ่าน" : "รอตรวจสอบ"}</b></div></div>
+      <div class="backup-recent-activity">
+        <h4>กิจกรรมล่าสุด</h4>
+        ${history.slice(0, 2).map((log) => `<div><span></span><p><strong>${escapeHtml(getAuditLogActionLabel(log.action))}</strong><small>${escapeHtml(formatBackupDateTime(log.created_at))}</small></p></div>`).join("") || `<p class="muted-text">ยังไม่มีกิจกรรมล่าสุด</p>`}
+        ${latestImport ? `<small class="backup-last-import">Import ล่าสุด ${escapeHtml(formatBackupDateTime(latestImport.created_at))}</small>` : ""}
+      </div>
+    </aside>
+  `;
+}
+
+function renderBackupRestoreConfirm() {
+  if (!backupRestoreConfirmOpen) return "";
+  return `
+    <div class="backup-modal-backdrop" role="presentation">
+      <section class="backup-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="backupConfirmTitle">
+        <span class="backup-confirm-icon">!</span>
+        <h3 id="backupConfirmTitle">ยืนยันการกู้คืนข้อมูล</h3>
+        <p>ข้อมูลจาก <strong>${escapeHtml(backupSelectedFile?.name || "ไฟล์สำรอง")}</strong> จะถูกเขียนกลับเข้าสู่ Supabase โปรดกรอกรหัส 4 หลักอีกครั้ง</p>
+        <form id="backupRestoreConfirmForm">
+          <label><span>รหัสยืนยัน</span><input id="backupRestoreCode" name="backupRestoreCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" /></label>
+          <div class="backup-confirm-actions">
+            <button class="btn btn-outline" id="cancelBackupRestore" type="button">ยกเลิก</button>
+            <button class="btn backup-restore-button" type="submit" ${backupBusy ? "disabled" : ""}>${backupBusy ? "กำลังกู้คืน..." : "ยืนยันและกู้คืนข้อมูล"}</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+function renderBackupModule(user, moduleItem) {
+  if (!backupUnlocked) return renderBackupPasswordGate(user, moduleItem);
+  const latestExport = getBackupHistory().find((log) => String(log.action).toUpperCase() === "EXPORT_DATABASE_BACKUP");
+  return `
+    <section class="backup-center">
+      <header class="backup-center-header">
+        <div>
+          <p class="eyebrow">DATABASE PROTECTION</p>
+          <h2>ศูนย์สำรองข้อมูล</h2>
+        </div>
+        <div class="backup-center-meta">
+          <span class="backup-live-status"><i></i> เชื่อมต่อ Supabase แล้ว</span>
+          <span><b>สำรองข้อมูลล่าสุด</b>${latestExport ? formatBackupDateTime(latestExport.created_at) : "ยังไม่มีประวัติ"}</span>
+        </div>
+      </header>
+      <nav class="backup-tabs" aria-label="เครื่องมือสำรองข้อมูล">
+        <button class="${backupActiveTab === "backup" ? "active" : ""}" data-backup-tab="backup" type="button">▱ สำรองข้อมูล</button>
+        <button class="${backupActiveTab === "import" ? "active" : ""}" data-backup-tab="import" type="button">↻ Import / กู้คืนข้อมูล</button>
+        <button class="${backupActiveTab === "history" ? "active" : ""}" data-backup-tab="history" type="button">◷ ประวัติ</button>
+      </nav>
+      ${backupMessage ? `<div class="backup-inline-message ${backupMessageType === "error" ? "is-error" : "is-success"}" role="alert">${escapeHtml(backupMessage)}</div>` : ""}
+      ${backupActiveTab === "backup" ? renderBackupOverview() : backupActiveTab === "import" ? renderBackupImport() : renderBackupHistory()}
+    </section>
+    ${renderBackupRestoreConfirm()}
+  `;
+}
+
+async function processBackupFile(file) {
+  backupSelectedFile = file || null;
+  backupSelectedData = null;
+  backupFileValidation = null;
+  backupMessage = "";
+  if (!file) {
+    render();
+    return;
+  }
+  try {
+    const parsed = JSON.parse(await file.text());
+    backupFileValidation = validateBackupPayload(parsed, file);
+    backupSelectedData = backupFileValidation.valid ? backupFileValidation.data : null;
+    if (!backupFileValidation.valid) setBackupMessage("ไฟล์สำรองไม่ผ่านการตรวจสอบ กรุณาตรวจสอบรายละเอียด", "error");
+  } catch (_error) {
+    backupFileValidation = { valid: false, errors: ["ไม่สามารถอ่านไฟล์ JSON ได้"], includedKeys: [], totalRows: 0, version: "-" };
+    setBackupMessage("ไฟล์ที่เลือกไม่ใช่ JSON ที่ถูกต้อง", "error");
+  }
+  render();
+}
+
+async function refreshAppDataAfterRestore() {
+  await Promise.all([
+    bootstrapLiveStateFromCloud(),
+    hydrateAccountsFromCloud(),
+    hydrateWageRatesFromCloud(),
+    bootstrapEmployeesWithCloud(),
+    hydrateDeductionsFromCloud(),
+    hydrateDeductionApplicationsFromCloud()
+  ]);
+}
+
+function bindBackupEvents(user) {
+  const gateCodeInput = document.querySelector("#backupGateCode");
+  gateCodeInput?.addEventListener("input", () => {
+    gateCodeInput.value = gateCodeInput.value.replace(/\D/g, "").slice(0, 4);
+  });
+  document.querySelector("#backupTogglePassword")?.addEventListener("click", () => {
+    if (!gateCodeInput) return;
+    gateCodeInput.type = gateCodeInput.type === "password" ? "text" : "password";
+    gateCodeInput.focus();
+  });
+  document.querySelector("#backupGateForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const code = String(new FormData(event.currentTarget).get("backupGateCode") || "");
+    if (code.length !== 4) {
+      setBackupMessage("กรุณากรอกรหัสสำรองข้อมูลให้ครบ 4 หลัก", "error");
       render();
       return;
     }
-
+    backupBusy = true;
+    backupMessage = "";
+    render();
     try {
-      const backup = await exportDatabaseBackup(accessCode);
-      const content = JSON.stringify(backup, null, 2);
-      const today = new Date().toISOString().slice(0, 10);
-      downloadTextFile(`pismai-database-backup-${today}.json`, content, "application/json;charset=utf-8");
-      addAuditLog(user, "EXPORT_DATABASE_BACKUP", "Exported Supabase database backup");
-      setBackupMessage("Export ฐานข้อมูลสำเร็จ");
+      const snapshot = await exportDatabaseBackup(code);
+      backupAccessCode = code;
+      backupSnapshot = snapshot;
+      backupUnlocked = true;
+      backupBusy = false;
       render();
     } catch (error) {
-      setBackupMessage(error instanceof Error ? error.message : "Export database failed.", "error");
+      backupBusy = false;
+      setBackupMessage(error?.status === 403 ? "รหัสสำรองข้อมูลไม่ถูกต้อง" : error instanceof Error ? error.message : "ไม่สามารถตรวจสอบสิทธิ์ได้", "error");
+      render();
+    }
+  });
+
+  document.querySelectorAll("[data-backup-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      backupActiveTab = button.dataset.backupTab || "backup";
+      backupMessage = "";
+      backupRestoreConfirmOpen = false;
+      render();
+    });
+  });
+
+  document.querySelector("#exportBackup")?.addEventListener("click", async () => {
+    backupBusy = true;
+    backupMessage = "";
+    render();
+    try {
+      const backup = await exportDatabaseBackup(backupAccessCode);
+      backupSnapshot = backup;
+      const content = JSON.stringify(backup, null, 2);
+      const timestamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
+      downloadTextFile(`pismai-database-backup-${timestamp}.json`, content, "application/json;charset=utf-8");
+      addAuditLog(user, "EXPORT_DATABASE_BACKUP", `Exported ${backupTotalRows(backupPayloadData(backup))} Supabase rows`);
+      backupBusy = false;
+      setBackupMessage("สร้างและดาวน์โหลดไฟล์สำรองเรียบร้อยแล้ว");
+      render();
+    } catch (error) {
+      backupBusy = false;
+      if (error?.status === 403) resetBackupSecurityState();
+      setBackupMessage(error instanceof Error ? error.message : "สร้างไฟล์สำรองไม่สำเร็จ", "error");
       render();
     }
   });
 
   document.querySelector("#importBackupFile")?.addEventListener("change", (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const accessCode = String(codeInput?.value || "");
-    if (accessCode.length !== 4) {
-      setBackupMessage("กรุณากรอกรหัสสำรองข้อมูล 4 หลักก่อน Import", "error");
+    processBackupFile(event.target.files?.[0] || null);
+  });
+  const dropzone = document.querySelector("#backupDropzone");
+  dropzone?.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dropzone.classList.add("is-dragging");
+  });
+  dropzone?.addEventListener("dragleave", () => dropzone.classList.remove("is-dragging"));
+  dropzone?.addEventListener("drop", (event) => {
+    event.preventDefault();
+    dropzone.classList.remove("is-dragging");
+    processBackupFile(event.dataTransfer?.files?.[0] || null);
+  });
+  document.querySelector("#recheckBackupFile")?.addEventListener("click", () => processBackupFile(backupSelectedFile));
+  document.querySelector("#openBackupRestoreConfirm")?.addEventListener("click", () => {
+    if (!backupFileValidation?.valid || !backupSelectedData) return;
+    backupRestoreConfirmOpen = true;
+    backupMessage = "";
+    render();
+  });
+  document.querySelector("#cancelBackupRestore")?.addEventListener("click", () => {
+    backupRestoreConfirmOpen = false;
+    render();
+  });
+  const restoreCodeInput = document.querySelector("#backupRestoreCode");
+  restoreCodeInput?.addEventListener("input", () => {
+    restoreCodeInput.value = restoreCodeInput.value.replace(/\D/g, "").slice(0, 4);
+  });
+  document.querySelector("#backupRestoreConfirmForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const confirmationCode = String(new FormData(event.currentTarget).get("backupRestoreCode") || "");
+    if (confirmationCode.length !== 4) {
+      setBackupMessage("กรุณากรอกรหัสยืนยันให้ครบ 4 หลัก", "error");
+      backupRestoreConfirmOpen = false;
       render();
       return;
     }
-
-    const reader = new FileReader();
-    reader.addEventListener("load", async () => {
-      try {
-        const parsed = JSON.parse(String(reader.result || "{}"));
-        const data = parsed.data || parsed;
-        if (!data || typeof data !== "object") throw new Error("Invalid backup file.");
-        const knownKeys = ["account_users", "employees", "time_employees", "wage_rates", "production_records", "production_sessions", "time_records", "deduction_records", "deduction_applications", "audit_logs"];
-        const hasKnownData = knownKeys.some((key) => Array.isArray(data[key]));
-        if (!hasKnownData) throw new Error("Backup file does not contain supported data.");
-        const confirmed = window.confirm(
-          "Import จะเขียนข้อมูลในไฟล์กลับเข้าฐานกลาง Supabase จริง หาก id ซ้ำจะอัปเดตข้อมูลเดิม ต้องการดำเนินการต่อหรือไม่?"
-        );
-        if (!confirmed) {
-          setBackupMessage("Import cancelled.", "error");
-          render();
-          return;
-        }
-
-        await restoreDatabaseBackup(accessCode, { data });
-        addAuditLog(user, "IMPORT_DATABASE_BACKUP", `Imported Supabase backup ${file.name}`);
-        setBackupMessage("Import ฐานข้อมูลสำเร็จ");
-        render();
-      } catch (error) {
-        setBackupMessage(error instanceof Error ? error.message : "Import database failed.", "error");
-        render();
-      }
-    });
-    reader.readAsText(file);
+    backupBusy = true;
+    render();
+    try {
+      const result = await restoreDatabaseBackup(confirmationCode, { data: backupSelectedData });
+      addAuditLog(user, "IMPORT_DATABASE_BACKUP", `Imported ${backupSelectedFile?.name || "backup file"} (${backupFileValidation.totalRows} rows)`);
+      await refreshAppDataAfterRestore();
+      backupSnapshot = await exportDatabaseBackup(backupAccessCode);
+      backupBusy = false;
+      backupRestoreConfirmOpen = false;
+      backupSelectedFile = null;
+      backupSelectedData = null;
+      backupFileValidation = null;
+      setBackupMessage(`กู้คืนข้อมูลสำเร็จ ${Object.values(result?.data?.restored || {}).reduce((sum, count) => sum + Number(count || 0), 0).toLocaleString("th-TH")} รายการ`);
+      render();
+    } catch (error) {
+      backupBusy = false;
+      backupRestoreConfirmOpen = false;
+      setBackupMessage(error?.status === 403 ? "รหัสยืนยันไม่ถูกต้อง" : error instanceof Error ? error.message : "กู้คืนข้อมูลไม่สำเร็จ", "error");
+      render();
+    }
   });
 }
 
