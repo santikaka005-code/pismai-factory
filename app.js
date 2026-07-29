@@ -1328,6 +1328,7 @@ function updateOnlineUserBadges() {
 async function refreshOnlineUsers() {
   const session = getSession();
   if (!session) {
+    window.SecretRoom?.stopNotifications?.();
     onlineUserCount = 0;
     updateOnlineUserBadges();
     return;
@@ -4488,6 +4489,7 @@ async function handleLogin(event) {
 
 function renderApp(user, route) {
   if (route !== "secret-room") window.SecretRoom?.stop?.();
+  window.SecretRoom?.startNotifications?.();
   if (route === "accounting-control" && window.AccountingControl) {
     window.AccountingControl.render(app, user, {
       onExit: () => { location.hash = "#/dashboard"; },
@@ -4543,6 +4545,8 @@ function renderApp(user, route) {
   const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "settings"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
+  const secretUnreadCount = Number(window.SecretRoom?.getUnreadCount?.() || 0);
+  const secretUnreadLabel = secretUnreadCount > 99 ? "99+" : String(secretUnreadCount);
 
   app.innerHTML = `
     <main class="app-layout">
@@ -4557,6 +4561,7 @@ function renderApp(user, route) {
           <div class="topbar-brand-row">
             <button class="mobile-menu-button" id="mobileMenuButton" type="button" aria-label="เปิดเมนู">
               <span></span>
+              <b class="mobile-notification-badge" data-secret-unread-badge ${secretUnreadCount ? "" : "hidden"}>${escapeHtml(secretUnreadLabel)}</b>
             </button>
             <div>
               <p class="eyebrow">Pitsamai Frozen Fruits</p>
@@ -4587,12 +4592,13 @@ function renderApp(user, route) {
             ${visibleModules
               .map(
                 (item) => `
-                  <button class="nav-button ${item.id === route ? "active" : ""} ${item.locked ? "locked" : ""}" data-route="${item.id}" type="button">
+                  <button class="nav-button ${item.id === route ? "active" : ""} ${item.locked ? "locked" : ""} ${item.id === "secret-room" && secretUnreadCount ? "has-notification" : ""}" data-route="${item.id}" type="button">
                     <span class="nav-label">
                       <span class="nav-icon">${escapeHtml(item.icon || "•")}</span>
                       ${escapeHtml(item.label)}
                     </span>
                     ${item.locked ? `<span class="nav-lock">ล็อก</span>` : ""}
+                    ${item.id === "secret-room" ? `<span class="nav-notification-badge" data-secret-unread-badge ${secretUnreadCount ? "" : "hidden"}>${escapeHtml(secretUnreadLabel)}</span>` : ""}
                   </button>
                 `
               )
@@ -4622,6 +4628,7 @@ function renderApp(user, route) {
   }
 
   bindAppEvents(user, moduleItem);
+  window.SecretRoom?.startNotifications?.();
 }
 function renderModuleContent(user, moduleItem) {
   const settingsSubpageIds = new Set(["employees", "production-employees", "time-employees", "wage-rates", "settings-pile-summary", "account-management", "audit-log", "backup"]);
@@ -4719,6 +4726,7 @@ function bindAppEvents(user, moduleItem) {
     auditLogUnlocked = false;
     auditLogMessage = "";
     resetBackupSecurityState();
+    window.SecretRoom?.stopNotifications?.();
     clearSession();
     onlineUserCount = 0;
     updateOnlineUserBadges();
@@ -14786,11 +14794,13 @@ window.addEventListener("hashchange", render);
 window.addEventListener("focus", () => {
   refreshOnlineUsers();
   refreshLiveStateFromCloud();
+  window.SecretRoom?.refreshNotifications?.();
 });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     refreshOnlineUsers();
     refreshLiveStateFromCloud();
+    window.SecretRoom?.refreshNotifications?.();
   }
 });
 window.setInterval(refreshLiveStateFromCloud, LIVE_STATE_REFRESH_INTERVAL_MS);

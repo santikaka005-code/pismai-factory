@@ -7379,6 +7379,23 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
                 return
 
+            if parsed.path == "/api/secret-room/notifications":
+                status, body = supabase_request(
+                    "GET",
+                    f"secret_messages?recipient_username=eq.{quote(actor_username)}&is_read=eq.false&select=id,created_at&order=created_at.desc&limit=1000",
+                )
+                if status >= 400:
+                    self.send_json({"error": body}, status)
+                    return
+                unread_messages = body if isinstance(body, list) else []
+                self.send_json({
+                    "data": {
+                        "unread_count": len(unread_messages),
+                        "latest_message_at": unread_messages[0].get("created_at") if unread_messages else None,
+                    }
+                })
+                return
+
             if parsed.path in {"/api/secret-room/chats", "/api/secret-room/messages"}:
                 status, body = supabase_request(
                     "GET",

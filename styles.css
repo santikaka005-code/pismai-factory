@@ -703,6 +703,7 @@ input:disabled {
 }
 
 .mobile-menu-button {
+  position: relative;
   width: 42px;
   height: 42px;
   flex: 0 0 auto;
@@ -711,6 +712,36 @@ input:disabled {
   border-radius: 8px;
   padding: 9px;
   background: rgba(255, 255, 255, 0.06);
+}
+
+.mobile-notification-badge,
+.nav-notification-badge {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 2px solid #142236;
+  border-radius: 999px;
+  padding: 0 5px;
+  color: #ffffff;
+  background: #dc2626;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.16);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.mobile-notification-badge[hidden],
+.nav-notification-badge[hidden] {
+  display: none;
+}
+
+.mobile-notification-badge {
+  position: absolute;
+  top: -7px;
+  right: -8px;
+  border-color: #ffffff;
 }
 
 .mobile-menu-button span {
@@ -837,6 +868,17 @@ input:disabled {
 .nav-button.active {
   color: #ffffff;
   background: #16a34a;
+}
+
+.nav-button.has-notification:not(.active) {
+  color: #ffffff;
+  background: rgba(220, 38, 38, 0.12);
+  box-shadow: inset 3px 0 #ef4444;
+}
+
+.nav-button.active .nav-notification-badge,
+.nav-button:hover .nav-notification-badge {
+  border-color: #16a34a;
 }
 
 .nav-button.locked {

@@ -8,8 +8,13 @@ const SecretRoom = (() => {
     activeUser: null,
     loading: false,
     error: "",
-    pollTimer: null
+    pollTimer: null,
+    notificationTimer: null,
+    notificationUsername: "",
+    notificationInitialized: false,
+    unreadCount: 0
   };
+  const baseDocumentTitle = document.title.replace(/^\(\d+\+?\)\s*/, "");
 
   function api(path, options = {}) {
     return cloudApiRequest(`/api/secret-room${path}`, options);
@@ -29,6 +34,89 @@ const SecretRoom = (() => {
     }).format(date);
   }
 
+  function unreadLabel(count) {
+    return count > 99 ? "99+" : String(count);
+  }
+
+  function showNotificationToast(count) {
+    document.querySelector("[data-community-notification-toast]")?.remove();
+    const toast = document.createElement("button");
+    toast.type = "button";
+    toast.className = "community-notification-toast";
+    toast.dataset.communityNotificationToast = "";
+    toast.innerHTML = `<span class="community-notification-dot"></span><span><strong>มีข้อความใหม่ใน Community</strong><small>มี ${unreadLabel(count)} ข้อความที่ยังไม่ได้อ่าน</small></span>`;
+    toast.addEventListener("click", () => {
+      toast.remove();
+      location.hash = "#/secret-room";
+    });
+    document.body.appendChild(toast);
+    window.setTimeout(() => toast.classList.add("is-visible"), 20);
+    window.setTimeout(() => {
+      toast.classList.remove("is-visible");
+      window.setTimeout(() => toast.remove(), 220);
+    }, 6500);
+  }
+
+  function publishUnreadCount(value, { notify = false } = {}) {
+    const nextCount = Math.max(0, Number(value) || 0);
+    const previousCount = state.unreadCount;
+    state.unreadCount = nextCount;
+    document.querySelectorAll("[data-secret-unread-badge]").forEach((badge) => {
+      badge.textContent = unreadLabel(nextCount);
+      badge.hidden = nextCount === 0;
+      badge.closest(".nav-button")?.classList.toggle("has-notification", nextCount > 0);
+    });
+    document.querySelectorAll("[data-secret-unread]").forEach((badge) => {
+      badge.textContent = nextCount ? unreadLabel(nextCount) : "";
+      badge.hidden = nextCount === 0;
+    });
+    document.title = nextCount ? `(${unreadLabel(nextCount)}) ${baseDocumentTitle}` : baseDocumentTitle;
+    if (notify && state.notificationInitialized && nextCount > previousCount) {
+      showNotificationToast(nextCount);
+    }
+    state.notificationInitialized = true;
+  }
+
+  async function refreshNotifications({ notify = true } = {}) {
+    if (!getSession()?.user) return;
+    try {
+      const response = await api("/notifications");
+      publishUnreadCount(response?.data?.unread_count, { notify });
+    } catch (error) {
+      if (error?.status === 401) {
+        stopNotifications();
+        return;
+      }
+      console.warn("Community notification refresh failed.", error);
+    }
+  }
+
+  function startNotifications() {
+    const username = String(getSession()?.user?.username || "").toLowerCase();
+    if (!username) return stopNotifications();
+    if (state.notificationUsername !== username) {
+      stopNotifications();
+      state.notificationUsername = username;
+      state.notificationInitialized = false;
+      state.unreadCount = 0;
+    }
+    if (state.notificationTimer) {
+      publishUnreadCount(state.unreadCount);
+      return;
+    }
+    refreshNotifications({ notify: false });
+    state.notificationTimer = window.setInterval(() => refreshNotifications(), 15000);
+  }
+
+  function stopNotifications() {
+    if (state.notificationTimer) window.clearInterval(state.notificationTimer);
+    state.notificationTimer = null;
+    state.notificationUsername = "";
+    state.notificationInitialized = false;
+    publishUnreadCount(0);
+    document.querySelector("[data-community-notification-toast]")?.remove();
+  }
+
   function renderShell() {
     return `
       <section class="secret-room" data-secret-room>
@@ -43,7 +131,7 @@ const SecretRoom = (() => {
         <nav class="secret-tabs" aria-label="เมนูห้องแห่งความลับ">
           <button type="button" data-secret-tab="people">เพื่อนร่วมงาน</button>
           <button type="button" data-secret-tab="community">คอมมู</button>
-          <button type="button" data-secret-tab="chat">แชทส่วนตัว <span data-secret-unread></span></button>
+          <button type="button" data-secret-tab="chat">แชทส่วนตัว <span class="secret-tab-unread" data-secret-unread ${state.unreadCount ? "" : "hidden"}>${state.unreadCount ? unreadLabel(state.unreadCount) : ""}</span></button>
         </nav>
         <div class="secret-room-content" data-secret-content>
           <div class="secret-loading">กำลังโหลดข้อมูล...</div>
@@ -167,6 +255,7 @@ const SecretRoom = (() => {
       state.coworkers = coworkers.data || [];
       state.posts = posts.data || [];
       state.chats = chats.data || [];
+      publishUnreadCount(state.chats.reduce((sum, chat) => sum + Number(chat.unread_count || 0), 0));
       if (state.activeUser) {
         state.activeUser = state.coworkers.find((person) => person.username === state.activeUser.username) || state.activeUser;
       }
@@ -192,6 +281,7 @@ const SecretRoom = (() => {
       await api("/messages/read", { method: "POST", body: JSON.stringify({ username }) });
       const chat = state.chats.find((item) => item.username === username);
       if (chat) chat.unread_count = 0;
+      publishUnreadCount(state.chats.reduce((sum, item) => sum + Number(item.unread_count || 0), 0));
     } catch (error) {
       state.error = error.message;
     }
@@ -259,6 +349,13 @@ const SecretRoom = (() => {
         const response = await api(`/messages?with=${encodeURIComponent(state.activeUser.username)}`).catch(() => null);
         if (response) {
           state.messages = response.data || [];
+          await api("/messages/read", {
+            method: "POST",
+            body: JSON.stringify({ username: state.activeUser.username })
+          }).catch(() => null);
+          const activeChat = state.chats.find((chat) => chat.username === state.activeUser.username);
+          if (activeChat) activeChat.unread_count = 0;
+          publishUnreadCount(state.chats.reduce((sum, chat) => sum + Number(chat.unread_count || 0), 0));
           update();
         }
       }
@@ -270,7 +367,15 @@ const SecretRoom = (() => {
     state.pollTimer = null;
   }
 
-  return { render: renderShell, bind, stop };
+  return {
+    render: renderShell,
+    bind,
+    stop,
+    startNotifications,
+    stopNotifications,
+    refreshNotifications,
+    getUnreadCount: () => state.unreadCount
+  };
 })();
 
 window.SecretRoom = SecretRoom;
