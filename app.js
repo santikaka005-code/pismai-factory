@@ -14,6 +14,11 @@ const ONLINE_CLIENT_KEY = "pismai_online_client_id";
 const ONLINE_HEARTBEAT_INTERVAL_MS = 15000;
 const LIVE_STATE_REFRESH_INTERVAL_MS = 60000;
 const AUDIT_LOG_SYNC_DELAY_MS = 8000;
+const CLOUD_SAVE_TIMEOUT_MS = 15000;
+const CLOUD_SAVE_RETRY_DELAY_MS = 600;
+const PRODUCTION_QUEUE_ACCEPT_TIMEOUT_MS = 5000;
+const PRODUCTION_QUEUE_PRIMARY_TIMEOUT_MS = 3500;
+const PRODUCTION_QUEUE_POLL_INTERVAL_MS = 1200;
 const REPORT_API_BASE =
   // The desktop launcher opens index.html directly. It must use the same
   // cloud API as the hosted app, otherwise its browser-only data can never
@@ -524,6 +529,8 @@ let backupSelectedFile = null;
 let backupSelectedData = null;
 let backupFileValidation = null;
 let backupRestoreConfirmOpen = false;
+let backupClearConfirmOpen = false;
+let backupClearScope = "main";
 let backupBusy = false;
 let wageRateFilter = "all";
 let currentRateDate = new Date().toISOString().slice(0, 10);
@@ -642,6 +649,16 @@ let productionRecordDate = new Date().toISOString().slice(0, 10);
 let productionMessage = "";
 let productionMessageType = "success";
 let productionSaving = false;
+let productionQueueItems = [];
+let productionQueueLoading = false;
+let productionQueueMessage = "";
+let productionQueueMessageType = "success";
+let productionQueueFilter = "all";
+let productionQueueSearch = "";
+let productionQueuePage = 1;
+let productionQueuePollTimer = null;
+let productionQueueActionId = null;
+const productionQueueTrackers = new Map();
 let productionEditorOpen = false;
 let productionEditorDate = new Date().toISOString().slice(0, 10);
 let productionEditorFruit = "mangosteen";
@@ -1283,15 +1300,40 @@ function saveAccountUsers(accountUsers) {
 }
 
 async function cloudApiRequest(path, options = {}) {
+  const { timeoutMs = 0, ...fetchOptions } = options;
   const sessionToken = getSession()?.token || "";
-  const response = await fetch(`${REPORT_API_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(sessionToken ? { "X-Session-Token": sessionToken } : {}),
-      ...(options.headers || {})
+  const timeoutController =
+    timeoutMs > 0 && !fetchOptions.signal && typeof AbortController !== "undefined"
+      ? new AbortController()
+      : null;
+  const timeoutId = timeoutController
+    ? window.setTimeout(() => timeoutController.abort(), timeoutMs)
+    : null;
+  let response;
+  try {
+    response = await fetch(`${REPORT_API_BASE}${path}`, {
+      ...fetchOptions,
+      ...(timeoutController ? { signal: timeoutController.signal } : {}),
+      headers: {
+        "Content-Type": "application/json",
+        ...(sessionToken ? { "X-Session-Token": sessionToken } : {}),
+        ...(fetchOptions.headers || {})
+      }
+    });
+  } catch (error) {
+    if (timeoutController?.signal.aborted) {
+      const timeoutError = new Error(
+        "การเชื่อมต่อใช้เวลานานเกินไป ระบบจะตรวจสอบว่ารายการถูกบันทึกแล้วหรือไม่"
+      );
+      timeoutError.code = "REQUEST_TIMEOUT";
+      timeoutError.isTransient = true;
+      throw timeoutError;
     }
-  });
+    if (error && typeof error === "object") error.isTransient = true;
+    throw error;
+  } finally {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message =
@@ -1300,6 +1342,8 @@ async function cloudApiRequest(path, options = {}) {
         : data.error?.message || data.message || `Cloud API failed (${response.status})`;
     const error = new Error(message);
     error.status = response.status;
+    error.data = data;
+    error.isTransient = [408, 425, 429].includes(response.status) || response.status >= 500;
     throw error;
   }
   return data;
@@ -1476,7 +1520,36 @@ function verifyProductionRowsFromCloudResponse(expectedRows, cloudRows) {
   return Array.from(verifiedByUid.values()).sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
 }
 
-async function saveProductionRowsToCloud(records, { mode = "insert" } = {}) {
+function acceptVerifiedProductionRows(expectedRows, cloudRows) {
+  const verifiedRows = verifyProductionRowsFromCloudResponse(expectedRows, cloudRows);
+  applyingCloudState = true;
+  mergeProductionCloudRows(verifiedRows);
+  return verifiedRows;
+}
+
+async function findProductionRowsAlreadySaved(expectedRows) {
+  const clientUids = expectedRows.map(getProductionClientUid).filter(Boolean);
+  if (clientUids.length !== expectedRows.length) return null;
+  const response = await cloudApiRequest("/api/production-records/verify", {
+    method: "POST",
+    body: JSON.stringify({ client_uids: clientUids }),
+    timeoutMs: CLOUD_SAVE_TIMEOUT_MS
+  });
+  const cloudRows = Array.isArray(response.data) ? response.data : [];
+  if (cloudRows.length !== expectedRows.length) return null;
+  return acceptVerifiedProductionRows(expectedRows, cloudRows);
+}
+
+function isTransientCloudError(error) {
+  return Boolean(
+    error?.isTransient ||
+      error?.code === "REQUEST_TIMEOUT" ||
+      [408, 425, 429].includes(Number(error?.status)) ||
+      Number(error?.status) >= 500
+  );
+}
+
+async function saveProductionRowsToCloud(records, { mode = "insert", onStatus } = {}) {
   const rows = Array.isArray(records) ? records : [records];
   const filteredRows = rows.filter(Boolean);
   if (!filteredRows.length) return [];
@@ -1484,23 +1557,232 @@ async function saveProductionRowsToCloud(records, { mode = "insert" } = {}) {
   liveStateSyncTimers.delete("production_records");
   liveStateSyncInFlight.add("production_records");
   try {
-    const response = await cloudApiRequest("/api/production-records/bulk-sync", {
-      method: "POST",
-      body: JSON.stringify({ records: filteredRows, mode })
-    });
+    const sendRows = () =>
+      cloudApiRequest("/api/production-records/bulk-sync", {
+        method: "POST",
+        body: JSON.stringify({ records: filteredRows, mode }),
+        timeoutMs: CLOUD_SAVE_TIMEOUT_MS
+      });
+    let response;
+    try {
+      response = await sendRows();
+    } catch (firstError) {
+      if (!isTransientCloudError(firstError)) throw firstError;
+      onStatus?.("เน็ตตอบสนองช้า กำลังตรวจสอบรายการเดิมในฐานข้อมูล กรุณาอย่ากดบันทึกซ้ำ...");
+      try {
+        const savedRows = await findProductionRowsAlreadySaved(filteredRows);
+        if (savedRows) return savedRows;
+      } catch (verifyError) {
+        console.warn("Production save verification failed before retry.", verifyError);
+      }
+      await waitForMilliseconds(CLOUD_SAVE_RETRY_DELAY_MS);
+      onStatus?.("ยังไม่พบรายการ ระบบกำลังส่งรายการเดิมซ้ำอย่างปลอดภัยอีกครั้ง...");
+      try {
+        response = await sendRows();
+      } catch (retryError) {
+        if (!isTransientCloudError(retryError)) throw retryError;
+        try {
+          const savedRows = await findProductionRowsAlreadySaved(filteredRows);
+          if (savedRows) return savedRows;
+        } catch (verifyError) {
+          console.warn("Production save verification failed after retry.", verifyError);
+        }
+        const uncertainError = new Error(
+          "การเชื่อมต่อไม่เสถียรและยังยืนยันผลไม่ได้ ข้อมูลในช่องกรอกยังอยู่ กรุณารอเน็ตดีขึ้นแล้วกดบันทึกอีกครั้ง"
+        );
+        uncertainError.cause = retryError;
+        throw uncertainError;
+      }
+    }
     const cloudRows = Array.isArray(response.data) ? response.data : [];
     if (cloudRows.length !== filteredRows.length) {
       throw new Error(
         `Cloud ยืนยันกลับมาไม่ครบ (${cloudRows.length}/${filteredRows.length} รายการ) กรุณาตรวจสอบเน็ตแล้วกดบันทึกอีกครั้ง`
       );
     }
-    const verifiedRows = verifyProductionRowsFromCloudResponse(filteredRows, cloudRows);
-    applyingCloudState = true;
-    mergeProductionCloudRows(verifiedRows);
-    return verifiedRows;
+    return acceptVerifiedProductionRows(filteredRows, cloudRows);
   } finally {
     applyingCloudState = false;
     liveStateSyncInFlight.delete("production_records");
+  }
+}
+
+function createProductionQueueUid(records) {
+  const rows = (Array.isArray(records) ? records : [records]).filter(Boolean);
+  const batchUid = String(rows[0]?.batch_uid || "").trim();
+  return `production-queue:${batchUid || createProductionBatchUid()}`;
+}
+
+function productionQueueNumber(item) {
+  if (item?.queue_no) return String(item.queue_no).replace(/^Q-(\d+)$/, (_, value) => `Q-${value.padStart(6, "0")}`);
+  const id = Number(item?.id || 0);
+  return id > 0 ? `Q-${String(id).padStart(6, "0")}` : "Q------";
+}
+
+function mergeProductionQueueItem(item) {
+  if (!item || !Number(item.id)) return;
+  const index = productionQueueItems.findIndex((existing) => Number(existing.id) === Number(item.id));
+  if (index >= 0) productionQueueItems[index] = { ...productionQueueItems[index], ...item };
+  else productionQueueItems.unshift(item);
+  productionQueueItems.sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+  updateProductionQueueBadges();
+}
+
+function updateProductionQueueBadges() {
+  const activeCount = productionQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length;
+  document.querySelectorAll("[data-production-queue-count]").forEach((element) => {
+    element.textContent = String(activeCount);
+    element.hidden = activeCount <= 0;
+  });
+}
+
+function acceptProductionQueueResult(item) {
+  mergeProductionQueueItem(item);
+  if (item?.status === "succeeded" && Array.isArray(item.result_payload) && item.result_payload.length) {
+    applyingCloudState = true;
+    try {
+      mergeProductionCloudRows(item.result_payload);
+    } finally {
+      applyingCloudState = false;
+    }
+  }
+  return item;
+}
+
+async function enqueueProductionRows(records, { onStatus } = {}) {
+  const rows = (Array.isArray(records) ? records : [records]).filter(Boolean);
+  if (!rows.length) throw new Error("ไม่มีข้อมูลผลผลิตสำหรับเข้าคิว");
+  const queueUid = createProductionQueueUid(rows);
+  const acceptanceStartedAt = Date.now();
+  try {
+    const response = await cloudApiRequest("/api/production-save-queue/enqueue", {
+      method: "POST",
+      body: JSON.stringify({ queue_uid: queueUid, records: rows }),
+      timeoutMs: PRODUCTION_QUEUE_PRIMARY_TIMEOUT_MS
+    });
+    const item = acceptProductionQueueResult(response.data);
+    if (!item?.id) throw new Error("ฐานข้อมูลไม่ได้ส่งเลขคิวกลับมา ข้อมูลในฟอร์มยังอยู่");
+    trackProductionQueueItem(item.id);
+    return item;
+  } catch (error) {
+    if (!isTransientCloudError(error)) throw error;
+    onStatus?.("การตอบรับช้ากว่าปกติ กำลังตรวจสอบเลขคิวเดิมเพื่อป้องกันการส่งซ้ำ...");
+    try {
+      const remainingMs = PRODUCTION_QUEUE_ACCEPT_TIMEOUT_MS - (Date.now() - acceptanceStartedAt);
+      if (remainingMs < 300) throw new Error("Queue acceptance deadline reached.");
+      const lookup = await cloudApiRequest(
+        `/api/production-save-queue/lookup?queue_uid=${encodeURIComponent(queueUid)}`,
+        { timeoutMs: remainingMs }
+      );
+      const item = acceptProductionQueueResult(lookup.data);
+      if (item?.id) {
+        trackProductionQueueItem(item.id);
+        return item;
+      }
+    } catch (lookupError) {
+      console.warn("Production queue lookup failed.", lookupError);
+    }
+    const uncertainError = new Error(
+      "ยังยืนยันไม่ได้ว่าฐานข้อมูลรับคิวแล้ว ข้อมูลในช่องกรอกยังอยู่ กรุณาตรวจอินเทอร์เน็ตแล้วกดบันทึกอีกครั้ง"
+    );
+    uncertainError.cause = error;
+    throw uncertainError;
+  }
+}
+
+function stopProductionQueueTracker(queueId) {
+  const timer = productionQueueTrackers.get(Number(queueId));
+  if (timer) window.clearTimeout(timer);
+  productionQueueTrackers.delete(Number(queueId));
+}
+
+function trackProductionQueueItem(queueId, attempt = 0) {
+  const id = Number(queueId);
+  if (!id || productionQueueTrackers.has(id)) return;
+  const poll = async () => {
+    productionQueueTrackers.delete(id);
+    try {
+      const response = await cloudApiRequest(`/api/production-save-queue/${id}`, {
+        timeoutMs: PRODUCTION_QUEUE_ACCEPT_TIMEOUT_MS
+      });
+      const item = acceptProductionQueueResult(response.data);
+      if (["succeeded", "needs_review", "failed", "cancelled"].includes(item?.status)) {
+        if (productionView === "queue") render();
+        return;
+      }
+      if (productionView === "queue") render();
+    } catch (error) {
+      console.warn(`Queue ${id} status refresh failed.`, error);
+    }
+    if (attempt < 20) {
+      const timer = window.setTimeout(() => {
+        productionQueueTrackers.delete(id);
+        trackProductionQueueItem(id, attempt + 1);
+      }, PRODUCTION_QUEUE_POLL_INTERVAL_MS);
+      productionQueueTrackers.set(id, timer);
+    }
+  };
+  const timer = window.setTimeout(poll, attempt === 0 ? 350 : PRODUCTION_QUEUE_POLL_INTERVAL_MS);
+  productionQueueTrackers.set(id, timer);
+}
+
+async function refreshProductionQueue({ renderAfter = true } = {}) {
+  if (productionQueueLoading) return;
+  productionQueueLoading = true;
+  try {
+    const response = await cloudApiRequest("/api/production-save-queue?limit=100", {
+      timeoutMs: 7000
+    });
+    productionQueueItems = Array.isArray(response.data) ? response.data : [];
+    productionQueueItems.forEach((item) => acceptProductionQueueResult(item));
+    productionQueueMessage = "";
+    productionQueueMessageType = "success";
+  } catch (error) {
+    productionQueueMessage = error instanceof Error ? error.message : "โหลดคิวการบันทึกไม่สำเร็จ";
+    productionQueueMessageType = "error";
+  } finally {
+    productionQueueLoading = false;
+    if (renderAfter && productionView === "queue") render();
+  }
+}
+
+function scheduleProductionQueueRefresh() {
+  if (productionQueuePollTimer) window.clearTimeout(productionQueuePollTimer);
+  productionQueuePollTimer = window.setTimeout(async () => {
+    productionQueuePollTimer = null;
+    if (productionView !== "queue") return;
+    await refreshProductionQueue();
+    scheduleProductionQueueRefresh();
+  }, 2500);
+}
+
+async function runProductionQueueAction(queueId, action, payload = {}) {
+  if (productionQueueActionId) return;
+  productionQueueActionId = Number(queueId);
+  productionQueueMessage = "กำลังตรวจสอบข้อมูลกับฐานข้อมูลกลาง...";
+  productionQueueMessageType = "success";
+  render();
+  try {
+    const response = await cloudApiRequest(`/api/production-save-queue/${queueId}/${action}`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: 12000
+    });
+    const item = acceptProductionQueueResult(response.data);
+    productionQueueMessage = action === "verify"
+      ? item?.status === "succeeded" ? "ตรวจสอบแล้ว พบข้อมูลในฐานและเชื่อมรายการเรียบร้อย" : item?.error_message || "ตรวจสอบรายการแล้ว"
+      : action === "retry" ? "ส่งข้อมูลต้นฉบับเดิมกลับเข้าคิวแล้ว"
+      : action === "cancel" ? "ยกเลิกคิวแล้ว โดยยังเก็บประวัติไว้"
+      : "เชื่อมรายการเดิมเรียบร้อยแล้ว";
+    productionQueueMessageType = item?.status === "needs_review" ? "error" : "success";
+    if (["queued", "processing"].includes(item?.status)) trackProductionQueueItem(item.id);
+  } catch (error) {
+    productionQueueMessage = error instanceof Error ? error.message : "ดำเนินการกับคิวไม่สำเร็จ";
+    productionQueueMessageType = "error";
+  } finally {
+    productionQueueActionId = null;
+    await refreshProductionQueue({ renderAfter: false });
+    render();
   }
 }
 
@@ -6587,6 +6869,8 @@ function getAuditLogActionLabel(action) {
     DELETE_TIME_RECORD: "ลบเวลาทำงาน",
     EXPORT_DATABASE_BACKUP: "ส่งออกข้อมูลสำรอง",
     IMPORT_DATABASE_BACKUP: "นำเข้าข้อมูลสำรอง",
+    BACKUP_CLEAR_MAIN: "Backup และเคลียร์ข้อมูลธุรกรรม",
+    BACKUP_CLEAR_QUEUE: "Backup และเคลียร์ประวัติคิว",
     EXPORT_PILE_SUMMARY: "ส่งออกสรุปกอง",
     EXPORT_PILE_SUMMARY_PDF: "ส่งออกสรุปกอง PDF",
     EXPORT_PILE_SUMMARY_EXCEL: "ส่งออกสรุปกอง Excel"
@@ -6825,6 +7109,8 @@ const BACKUP_DATA_KEYS = [
   "time_records",
   "deduction_records",
   "deduction_applications",
+  "production_save_queue",
+  "production_save_queue_events",
   "audit_logs",
   "community_posts",
   "secret_messages"
@@ -6839,6 +7125,8 @@ function resetBackupSecurityState() {
   backupSelectedData = null;
   backupFileValidation = null;
   backupRestoreConfirmOpen = false;
+  backupClearConfirmOpen = false;
+  backupClearScope = "main";
   backupBusy = false;
   backupMessage = "";
 }
@@ -6875,6 +7163,14 @@ function backupGroupSummaries(data = backupPayloadData()) {
       icon: "ข้อมูล"
     },
     {
+      label: "คิวการบันทึกผลผลิต",
+      detail: "รายการคิว สถานะ และเหตุการณ์ตรวจสอบย้อนหลัง",
+      count:
+        backupRows(data, "production_save_queue").length +
+        backupRows(data, "production_save_queue_events").length,
+      icon: "คิว"
+    },
+    {
       label: "อัตราค่าจ้างและประวัติระบบ",
       detail: "อัตราค่าจ้าง รายการหัก และ Audit Log",
       count:
@@ -6905,7 +7201,7 @@ function formatBackupDateTime(value) {
 
 function getBackupHistory() {
   return getAuditLogs()
-    .filter((log) => ["EXPORT_DATABASE_BACKUP", "IMPORT_DATABASE_BACKUP"].includes(String(log.action || "").toUpperCase()))
+    .filter((log) => ["EXPORT_DATABASE_BACKUP", "IMPORT_DATABASE_BACKUP", "BACKUP_CLEAR_MAIN", "BACKUP_CLEAR_QUEUE"].includes(String(log.action || "").toUpperCase()))
     .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
     .slice(0, 12);
 }
@@ -6918,11 +7214,11 @@ function validateBackupPayload(parsed, file) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     errors.push("ไฟล์ไม่มีโครงสร้างข้อมูลสำรองที่รองรับ");
   }
-  if (![1, 2].includes(version)) {
+  if (![1, 2, 3].includes(version)) {
     errors.push(`เวอร์ชันไฟล์ ${version} ยังไม่รองรับ`);
   }
-  if (Number(file?.size || 0) > 50 * 1024 * 1024) {
-    errors.push("ไฟล์มีขนาดเกิน 50 MB");
+  if (Number(file?.size || 0) > 100 * 1024 * 1024) {
+    errors.push("ไฟล์มีขนาดเกิน 100 MB");
   }
 
   const includedKeys = BACKUP_DATA_KEYS.filter((key) => Array.isArray(data?.[key]));
@@ -6947,6 +7243,28 @@ async function exportDatabaseBackup(accessCode) {
   return cloudApiRequest("/api/backup", {
     headers: { "X-Backup-Code": accessCode }
   });
+}
+
+async function exportQueueBackup(accessCode) {
+  return cloudApiRequest("/api/backup/queue", {
+    headers: { "X-Backup-Code": accessCode }
+  });
+}
+
+async function backupAndClearDatabase(accessCode, scope) {
+  return cloudApiRequest("/api/backup/clear", {
+    method: "POST",
+    headers: { "X-Backup-Code": accessCode },
+    body: JSON.stringify({ scope, confirmation: "BACKUP_CLEAR" }),
+    timeoutMs: 120000
+  });
+}
+
+function downloadBackupPayload(backup, scope = "main") {
+  const content = JSON.stringify(backup, null, 2);
+  const timestamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
+  const scopeLabel = scope === "queue" ? "production-queue" : "database";
+  downloadTextFile(`pismai-${scopeLabel}-backup-${timestamp}.json`, content, "application/json;charset=utf-8");
 }
 
 async function restoreDatabaseBackup(accessCode, backupPayload) {
@@ -7004,9 +7322,10 @@ function renderBackupPasswordGate(user, moduleItem) {
   `;
 }
 
-function renderBackupOverview() {
+function renderBackupOverview(user) {
   const groups = backupGroupSummaries();
   const estimatedBytes = new Blob([JSON.stringify(backupSnapshot || {})]).size;
+  const canClear = canManageAllProductionRecords(user);
   return `
     <section class="backup-workspace-grid">
       <div class="backup-primary-workspace">
@@ -7026,13 +7345,49 @@ function renderBackupOverview() {
         </div>
         <div class="backup-download-bar">
           <div><span>ขนาดไฟล์โดยประมาณ</span><strong>${formatBackupFileSize(estimatedBytes)}</strong><small>${backupTotalRows().toLocaleString("th-TH")} รายการจากฐานข้อมูลกลาง</small></div>
-          <button class="btn btn-primary" id="exportBackup" type="button" ${backupBusy ? "disabled" : ""}>${backupBusy ? "กำลังสร้างไฟล์..." : "⇩ สร้างไฟล์สำรอง JSON"}</button>
+          <div class="backup-action-buttons">
+            <button class="btn btn-primary" id="exportBackup" type="button" ${backupBusy ? "disabled" : ""}>${backupBusy ? "กำลังสร้างไฟล์..." : "Backup"}</button>
+            <button class="btn backup-clear-button" data-open-backup-clear="main" type="button" ${backupBusy || !canClear ? "disabled" : ""}>Backup / เคลียร์</button>
+          </div>
         </div>
-        <div class="backup-warning">เก็บไฟล์สำรองไว้ในพื้นที่ปลอดภัย ไฟล์นี้อาจมีข้อมูลบัญชีและข้อมูลการทำงานขององค์กร</div>
+        <div class="backup-warning">Backup จะดาวน์โหลดไฟล์อย่างเดียว ส่วน Backup / เคลียร์ จะเก็บบัญชีผู้ใช้ พนักงาน อัตราค่าจ้าง การตั้งค่า และ Audit Log ไว้</div>
       </div>
       ${renderBackupStatusRail()}
     </section>
   `;
+}
+
+function renderQueueBackupOverview(user) {
+  const data = backupPayloadData();
+  const queues = backupRows(data, "production_save_queue");
+  const events = backupRows(data, "production_save_queue_events");
+  const clearable = queues.filter((row) => ["succeeded", "cancelled"].includes(String(row.status || ""))).length;
+  const protectedCount = queues.length - clearable;
+  const canClear = canManageAllProductionRecords(user);
+  return `
+    <section class="backup-workspace-grid">
+      <div class="backup-primary-workspace">
+        <div class="backup-section-heading">
+          <div class="backup-section-icon">คิว</div>
+          <div><h3>สำรองประวัติคิวการบันทึก</h3><p>เก็บรายการคิว สถานะ เหตุการณ์ ผู้บันทึก และเลขรายการผลผลิตจริงสำหรับตรวจสอบย้อนหลัง</p></div>
+        </div>
+        <div class="backup-queue-summary">
+          <div><span>คิวทั้งหมด</span><strong>${queues.length.toLocaleString("th-TH")}</strong><small>รายการ</small></div>
+          <div><span>เหตุการณ์ในคิว</span><strong>${events.length.toLocaleString("th-TH")}</strong><small>เหตุการณ์</small></div>
+          <div><span>เคลียร์ได้</span><strong>${clearable.toLocaleString("th-TH")}</strong><small>สำเร็จ/ยกเลิก</small></div>
+          <div><span>ระบบจะเก็บไว้</span><strong>${protectedCount.toLocaleString("th-TH")}</strong><small>คิวยังไม่จบ</small></div>
+        </div>
+        <div class="backup-download-bar">
+          <div><span>ขอบเขตไฟล์</span><strong>ประวัติคิวทั้งหมด</strong><small>การเคลียร์ไม่กระทบข้อมูลจริงใน production_records</small></div>
+          <div class="backup-action-buttons">
+            <button class="btn btn-primary" id="exportQueueBackup" type="button" ${backupBusy ? "disabled" : ""}>${backupBusy ? "กำลังสร้างไฟล์..." : "Backup"}</button>
+            <button class="btn backup-clear-button" data-open-backup-clear="queue" type="button" ${backupBusy || !clearable || !canClear ? "disabled" : ""}>Backup / เคลียร์</button>
+          </div>
+        </div>
+        <div class="backup-warning">คิวรอ คิวกำลังบันทึก คิวต้องตรวจสอบ และคิวล้มเหลวจะไม่ถูกลบ แม้เลือก Backup / เคลียร์</div>
+      </div>
+      ${renderBackupStatusRail()}
+    </section>`;
 }
 
 function renderBackupImport() {
@@ -7048,7 +7403,7 @@ function renderBackupImport() {
         <label class="backup-dropzone ${hasFile ? "has-file" : ""}" id="backupDropzone" for="importBackupFile">
           <span class="backup-upload-icon">⇧</span>
           <strong>${hasFile ? "เปลี่ยนไฟล์สำรอง" : "เลือกไฟล์สำรอง .JSON"}</strong>
-          <small>ลากไฟล์มาวาง หรือกดเพื่อเลือกไฟล์ ขนาดไม่เกิน 50 MB</small>
+          <small>ลากไฟล์มาวาง หรือกดเพื่อเลือกไฟล์ ขนาดไม่เกิน 100 MB</small>
         </label>
         <input id="importBackupFile" type="file" accept="application/json,.json" hidden />
         ${hasFile ? `
@@ -7105,7 +7460,7 @@ function renderBackupHistory() {
 
 function renderBackupStatusRail() {
   const history = getBackupHistory();
-  const latestExport = history.find((log) => String(log.action).toUpperCase() === "EXPORT_DATABASE_BACKUP");
+  const latestExport = history.find((log) => ["EXPORT_DATABASE_BACKUP", "BACKUP_CLEAR_MAIN", "BACKUP_CLEAR_QUEUE"].includes(String(log.action).toUpperCase()));
   const latestImport = history.find((log) => String(log.action).toUpperCase() === "IMPORT_DATABASE_BACKUP");
   return `
     <aside class="backup-status-rail">
@@ -7142,9 +7497,38 @@ function renderBackupRestoreConfirm() {
   `;
 }
 
+function renderBackupClearConfirm() {
+  if (!backupClearConfirmOpen) return "";
+  const queueScope = backupClearScope === "queue";
+  return `
+    <div class="backup-modal-backdrop" role="presentation">
+      <section class="backup-confirm-modal backup-clear-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="backupClearConfirmTitle">
+        <span class="backup-confirm-icon">!</span>
+        <h3 id="backupClearConfirmTitle">ยืนยัน Backup / เคลียร์${queueScope ? "ประวัติคิว" : "ข้อมูลธุรกรรม"}</h3>
+        <p>${queueScope
+          ? "ระบบจะสร้างไฟล์ เก็บสำเนา Private และตรวจสอบก่อนลบเฉพาะคิวที่สำเร็จหรือยกเลิกแล้ว ข้อมูลผลผลิตจริงจะไม่ถูกลบ"
+          : "ระบบจะสำรองทั้งระบบก่อนลบผลผลิต เวลา รายการหัก เบี้ยขยัน และคิว โดยเก็บบัญชี พนักงาน อัตราค่าจ้าง การตั้งค่า และ Audit Log ไว้"}</p>
+        <div class="backup-clear-safety-list">
+          <span>1. สร้าง Snapshot พร้อม checksum</span>
+          <span>2. เก็บและตรวจสอบ Private Archive</span>
+          <span>3. ลบเฉพาะ ID ที่อยู่ใน Snapshot</span>
+        </div>
+        <form id="backupClearConfirmForm">
+          <input type="hidden" name="scope" value="${backupClearScope}" />
+          <label><span>รหัส Backup 4 หลัก</span><input id="backupClearCode" name="backupClearCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" required /></label>
+          <label class="backup-clear-checkbox"><input name="accepted" type="checkbox" value="yes" required /><span>ยืนยันว่าได้อ่านขอบเขตข้อมูลที่จะเคลียร์แล้ว</span></label>
+          <div class="backup-confirm-actions">
+            <button class="btn btn-outline" id="cancelBackupClear" type="button">ยกเลิก</button>
+            <button class="btn backup-clear-button" type="submit" ${backupBusy ? "disabled" : ""}>${backupBusy ? "กำลังสำรองและตรวจสอบ..." : "ยืนยัน Backup / เคลียร์"}</button>
+          </div>
+        </form>
+      </section>
+    </div>`;
+}
+
 function renderBackupModule(user, moduleItem) {
   if (!backupUnlocked) return renderBackupPasswordGate(user, moduleItem);
-  const latestExport = getBackupHistory().find((log) => String(log.action).toUpperCase() === "EXPORT_DATABASE_BACKUP");
+  const latestExport = getBackupHistory().find((log) => ["EXPORT_DATABASE_BACKUP", "BACKUP_CLEAR_MAIN", "BACKUP_CLEAR_QUEUE"].includes(String(log.action).toUpperCase()));
   return `
     <section class="backup-center">
       <header class="backup-center-header">
@@ -7159,13 +7543,15 @@ function renderBackupModule(user, moduleItem) {
       </header>
       <nav class="backup-tabs" aria-label="เครื่องมือสำรองข้อมูล">
         <button class="${backupActiveTab === "backup" ? "active" : ""}" data-backup-tab="backup" type="button">▱ สำรองข้อมูล</button>
+        <button class="${backupActiveTab === "queue" ? "active" : ""}" data-backup-tab="queue" type="button">คิวการบันทึก</button>
         <button class="${backupActiveTab === "import" ? "active" : ""}" data-backup-tab="import" type="button">↻ Import / กู้คืนข้อมูล</button>
         <button class="${backupActiveTab === "history" ? "active" : ""}" data-backup-tab="history" type="button">◷ ประวัติ</button>
       </nav>
       ${backupMessage ? `<div class="backup-inline-message ${backupMessageType === "error" ? "is-error" : "is-success"}" role="alert">${escapeHtml(backupMessage)}</div>` : ""}
-      ${backupActiveTab === "backup" ? renderBackupOverview() : backupActiveTab === "import" ? renderBackupImport() : renderBackupHistory()}
+      ${backupActiveTab === "backup" ? renderBackupOverview(user) : backupActiveTab === "queue" ? renderQueueBackupOverview(user) : backupActiveTab === "import" ? renderBackupImport() : renderBackupHistory()}
     </section>
     ${renderBackupRestoreConfirm()}
+    ${renderBackupClearConfirm()}
   `;
 }
 
@@ -7241,6 +7627,7 @@ function bindBackupEvents(user) {
       backupActiveTab = button.dataset.backupTab || "backup";
       backupMessage = "";
       backupRestoreConfirmOpen = false;
+      backupClearConfirmOpen = false;
       render();
     });
   });
@@ -7252,9 +7639,7 @@ function bindBackupEvents(user) {
     try {
       const backup = await exportDatabaseBackup(backupAccessCode);
       backupSnapshot = backup;
-      const content = JSON.stringify(backup, null, 2);
-      const timestamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
-      downloadTextFile(`pismai-database-backup-${timestamp}.json`, content, "application/json;charset=utf-8");
+      downloadBackupPayload(backup, "main");
       addAuditLog(user, "EXPORT_DATABASE_BACKUP", `Exported ${backupTotalRows(backupPayloadData(backup))} Supabase rows`);
       backupBusy = false;
       setBackupMessage("สร้างและดาวน์โหลดไฟล์สำรองเรียบร้อยแล้ว");
@@ -7265,6 +7650,91 @@ function bindBackupEvents(user) {
       setBackupMessage(error instanceof Error ? error.message : "สร้างไฟล์สำรองไม่สำเร็จ", "error");
       render();
     }
+  });
+
+  document.querySelector("#exportQueueBackup")?.addEventListener("click", async () => {
+    backupBusy = true;
+    backupMessage = "";
+    render();
+    try {
+      const backup = await exportQueueBackup(backupAccessCode);
+      downloadBackupPayload(backup, "queue");
+      addAuditLog(user, "EXPORT_DATABASE_BACKUP", `Exported ${backupTotalRows(backupPayloadData(backup))} queue rows`);
+      backupBusy = false;
+      setBackupMessage("สร้างและดาวน์โหลดไฟล์สำรองคิวเรียบร้อยแล้ว");
+    } catch (error) {
+      backupBusy = false;
+      if (error?.status === 403) resetBackupSecurityState();
+      setBackupMessage(error instanceof Error ? error.message : "สร้างไฟล์สำรองคิวไม่สำเร็จ", "error");
+    }
+    render();
+  });
+
+  document.querySelectorAll("[data-open-backup-clear]").forEach((button) => {
+    button.addEventListener("click", () => {
+      backupClearScope = button.dataset.openBackupClear === "queue" ? "queue" : "main";
+      backupClearConfirmOpen = true;
+      backupMessage = "";
+      render();
+      window.setTimeout(() => document.querySelector("#backupClearCode")?.focus(), 0);
+    });
+  });
+
+  document.querySelector("#cancelBackupClear")?.addEventListener("click", () => {
+    backupClearConfirmOpen = false;
+    render();
+  });
+
+  const backupClearCode = document.querySelector("#backupClearCode");
+  backupClearCode?.addEventListener("input", () => {
+    backupClearCode.value = backupClearCode.value.replace(/\D/g, "").slice(0, 4);
+  });
+
+  document.querySelector("#backupClearConfirmForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const code = String(form.get("backupClearCode") || "");
+    const scope = form.get("scope") === "queue" ? "queue" : "main";
+    if (code.length !== 4 || form.get("accepted") !== "yes") {
+      setBackupMessage("กรุณากรอกรหัสและยืนยันขอบเขตการเคลียร์ข้อมูล", "error");
+      render();
+      return;
+    }
+    backupBusy = true;
+    backupClearConfirmOpen = true;
+    backupMessage = "";
+    render();
+    try {
+      const result = await backupAndClearDatabase(code, scope);
+      if (!result?.backup || !result?.archive?.verified) {
+        throw new Error("เซิร์ฟเวอร์ไม่ได้ยืนยัน Private Archive จึงไม่สามารถรับรองการเคลียร์ข้อมูลได้");
+      }
+      downloadBackupPayload(result.backup, scope);
+      backupClearConfirmOpen = false;
+      backupBusy = false;
+      if (result.clear_complete && result.audit_saved) {
+        setBackupMessage(`Backup / เคลียร์สำเร็จ ลบข้อมูลที่สำรองแล้ว ${Object.values(result.cleared || {}).reduce((sum, value) => sum + Number(value || 0), 0).toLocaleString("th-TH")} รายการ`);
+      } else if (result.clear_complete) {
+        setBackupMessage("Backup และเคลียร์สำเร็จ พร้อมเก็บ Private Archive แล้ว แต่บันทึก Audit Log ไม่สำเร็จ กรุณาแจ้งผู้ดูแลระบบ", "error");
+      } else {
+        setBackupMessage(`ไฟล์และ Private Archive ถูกสร้างแล้ว แต่เคลียร์ได้ไม่ครบ กรุณาตรวจ Audit Log และอย่ากดซ้ำ`, "error");
+      }
+      backupSnapshot = await exportDatabaseBackup(backupAccessCode);
+      await refreshAppDataAfterRestore();
+      await refreshProductionQueue({ renderAfter: false });
+    } catch (error) {
+      backupBusy = false;
+      backupClearConfirmOpen = false;
+      if (error?.status === 403) resetBackupSecurityState();
+      const stoppedBeforeClear = ["snapshot", "archive_upload", "archive_verify"].includes(error?.data?.stage);
+      setBackupMessage(
+        stoppedBeforeClear
+          ? `${error instanceof Error ? error.message : "Backup / เคลียร์ไม่สำเร็จ"} ระบบหยุดก่อนเริ่มลบข้อมูล`
+          : `${error instanceof Error ? error.message : "ยังยืนยันผล Backup / เคลียร์ไม่ได้"} กรุณาตรวจประวัติ Backup หรือ Private Archive ก่อน และอย่ากดซ้ำ`,
+        "error"
+      );
+    }
+    render();
   });
 
   document.querySelector("#importBackupFile")?.addEventListener("change", (event) => {
@@ -7440,6 +7910,9 @@ function renderProductionManagement(user, moduleItem) {
   if (productionEditorOpen) {
     return renderProductionEditor(user, moduleItem);
   }
+  if (productionView === "queue") {
+    return renderProductionQueuePage(user, moduleItem);
+  }
   const selectedFruit = productionFruitOptions.find((fruit) => fruit.id === selectedProductionFruit);
 
   if (!selectedFruit) {
@@ -7468,6 +7941,7 @@ function renderProductionManagement(user, moduleItem) {
           <p>${escapeHtml(labels.description)}</p>
         </div>
         <div class="panel-actions">
+          <button class="btn btn-outline production-queue-open-button" data-open-production-queue type="button">คิวการบันทึก <span class="production-queue-count" data-production-queue-count ${productionQueueItems.some((item) => ["queued", "processing"].includes(item.status)) ? "" : "hidden"}>${productionQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length}</span></button>
           <button class="btn btn-outline report-primary-button" data-production-fruit-menu type="button">เปลี่ยนผลไม้</button>
           <span class="badge badge-success">พร้อมบันทึก</span>
         </div>
@@ -7490,6 +7964,139 @@ function renderProductionManagement(user, moduleItem) {
   `;
 }
 
+function productionQueueStatusMeta(item) {
+  const status = String(item?.status || "queued");
+  if (status === "processing") return { label: "กำลังบันทึก", detail: "กำลังตรวจสอบและเขียนฐานข้อมูล", className: "processing", icon: "◌" };
+  if (status === "succeeded") return { label: "บันทึกสำเร็จ", detail: item.result_record_ids?.length ? `รายการจริง ${item.result_record_ids.map((id) => `#${id}`).join(", ")}` : "ฐานข้อมูลยืนยันแล้ว", className: "succeeded", icon: "✓" };
+  if (status === "needs_review") {
+    const notFound = item.error_code === "not_found";
+    return { label: notFound ? "ไม่พบข้อมูลในฐาน" : "ต้องตรวจสอบ", detail: item.error_message || "ระบบหยุดรายการไว้เพื่อความปลอดภัย", className: "review", icon: "!" };
+  }
+  if (status === "failed") return { label: "บันทึกไม่สำเร็จ", detail: item.error_message || "รอตรวจสอบ", className: "failed", icon: "×" };
+  if (status === "cancelled") return { label: "ยกเลิกแล้ว", detail: `ยกเลิกโดย ${item.cancelled_by || "ผู้ใช้งาน"}`, className: "cancelled", icon: "−" };
+  return { label: "รอคิว", detail: `ลำดับรอ ${Math.max(1, productionQueueItems.filter((row) => row.status === "queued" && Number(row.id) < Number(item.id)).length + 1)}`, className: "queued", icon: "○" };
+}
+
+function formatProductionQueueDate(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "-";
+  return `${match[3]}/${match[2]}/${Number(match[1]) + 543}`;
+}
+
+function formatProductionQueueDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return { date: "-", time: "-" };
+  return {
+    date: date.toLocaleDateString("th-TH", { day: "2-digit", month: "2-digit", year: "numeric" }),
+    time: date.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+  };
+}
+
+function productionQueueFruitLabel(fruitType) {
+  return productionFruitOptions.find((fruit) => fruit.id === fruitType)?.label || fruitType || "ผลผลิต";
+}
+
+function productionQueueCanAct(user, item) {
+  const identities = [user?.username, user?.fullname].map((value) => String(value || "").trim().toLocaleLowerCase("th-TH"));
+  return canManageAllProductionRecords(user) || identities.includes(String(item?.created_by || "").trim().toLocaleLowerCase("th-TH"));
+}
+
+function renderProductionQueueActions(user, item) {
+  const busy = Number(productionQueueActionId) === Number(item.id);
+  if (busy) return `<button class="btn btn-small btn-outline" type="button" disabled>กำลังตรวจสอบ...</button>`;
+  const canAct = productionQueueCanAct(user, item);
+  if (item.status === "needs_review" || item.status === "failed") {
+    const candidateIds = Array.isArray(item.duplicate_details?.existing_ids) ? item.duplicate_details.existing_ids : [];
+    const linkButton = canManageAllProductionRecords(user) && item.error_code !== "not_found" && candidateIds.length
+      ? `<button class="btn btn-small btn-primary" data-queue-link="${item.id}" data-record-ids="${escapeHtml(candidateIds.join(","))}" type="button">ใช้รายการเดิม</button>`
+      : "";
+    const retryButton = canAct && item.error_code === "not_found"
+      ? `<button class="btn btn-small btn-primary" data-queue-retry="${item.id}" type="button">บันทึกใหม่</button>`
+      : "";
+    const cancelButton = canAct
+      ? `<button class="btn btn-small btn-outline" data-queue-cancel="${item.id}" type="button">ยกเลิก</button>`
+      : "";
+    return `<div class="production-queue-row-actions"><button class="btn btn-small btn-outline" data-queue-verify="${item.id}" type="button">ตรวจสอบ</button>${retryButton}${linkButton}${cancelButton}</div>`;
+  }
+  if (item.status === "queued" && canAct) {
+    return `<button class="btn btn-small btn-outline" data-queue-cancel="${item.id}" type="button">ยกเลิก</button>`;
+  }
+  return `<span class="production-queue-locked">${item.status === "succeeded" ? "เก็บในประวัติ" : "-"}</span>`;
+}
+
+function renderProductionQueueRow(user, item) {
+  const status = productionQueueStatusMeta(item);
+  const submitted = formatProductionQueueDateTime(item.created_at);
+  const elapsedMs = item.finished_at && item.created_at
+    ? Math.max(0, new Date(item.finished_at).getTime() - new Date(item.created_at).getTime())
+    : item.created_at ? Math.max(0, Date.now() - new Date(item.created_at).getTime()) : 0;
+  const elapsedText = Number.isFinite(elapsedMs) ? `${(elapsedMs / 1000).toLocaleString("th-TH", { maximumFractionDigits: 1 })} วิ.` : "-";
+  return `
+    <article class="production-queue-row status-${status.className}" data-queue-search-row>
+      <div class="production-queue-cell queue-number"><span>คิว</span><strong>#${escapeHtml(productionQueueNumber(item))}</strong><small>${item.record_count || 1} รายการ</small></div>
+      <div class="production-queue-cell queue-production"><span>ข้อมูลผลผลิต</span><strong>${escapeHtml(productionQueueFruitLabel(item.fruit_type))}</strong><small>${escapeHtml(item.emp_code || "-")} · ${escapeHtml(item.employee_name || "-")}</small></div>
+      <div class="production-queue-cell queue-amount"><span>จำนวนที่บันทึก</span><strong>${numberText(item.total_weight)} กก.</strong><small>${money(item.total_amount || 0)}</small></div>
+      <div class="production-queue-cell queue-date"><span>วันที่ข้อมูล</span><strong>${escapeHtml(formatProductionQueueDate(item.record_date))}</strong><small>${escapeHtml(submitted.time)} น.</small></div>
+      <div class="production-queue-cell queue-actor"><span>ผู้บันทึก</span><strong>${escapeHtml(item.created_by || "-")}</strong><small>ลองแล้ว ${Number(item.attempt_count || 0)} ครั้ง</small></div>
+      <div class="production-queue-cell queue-status"><span>สถานะ · ${escapeHtml(elapsedText)}</span><div class="production-queue-status ${status.className}"><i>${status.icon}</i><strong>${escapeHtml(status.label)}</strong></div><small>${escapeHtml(status.detail)} · ผู้บันทึก ${escapeHtml(item.created_by || "-")}</small></div>
+      <div class="production-queue-cell queue-actions"><span>จัดการ</span>${renderProductionQueueActions(user, item)}</div>
+    </article>`;
+}
+
+function renderProductionQueuePage(user, moduleItem) {
+  const search = productionQueueSearch.trim().toLocaleLowerCase("th-TH");
+  const matchesFilter = (item) => {
+    if (productionQueueFilter === "active") return ["queued", "processing"].includes(item.status);
+    if (productionQueueFilter === "review") return ["needs_review", "failed"].includes(item.status);
+    if (productionQueueFilter === "done") return ["succeeded", "cancelled"].includes(item.status);
+    return true;
+  };
+  const filtered = productionQueueItems.filter((item) => {
+    if (!matchesFilter(item)) return false;
+    if (!search) return true;
+    return [productionQueueNumber(item), item.emp_code, item.employee_name, item.created_by, productionQueueFruitLabel(item.fruit_type)]
+      .some((value) => String(value || "").toLocaleLowerCase("th-TH").includes(search));
+  });
+  const pageSize = 10;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  productionQueuePage = Math.min(Math.max(1, productionQueuePage), totalPages);
+  const visible = filtered.slice((productionQueuePage - 1) * pageSize, productionQueuePage * pageSize);
+  const activeCount = productionQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length;
+  const successToday = productionQueueItems.filter((item) => item.status === "succeeded" && String(item.finished_at || "").slice(0, 10) === new Date().toISOString().slice(0, 10)).length;
+  const reviewCount = productionQueueItems.filter((item) => ["needs_review", "failed"].includes(item.status)).length;
+  const completedTimes = productionQueueItems
+    .filter((item) => item.status === "succeeded" && item.created_at && item.finished_at)
+    .map((item) => new Date(item.finished_at).getTime() - new Date(item.created_at).getTime())
+    .filter((value) => Number.isFinite(value) && value >= 0)
+    .slice(0, 20);
+  const averageSeconds = completedTimes.length ? completedTimes.reduce((sum, value) => sum + value, 0) / completedTimes.length / 1000 : 0;
+  return `
+    <section class="production-queue-page">
+      <header class="production-queue-header">
+        <div><div class="production-queue-breadcrumb">${escapeHtml(moduleItem.label)} <b>/</b> คิวการบันทึก</div><h2>คิวการบันทึกผลผลิต</h2><p>รับข้อมูลเข้าฐานกลางก่อน แล้วประมวลผลต่อโดยไม่ขัดจังหวะการกรอกงาน</p></div>
+        <div class="production-queue-header-actions"><span class="production-queue-online"><i></i> Supabase พร้อมใช้งาน</span><button class="btn btn-outline" data-close-production-queue type="button">กลับหน้าบันทึก</button></div>
+      </header>
+      ${productionQueueMessage ? `<div class="alert ${productionQueueMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(productionQueueMessage)}</div>` : ""}
+      <section class="production-queue-metrics">
+        <div><span>กำลังทำงาน</span><strong>${activeCount}</strong><small>รอคิวและกำลังบันทึก</small></div>
+        <div><span>สำเร็จวันนี้</span><strong>${successToday}</strong><small>ฐานข้อมูลยืนยันแล้ว</small></div>
+        <div><span>ต้องตรวจสอบ</span><strong>${reviewCount}</strong><small>ระบบหยุดไว้เพื่อความปลอดภัย</small></div>
+        <div><span>เวลาเฉลี่ย</span><strong>${averageSeconds ? `${averageSeconds.toLocaleString("th-TH", { maximumFractionDigits: 1 })} วิ.` : "-"}</strong><small>20 รายการล่าสุด</small></div>
+      </section>
+      <section class="panel production-queue-panel">
+        <div class="production-queue-toolbar">
+          <div class="module-tabs">
+            ${[["all", "ทั้งหมด"], ["active", "กำลังทำงาน"], ["review", "ต้องตรวจสอบ"], ["done", "สำเร็จ/ยกเลิก"]].map(([id, label]) => `<button class="module-tab ${productionQueueFilter === id ? "active" : ""}" data-queue-filter="${id}" type="button">${label}</button>`).join("")}
+          </div>
+          <label class="field compact-field production-queue-search"><span>ค้นหา</span><input id="productionQueueSearch" type="search" value="${escapeHtml(productionQueueSearch)}" placeholder="เลขคิว รหัส ชื่อ หรือผู้บันทึก" autocomplete="off" /></label>
+        </div>
+        <div class="production-queue-columns" aria-hidden="true"><span>คิว</span><span>ข้อมูลผลผลิต</span><span>จำนวน</span><span>วันที่</span><span>ผู้บันทึก</span><span>สถานะ</span><span>จัดการ</span></div>
+        <div class="production-queue-list">${productionQueueLoading && !productionQueueItems.length ? `<div class="empty-cell">กำลังโหลดคิวจากฐานข้อมูลกลาง...</div>` : visible.length ? visible.map((item) => renderProductionQueueRow(user, item)).join("") : `<div class="empty-cell">ยังไม่มีรายการตามตัวกรอง</div>`}</div>
+        <footer class="production-queue-pagination"><span>แสดง ${visible.length} จาก ${filtered.length} รายการ</span><div><button class="btn btn-small btn-outline" data-queue-page="${productionQueuePage - 1}" type="button" ${productionQueuePage <= 1 ? "disabled" : ""}>ก่อนหน้า</button><strong>หน้า ${productionQueuePage} / ${totalPages}</strong><button class="btn btn-small btn-outline" data-queue-page="${productionQueuePage + 1}" type="button" ${productionQueuePage >= totalPages ? "disabled" : ""}>ถัดไป</button></div><span class="production-queue-history-note">รายการสำเร็จไม่ถูกลบจากประวัติ</span></footer>
+      </section>
+    </section>`;
+}
+
 function renderProductionFruitMenu(user) {
   return `
     <section class="panel">
@@ -7498,7 +8105,7 @@ function renderProductionFruitMenu(user) {
           <h2>เลือกผลไม้สำหรับบันทึกผลผลิต</h2>
           <p>แต่ละผลไม้สามารถมีฟอร์มและข้อมูลที่ต้องเก็บต่างกัน เลือกผลไม้ก่อนเริ่มบันทึก</p>
         </div>
-        ${canEditProductionRecords(user) ? `<button class="btn btn-outline" data-open-production-editor type="button">แก้ไขข้อมูลผลผลิต</button>` : ""}
+        <div class="panel-actions"><button class="btn btn-outline production-queue-open-button" data-open-production-queue type="button">คิวการบันทึก <span class="production-queue-count" data-production-queue-count ${productionQueueItems.some((item) => ["queued", "processing"].includes(item.status)) ? "" : "hidden"}>${productionQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length}</span></button>${canEditProductionRecords(user) ? `<button class="btn btn-outline" data-open-production-editor type="button">แก้ไขข้อมูลผลผลิต</button>` : ""}</div>
       </div>
       <div class="production-fruit-grid">
         ${productionFruitOptions
@@ -7877,7 +8484,7 @@ function renderBatchEntry() {
         </section>
       </div>
       <div class="batch-actions">
-        <button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึกชุดนี้"}</button>
+        <button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังรับเข้าคิว..." : "บันทึกชุดนี้"}</button>
         <button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button>
       </div>
       <p class="demo-note">คีย์ลัด: ↑/↓ เปลี่ยนกองของช่องที่กำลังกรอก · ←/→ สลับดอก/น้ำช่องเดียวกัน</p>
@@ -7913,7 +8520,7 @@ function renderDurianBatchEntry() {
           <div class="batch-weight-grid">${renderInputs()}</div>
         </section>
       </div>
-      <div class="batch-actions"><button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึกชุดนี้"}</button><button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button></div>
+      <div class="batch-actions"><button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังรับเข้าคิว..." : "บันทึกชุดนี้"}</button><button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button></div>
     </section>`;
 }
 
@@ -8102,7 +8709,7 @@ function renderProductionFast(user, moduleItem) {
           />
         </label>
 
-        <button class="btn btn-primary form-submit" type="submit" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึก"}</button>
+        <button class="btn btn-primary form-submit" type="submit" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังรับเข้าคิว..." : "บันทึก"}</button>
       </form>
 
       <p class="demo-note">
@@ -8171,7 +8778,7 @@ function renderDurianFast(user, moduleItem) {
         <label class="field"><span>รหัสพนักงาน</span><input name="emp_code" id="fastEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(fastInputState.emp_code)}" autocomplete="off" required /></label>
         <div class="employee-result"><span>พนักงาน</span><strong>${escapeHtml(employeeName)}</strong></div>
         <label class="field"><span>น้ำหนักทุเรียน (กก.)</span><input id="fastDurianWeight" type="number" min="0" step="0.1" value="${escapeHtml(fastInputState.durian_weight || "")}" placeholder="0.0" required /></label>
-        <button class="btn btn-primary form-submit" type="submit" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังบันทึกขึ้น Cloud..." : "บันทึก"}</button>
+        <button class="btn btn-primary form-submit" type="submit" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังรับเข้าคิว..." : "บันทึก"}</button>
       </form>
       <p class="demo-note">กด Ctrl+S เพื่อบันทึก · Esc เพื่อล้างฟอร์ม</p>
     </section>
@@ -8324,12 +8931,16 @@ async function saveProductionFastForm(user) {
 
   try {
     productionSaving = true;
-    setFastInputMessage("กำลังบันทึกขึ้น Cloud... กรุณารอสักครู่", "success");
+    setFastInputMessage("กำลังส่งเข้าคิวกลาง... กรุณารอสักครู่", "success");
     render();
-    const record = apiCreateProductionRecord(payload, user, { sync: false });
-    const cloudRows = await saveProductionRowsToCloud(record);
-
-    setFastInputMessage(`บันทึกผลผลิตขึ้น Cloud แล้ว: รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(waterWeight + flowerWeight)} กก. · เลขอ้างอิง Cloud ${formatCloudRecordIds(cloudRows)} · ตรวจสำเร็จ ${cloudRows.length}/1 รายการ`);
+    const record = buildProductionRecord({ ...payload, batch_uid: createProductionBatchUid() }, user);
+    const queueItem = await enqueueProductionRows(record, {
+      onStatus: (message) => {
+        setFastInputMessage(message, "success");
+        render();
+      }
+    });
+    setFastInputMessage(`รับเข้าคิว #${productionQueueNumber(queueItem)} แล้ว: รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(waterWeight + flowerWeight)} กก. สามารถกรอกรายการถัดไปได้ทันที`);
     clearFastInputForm(true);
   } catch (error) {
     setFastInputMessage(
@@ -8383,11 +8994,16 @@ async function saveDurianFastForm(user) {
   }
   try {
     productionSaving = true;
-    setFastInputMessage("กำลังบันทึกขึ้น Cloud... กรุณารอสักครู่", "success");
+    setFastInputMessage("กำลังส่งทุเรียนเข้าคิวกลาง... กรุณารอสักครู่", "success");
     render();
-    const record = apiCreateProductionRecord(payload, user, { sync: false });
-    const cloudRows = await saveProductionRowsToCloud(record);
-    setFastInputMessage(`บันทึกทุเรียนขึ้น Cloud แล้ว: รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(totalWeight)} กก. · เลขอ้างอิง Cloud ${formatCloudRecordIds(cloudRows)} · ตรวจสำเร็จ ${cloudRows.length}/1 รายการ`);
+    const record = buildProductionRecord({ ...payload, batch_uid: createProductionBatchUid() }, user);
+    const queueItem = await enqueueProductionRows(record, {
+      onStatus: (message) => {
+        setFastInputMessage(message, "success");
+        render();
+      }
+    });
+    setFastInputMessage(`รับเข้าคิว #${productionQueueNumber(queueItem)} แล้ว: ทุเรียนรหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(totalWeight)} กก. สามารถกรอกรายการถัดไปได้ทันที`);
     clearFastInputForm(true);
   } catch (error) {
     setFastInputMessage(error instanceof Error ? error.message : "บันทึกทุเรียนขึ้น Cloud ไม่สำเร็จ", "error");
@@ -8593,6 +9209,79 @@ function bindProductionManagementEvents(user) {
   });
 
   if (productionEditorOpen) return;
+
+  document.querySelectorAll("[data-open-production-queue]").forEach((button) => {
+    button.addEventListener("click", () => {
+      productionView = "queue";
+      productionQueueMessage = "";
+      productionQueuePage = 1;
+      render();
+      refreshProductionQueue();
+      scheduleProductionQueueRefresh();
+    });
+  });
+
+  document.querySelector("[data-close-production-queue]")?.addEventListener("click", () => {
+    if (productionQueuePollTimer) window.clearTimeout(productionQueuePollTimer);
+    productionQueuePollTimer = null;
+    productionView = "fast-entry";
+    productionQueueMessage = "";
+    render();
+  });
+
+  if (productionView === "queue") {
+    document.querySelectorAll("[data-queue-filter]").forEach((button) => {
+      button.addEventListener("click", () => {
+        productionQueueFilter = button.dataset.queueFilter || "all";
+        productionQueuePage = 1;
+        render();
+      });
+    });
+    const queueSearch = document.querySelector("#productionQueueSearch");
+    queueSearch?.addEventListener("input", (event) => {
+      productionQueueSearch = event.target.value;
+    });
+    queueSearch?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      productionQueuePage = 1;
+      render();
+    });
+    queueSearch?.addEventListener("change", () => {
+      productionQueuePage = 1;
+      render();
+    });
+    document.querySelectorAll("[data-queue-page]").forEach((button) => {
+      button.addEventListener("click", () => {
+        productionQueuePage = Math.max(1, Number(button.dataset.queuePage) || 1);
+        render();
+      });
+    });
+    document.querySelectorAll("[data-queue-verify]").forEach((button) => button.addEventListener("click", () => runProductionQueueAction(Number(button.dataset.queueVerify), "verify")));
+    document.querySelectorAll("[data-queue-retry]").forEach((button) => button.addEventListener("click", () => {
+      if (!window.confirm("ยืนยันส่งข้อมูลต้นฉบับเดิมกลับเข้าคิวอีกครั้ง? ระบบจะตรวจข้อมูลซ้ำก่อนบันทึก")) return;
+      runProductionQueueAction(Number(button.dataset.queueRetry), "retry");
+    }));
+    document.querySelectorAll("[data-queue-cancel]").forEach((button) => button.addEventListener("click", () => {
+      const reason = window.prompt("ระบุเหตุผลที่ยกเลิกคิวนี้");
+      if (reason === null) return;
+      if (reason.trim().length < 3) {
+        productionQueueMessage = "กรุณาระบุเหตุผลการยกเลิกอย่างน้อย 3 ตัวอักษร";
+        productionQueueMessageType = "error";
+        render();
+        return;
+      }
+      runProductionQueueAction(Number(button.dataset.queueCancel), "cancel", { reason: reason.trim() });
+    }));
+    document.querySelectorAll("[data-queue-link]").forEach((button) => button.addEventListener("click", () => {
+      const recordIds = String(button.dataset.recordIds || "").split(",").map(Number).filter((id) => id > 0);
+      if (!recordIds.length || !window.confirm(`ยืนยันเชื่อมคิวนี้กับรายการเดิม ${recordIds.map((id) => `#${id}`).join(", ")}?`)) return;
+      runProductionQueueAction(Number(button.dataset.queueLink), "link-existing", { record_ids: recordIds });
+    }));
+    updateProductionQueueBadges();
+    scheduleProductionQueueRefresh();
+    return;
+  }
 
   if (productionView === "fast-entry" && document.querySelector("#productionFastForm")) {
     bindProductionFastEvents(user);
@@ -9017,14 +9706,16 @@ async function saveBatchEntries(user) {
 
   try {
     productionSaving = true;
-    setProductionMessage("กำลังบันทึกชุดนี้ขึ้น Cloud... กรุณารอสักครู่");
+    setProductionMessage("กำลังส่งชุดนี้เข้าคิวกลาง... กรุณารอสักครู่");
     render();
-    const createdRecords = apiCreateProductionRecordsBatch(
-      batchPayloads,
-      user,
-      { sync: false }
-    );
-    var cloudRows = await saveProductionRowsToCloud(createdRecords);
+    const batchUid = createProductionBatchUid();
+    const createdRecords = batchPayloads.map((payload) => buildProductionRecord({ ...payload, batch_uid: batchUid }, user));
+    var queueItem = await enqueueProductionRows(createdRecords, {
+      onStatus: (message) => {
+        setProductionMessage(message);
+        render();
+      }
+    });
   } catch (error) {
     setProductionMessage(
       error instanceof Error ? error.message : "บันทึกผลผลิตแบบชุดขึ้น Cloud ไม่สำเร็จ",
@@ -9045,11 +9736,10 @@ async function saveBatchEntries(user) {
     (sum, group) => sum + group.water + group.flower,
     0
   );
-  const successMessage = `บันทึกชุดนี้แล้ว: รหัส ${employee.emp_code}\nเลขอ้างอิง Cloud: ${formatCloudRecordIds(cloudRows)}\nตรวจสำเร็จ ${cloudRows.length}/${batchPayloads.length} รายการ\n${summaryLines.join("\n")}\nน้ำหนักทั้งหมดของการกรอกครั้งนี้ ${numberText(grandTotal)} กก.`;
+  const successMessage = `รับชุดนี้เข้าคิว #${productionQueueNumber(queueItem)} แล้ว: รหัส ${employee.emp_code}\nรวม ${batchPayloads.length} รายการ\n${summaryLines.join("\n")}\nน้ำหนักทั้งหมด ${numberText(grandTotal)} กก.\nสามารถกรอกพนักงานคนถัดไปได้ทันที`;
 
   clearBatchGridState();
   setProductionMessage(successMessage, "success");
-  window.alert(successMessage);
   productionSaving = false;
   render();
   window.setTimeout(() => document.querySelector("#batchEmpCode")?.focus(), 0);
@@ -9104,14 +9794,16 @@ async function saveDurianBatchEntries(user) {
   }
   try {
     productionSaving = true;
-    setProductionMessage("กำลังบันทึกทุเรียนชุดนี้ขึ้น Cloud... กรุณารอสักครู่");
+    setProductionMessage("กำลังส่งทุเรียนชุดนี้เข้าคิวกลาง... กรุณารอสักครู่");
     render();
-    const createdRecords = apiCreateProductionRecordsBatch(
-      batchPayloads,
-      user,
-      { sync: false }
-    );
-    var cloudRows = await saveProductionRowsToCloud(createdRecords);
+    const batchUid = createProductionBatchUid();
+    const createdRecords = batchPayloads.map((payload) => buildProductionRecord({ ...payload, batch_uid: batchUid }, user));
+    var queueItem = await enqueueProductionRows(createdRecords, {
+      onStatus: (message) => {
+        setProductionMessage(message);
+        render();
+      }
+    });
   } catch (error) {
     setProductionMessage(error instanceof Error ? error.message : "บันทึกทุเรียนแบบชุดขึ้น Cloud ไม่สำเร็จ", "error");
     productionSaving = false;
@@ -9122,10 +9814,9 @@ async function saveDurianBatchEntries(user) {
     `กอง ${group.pileNo}: ${numberText(group.durian_weight)} กก.`
   );
   const grandTotal = [...groups.values()].reduce((sum, group) => sum + group.durian_weight, 0);
-  const message = `บันทึกทุเรียนแบบชุดแล้ว: รหัส ${employee.emp_code}\nเลขอ้างอิง Cloud: ${formatCloudRecordIds(cloudRows)}\nตรวจสำเร็จ ${cloudRows.length}/${batchPayloads.length} รายการ\n${lines.join("\n")}\nน้ำหนักรวม ${numberText(grandTotal)} กก.`;
+  const message = `รับทุเรียนแบบชุดเข้าคิว #${productionQueueNumber(queueItem)} แล้ว: รหัส ${employee.emp_code}\nรวม ${batchPayloads.length} รายการ\n${lines.join("\n")}\nน้ำหนักรวม ${numberText(grandTotal)} กก.\nสามารถกรอกพนักงานคนถัดไปได้ทันที`;
   clearBatchGridState();
   setProductionMessage(message);
-  window.alert(message);
   productionSaving = false;
   render();
   window.setTimeout(() => document.querySelector("#batchEmpCode")?.focus(), 0);

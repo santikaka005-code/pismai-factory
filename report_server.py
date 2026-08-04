@@ -14,7 +14,7 @@ import time
 import textwrap
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
@@ -84,10 +84,23 @@ BACKUP_TABLES = [
     "time_records",
     "deduction_records",
     "deduction_applications",
+    "production_save_queue",
+    "production_save_queue_events",
     "audit_logs",
     "community_posts",
     "secret_messages",
 ]
+QUEUE_BACKUP_TABLES = ["production_save_queue", "production_save_queue_events"]
+MAIN_CLEAR_TABLES = [
+    "deduction_applications",
+    "deduction_records",
+    "time_records",
+    "production_records",
+    "production_sessions",
+    "production_save_queue_events",
+    "production_save_queue",
+]
+BACKUP_ARCHIVE_BUCKET = "pismai-backup-archives"
 LIVE_STATE_TABLES = {
     "production_sessions",
     "production_records",
@@ -98,8 +111,11 @@ ONLINE_USER_TIMEOUT_SECONDS = 45
 online_user_lock = threading.Lock()
 live_state_sync_lock = threading.Lock()
 production_record_insert_lock = threading.Lock()
+backup_clear_lock = threading.Lock()
 deduction_record_insert_lock = threading.Lock()
 time_record_insert_lock = threading.Lock()
+production_save_queue_wakeup = threading.Event()
+production_save_queue_worker_id = f"render-{os.getpid()}-{secrets.token_hex(4)}"
 online_user_sessions: dict[str, dict] = {}
 production_record_next_id: int | None = None
 deduction_record_next_id: int | None = None
@@ -753,6 +769,344 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
     return status, body
 
 
+def production_queue_payload_hash(rows: list[dict]) -> str:
+    canonical = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def production_queue_dedupe_key(row: dict) -> str:
+    signature = production_record_duplicate_signature(row)
+    return hashlib.sha256(signature.encode("utf-8")).hexdigest()
+
+
+def production_queue_to_client(row: dict, include_payload: bool = False) -> dict:
+    result = {
+        key: value
+        for key, value in row.items()
+        if key not in {"payload", "payload_hash", "locked_by"}
+    }
+    result["queue_no"] = f"Q-{int(row.get('id') or 0):06d}"
+    if include_payload:
+        result["payload"] = row.get("payload") if isinstance(row.get("payload"), list) else []
+    return result
+
+
+def production_queue_event(
+    queue_id: int,
+    event_type: str,
+    status: str,
+    message: str = "",
+    actor: str = "system",
+    metadata: dict | None = None,
+) -> None:
+    supabase_request(
+        "POST",
+        "production_save_queue_events",
+        {
+            "queue_id": queue_id,
+            "event_type": event_type,
+            "status": status,
+            "message": message or None,
+            "actor": actor or "system",
+            "metadata": metadata or {},
+        },
+        prefer="return=minimal",
+        timeout_seconds=5,
+    )
+
+
+def update_production_queue(
+    queue_id: int,
+    values: dict,
+    expected_status: str | None = None,
+    worker_id: str | None = None,
+) -> tuple[int, dict | None]:
+    filters = [f"id=eq.{queue_id}"]
+    if expected_status:
+        filters.append(f"status=eq.{quote(expected_status)}")
+    if worker_id:
+        filters.append(f"locked_by=eq.{quote(worker_id)}")
+    status, body = supabase_request(
+        "PATCH",
+        f"production_save_queue?{'&'.join(filters)}",
+        values,
+        prefer="return=representation",
+        timeout_seconds=6,
+    )
+    row = body[0] if status < 400 and isinstance(body, list) and body else None
+    return status, row
+
+
+def production_queue_success_values(rows: list[dict]) -> dict:
+    client_rows = [live_state_to_client("production_records", row) for row in rows if isinstance(row, dict)]
+    record_ids = [int(row.get("id")) for row in rows if str(row.get("id") or "").isdigit()]
+    return {
+        "status": "succeeded",
+        "result_record_ids": record_ids,
+        "result_payload": client_rows,
+        "duplicate_details": {},
+        "error_code": None,
+        "error_message": None,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "locked_at": None,
+        "locked_by": None,
+    }
+
+
+def inspect_production_queue_rows(rows: list[dict]) -> tuple[str, list[dict], dict]:
+    lookup_status, existing_rows = production_duplicate_lookup_rows(rows)
+    if lookup_status >= 400:
+        return "error", [], {"status": lookup_status, "error": existing_rows}
+    existing_by_uid = {
+        production_record_client_uid(row): row
+        for row in existing_rows
+        if production_record_client_uid(row)
+    }
+    existing_by_signature = {
+        production_record_duplicate_signature(row): row
+        for row in existing_rows
+    }
+    matched = []
+    for incoming in rows:
+        uid = production_record_client_uid(incoming)
+        existing = existing_by_uid.get(uid) if uid else None
+        existing = existing or existing_by_signature.get(production_record_duplicate_signature(incoming))
+        if existing:
+            matched.append(production_duplicate_response_row(existing, incoming))
+    if len(matched) == len(rows):
+        return "exact", matched, {"match_count": len(matched)}
+    near_error = near_duplicate_batch_error(rows, existing_rows)
+    if near_error:
+        return "near", matched, near_error
+    return "not_found", matched, {
+        "match_count": len(matched),
+        "expected_count": len(rows),
+        "existing_ids": [row.get("id") for row in matched if row.get("id") is not None],
+    }
+
+
+def validate_production_queue_rows(rows: list[dict]) -> str | None:
+    today = datetime.now(timezone(timedelta(hours=7))).date().isoformat()
+    for index, row in enumerate(rows, start=1):
+        raw = production_record_raw_payload(row)
+        record_date = str(row.get("record_date") or raw.get("record_date") or raw.get("date") or "")
+        emp_code = str(row.get("emp_code") or raw.get("emp_code") or "").strip()
+        fruit_type = str(row.get("fruit_type") or raw.get("fruit_type") or "mangosteen")
+        pile = production_pile_number(raw) or production_pile_number(row)
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", record_date) or record_date > today:
+            return f"Queue row {index} has an invalid or future production date."
+        if not emp_code or pile is None or pile < 1:
+            return f"Queue row {index} has an invalid employee code or pile."
+        if fruit_type == "durian":
+            weight = production_record_weight_total(row)
+            rate = safe_float(raw.get("durian_rate", raw.get("grade_rates", {}).get("A", 0)))
+            amount = safe_float(row.get("amount", raw.get("total_amount", raw.get("grand_total", 0))))
+            if weight <= 0 or abs(weight * 10 - round(weight * 10)) > 0.001:
+                return f"Queue row {index} has an invalid durian weight."
+            if rate <= 0 or abs(amount - weight * rate) > 0.05:
+                return f"Queue row {index} has an invalid durian rate or amount."
+            continue
+        water = safe_float(row.get("water_weight", raw.get("water_weight", raw.get("water", 0))))
+        flower = safe_float(row.get("flower_weight", raw.get("flower_weight", raw.get("flower", 0))))
+        water_rate = safe_float(raw.get("water_rate"))
+        flower_rate = safe_float(raw.get("flower_rate"))
+        amount = safe_float(row.get("amount", raw.get("total_amount", raw.get("grand_total", 0))))
+        if water < 0 or flower < 0:
+            return f"Queue row {index} has a negative production weight."
+        if any(abs(value * 10 - round(value * 10)) > 0.001 for value in (water, flower)):
+            return f"Queue row {index} has more than one weight decimal place."
+        if water_rate <= 0 or flower_rate <= 0 or abs(amount - (water * water_rate + flower * flower_rate)) > 0.05:
+            return f"Queue row {index} has an invalid rate or amount."
+    return None
+
+
+def finish_production_queue_success(job: dict, rows: list[dict], event_type: str = "succeeded") -> None:
+    queue_id = int(job.get("id") or 0)
+    status, updated = update_production_queue(
+        queue_id,
+        production_queue_success_values(rows),
+        expected_status="processing" if job.get("status") == "processing" else None,
+        worker_id=production_save_queue_worker_id if job.get("status") == "processing" else None,
+    )
+    if status < 400 and updated:
+        production_queue_event(
+            queue_id,
+            event_type,
+            "succeeded",
+            f"Saved {len(rows)} production record(s).",
+            production_save_queue_worker_id,
+            {"record_ids": updated.get("result_record_ids", [])},
+        )
+
+
+def process_production_save_queue_job(job: dict) -> None:
+    queue_id = int(job.get("id") or 0)
+    rows = job.get("payload") if isinstance(job.get("payload"), list) else []
+    if not rows or len(rows) != int(job.get("record_count") or 0):
+        update_production_queue(
+            queue_id,
+            {
+                "status": "needs_review",
+                "error_code": "invalid_payload",
+                "error_message": "Queue payload is missing or record count does not match.",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "locked_at": None,
+                "locked_by": None,
+            },
+            expected_status="processing",
+            worker_id=production_save_queue_worker_id,
+        )
+        production_queue_event(queue_id, "integrity_failed", "needs_review", "Queue payload validation failed.", production_save_queue_worker_id)
+        return
+    if not hmac.compare_digest(str(job.get("payload_hash") or ""), production_queue_payload_hash(rows)):
+        update_production_queue(
+            queue_id,
+            {
+                "status": "needs_review",
+                "error_code": "payload_hash_mismatch",
+                "error_message": "Queue payload hash does not match the accepted data.",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "locked_at": None,
+                "locked_by": None,
+            },
+            expected_status="processing",
+            worker_id=production_save_queue_worker_id,
+        )
+        production_queue_event(queue_id, "integrity_failed", "needs_review", "Queue payload hash mismatch.", production_save_queue_worker_id)
+        return
+
+    validation_error = validate_production_queue_rows(rows)
+    emp_code = str(rows[0].get("emp_code") or "").strip()
+    employee_status, employees = supabase_request(
+        "GET",
+        f"employees?emp_code=eq.{quote(emp_code)}&status=eq.Active&select=id,emp_code,fullname&limit=1",
+        timeout_seconds=5,
+    )
+    if employee_status >= 400:
+        validation_error = validation_error or f"Employee validation failed: {supabase_error_text(employees)}"
+    elif not isinstance(employees, list) or not employees:
+        validation_error = validation_error or "The employee is missing or inactive in the central database."
+    if validation_error:
+        update_production_queue(
+            queue_id,
+            {
+                "status": "needs_review",
+                "error_code": "validation_failed",
+                "error_message": validation_error,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "locked_at": None,
+                "locked_by": None,
+            },
+            expected_status="processing",
+            worker_id=production_save_queue_worker_id,
+        )
+        production_queue_event(queue_id, "validation_failed", "needs_review", validation_error, production_save_queue_worker_id)
+        return
+
+    with production_record_insert_lock:
+        status, body = insert_production_records_compatible(rows)
+    if status < 400 and isinstance(body, list) and len(body) == len(rows):
+        finish_production_queue_success(job, body)
+        return
+    if status >= 400:
+        match_type, matched_rows, match_details = inspect_production_queue_rows(rows)
+        if match_type == "exact":
+            finish_production_queue_success(job, matched_rows, event_type="concurrent_duplicate_resolved")
+            return
+        if match_type == "near":
+            body = match_details
+            status = 409
+    if status == 409 and isinstance(body, dict):
+        update_production_queue(
+            queue_id,
+            {
+                "status": "needs_review",
+                "duplicate_details": body,
+                "error_code": str(body.get("duplicate_guard") or "possible_duplicate"),
+                "error_message": str(body.get("error") or "Possible duplicate production data was found."),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "locked_at": None,
+                "locked_by": None,
+            },
+            expected_status="processing",
+            worker_id=production_save_queue_worker_id,
+        )
+        production_queue_event(queue_id, "duplicate_review", "needs_review", str(body.get("error") or "Possible duplicate."), production_save_queue_worker_id, body)
+        return
+
+    attempt_count = int(job.get("attempt_count") or 1)
+    max_attempts = int(job.get("max_attempts") or 3)
+    error_message = supabase_error_text(body) or f"Production save failed ({status})."
+    if status >= 500 and attempt_count < max_attempts:
+        update_production_queue(
+            queue_id,
+            {
+                "status": "queued",
+                "next_attempt_at": (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat(),
+                "error_code": "temporary_cloud_error",
+                "error_message": error_message,
+                "locked_at": None,
+                "locked_by": None,
+            },
+            expected_status="processing",
+            worker_id=production_save_queue_worker_id,
+        )
+        production_queue_event(queue_id, "retry_scheduled", "queued", error_message, production_save_queue_worker_id, {"attempt": attempt_count})
+        production_save_queue_wakeup.set()
+        return
+
+    update_production_queue(
+        queue_id,
+        {
+            "status": "needs_review",
+            "error_code": "save_failed",
+            "error_message": error_message,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "locked_at": None,
+            "locked_by": None,
+        },
+        expected_status="processing",
+        worker_id=production_save_queue_worker_id,
+    )
+    production_queue_event(queue_id, "save_failed", "needs_review", error_message, production_save_queue_worker_id, {"status": status})
+
+
+def production_save_queue_worker() -> None:
+    while True:
+        production_save_queue_wakeup.wait(timeout=2)
+        production_save_queue_wakeup.clear()
+        if not supabase_configured():
+            continue
+        while True:
+            status, body = supabase_request(
+                "POST",
+                "rpc/claim_next_production_save_queue",
+                {"p_worker_id": production_save_queue_worker_id},
+                timeout_seconds=6,
+            )
+            if status >= 400 or not isinstance(body, list) or not body:
+                break
+            try:
+                with backup_clear_lock:
+                    process_production_save_queue_job(body[0])
+            except Exception as error:
+                queue_id = int(body[0].get("id") or 0)
+                update_production_queue(
+                    queue_id,
+                    {
+                        "status": "needs_review",
+                        "error_code": "worker_exception",
+                        "error_message": str(error),
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "locked_at": None,
+                        "locked_by": None,
+                    },
+                    expected_status="processing",
+                    worker_id=production_save_queue_worker_id,
+                )
+                production_queue_event(queue_id, "worker_exception", "needs_review", str(error), production_save_queue_worker_id)
+
+
 def reserve_deduction_record_id(refresh: bool = False) -> int:
     global deduction_record_next_id
     if refresh or deduction_record_next_id is None:
@@ -1133,6 +1487,7 @@ def supabase_request(
     path: str,
     payload: dict | list | None = None,
     prefer: str | None = None,
+    timeout_seconds: float = 20,
 ) -> tuple[int, dict | list | str | None]:
     if not supabase_configured():
         return 503, {"error": "Supabase environment variables are not configured."}
@@ -1151,7 +1506,7 @@ def supabase_request(
 
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
             if not raw:
                 return response.status, None
@@ -1264,14 +1619,137 @@ def backup_authorized(handler: BaseHTTPRequestHandler) -> bool:
     return bool(BACKUP_ACCESS_CODE and hmac.compare_digest(provided, BACKUP_ACCESS_CODE))
 
 
-def read_supabase_backup() -> tuple[int, dict]:
+def read_supabase_backup(tables: list[str] | None = None) -> tuple[int, dict]:
     backup_data = {}
-    for table in BACKUP_TABLES:
+    for table in tables or BACKUP_TABLES:
         status, body = supabase_request("GET", f"{table}?select=*")
         if status >= 400:
             return status, {"error": body, "table": table}
         backup_data[table] = body if isinstance(body, list) else []
     return 200, backup_data
+
+
+def backup_archive_bytes(payload: dict) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+
+
+def backup_archive_checksum(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def supabase_storage_request(
+    method: str,
+    object_path: str,
+    content: bytes | None = None,
+    timeout_seconds: float = 30,
+) -> tuple[int, bytes | dict | str | None]:
+    if not supabase_configured():
+        return 503, {"error": "Supabase environment variables are not configured."}
+    encoded_path = quote(object_path.strip("/"), safe="/")
+    url = f"{SUPABASE_URL}/storage/v1/object/{BACKUP_ARCHIVE_BUCKET}/{encoded_path}"
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+    }
+    if content is not None:
+        headers["Content-Type"] = "application/json"
+        headers["x-upsert"] = "false"
+    request = urllib.request.Request(url, data=content, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read()
+            if method == "GET":
+                return response.status, raw
+            if not raw:
+                return response.status, None
+            try:
+                return response.status, json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return response.status, raw.decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8", errors="replace")
+        try:
+            return error.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return error.code, {"error": raw or str(error.reason)}
+    except Exception as error:
+        return 500, {"error": str(error)}
+
+
+def backup_snapshot_payload(scope: str, actor: str, data: dict) -> dict:
+    exported_at = datetime.now(timezone.utc).isoformat()
+    row_counts = {
+        table: len(rows)
+        for table, rows in data.items()
+        if isinstance(rows, list)
+    }
+    return {
+        "exported_at": exported_at,
+        "cutoff_at": exported_at,
+        "app": "Pismai Factory Wage",
+        "version": 3,
+        "source": "supabase",
+        "scope": scope,
+        "created_by": actor,
+        "row_counts": row_counts,
+        "total_rows": sum(row_counts.values()),
+        "data": data,
+    }
+
+
+def backup_snapshot_ids(data: dict, table: str) -> list[int]:
+    return sorted({
+        int(row.get("id"))
+        for row in data.get(table, [])
+        if isinstance(row, dict) and str(row.get("id") or "").isdigit() and int(row.get("id")) > 0
+    })
+
+
+def delete_backup_snapshot_rows(data: dict, scope: str) -> tuple[bool, dict, dict | None]:
+    cleared: dict[str, int] = {}
+    allowed_queue_ids = {
+        int(row.get("id"))
+        for row in data.get("production_save_queue", [])
+        if isinstance(row, dict)
+        and str(row.get("id") or "").isdigit()
+        and str(row.get("status") or "") in {"succeeded", "cancelled"}
+    }
+    tables = QUEUE_BACKUP_TABLES if scope == "queue" else MAIN_CLEAR_TABLES
+    for table in tables:
+        rows = data.get(table, [])
+        if table == "production_save_queue":
+            ids = sorted(allowed_queue_ids)
+        elif table == "production_save_queue_events":
+            ids = sorted({
+                int(row.get("id"))
+                for row in rows
+                if isinstance(row, dict)
+                and str(row.get("id") or "").isdigit()
+                and int(row.get("queue_id") or 0) in allowed_queue_ids
+            })
+        else:
+            ids = backup_snapshot_ids(data, table)
+        cleared[table] = 0
+        for offset in range(0, len(ids), 100):
+            chunk = ids[offset:offset + 100]
+            status, deleted = supabase_request(
+                "DELETE",
+                f"{table}?id=in.({','.join(str(value) for value in chunk)})",
+                prefer="return=representation",
+                timeout_seconds=30,
+            )
+            if status >= 400:
+                return False, cleared, {"table": table, "error": deleted, "status": status}
+            deleted_count = len(deleted) if isinstance(deleted, list) else 0
+            cleared[table] += deleted_count
+            if deleted_count != len(chunk):
+                return False, cleared, {
+                    "table": table,
+                    "error": "Delete count did not match the archived snapshot.",
+                    "expected": len(chunk),
+                    "deleted": deleted_count,
+                }
+    return True, cleared, None
 
 
 def restore_supabase_backup(data: dict) -> tuple[int, dict]:
@@ -6100,6 +6578,271 @@ class ReportHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/production-save-queue/enqueue":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            records = payload.get("records", [])
+            queue_uid = str(payload.get("queue_uid") or "").strip()
+            if not isinstance(records, list) or not (1 <= len(records) <= 100):
+                self.send_json({"error": "records must contain 1-100 items."}, 400)
+                return
+            if not re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", queue_uid):
+                self.send_json({"error": "queue_uid is invalid."}, 400)
+                return
+            converted = []
+            actor_username = str(actor.get("username") or "unknown").strip()
+            for record in records:
+                if not isinstance(record, dict):
+                    self.send_json({"error": "all records must be objects."}, 400)
+                    return
+                row = live_state_row("production_records", record)
+                row.pop("id", None)
+                row["queue_dedupe_key"] = production_queue_dedupe_key(row)
+                row["created_by"] = actor_username
+                row["updated_by"] = actor_username
+                raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+                raw["created_by"] = actor_username
+                raw["updated_by"] = actor_username
+                row["raw_payload"] = raw
+                converted.append(row)
+            client_uids = [production_record_client_uid(row) for row in converted]
+            if any(not uid for uid in client_uids) or len(set(client_uids)) != len(client_uids):
+                self.send_json({"error": "Every queued record requires a unique client_uid."}, 400)
+                return
+            identity_keys = {
+                (
+                    str(row.get("record_date") or ""),
+                    str(row.get("emp_code") or ""),
+                    str(row.get("fruit_type") or "mangosteen"),
+                )
+                for row in converted
+            }
+            if len(identity_keys) != 1:
+                self.send_json({"error": "One queue must contain one employee, date, and fruit type."}, 400)
+                return
+            record_date, emp_code, fruit_type = next(iter(identity_keys))
+            try:
+                datetime.strptime(record_date, "%Y-%m-%d")
+            except ValueError:
+                self.send_json({"error": "record_date must be YYYY-MM-DD."}, 400)
+                return
+            payload_hash = production_queue_payload_hash(converted)
+            first = converted[0]
+            queue_row = {
+                "queue_uid": queue_uid,
+                "batch_uid": production_record_batch_uid(first) or None,
+                "payload": converted,
+                "payload_hash": payload_hash,
+                "record_count": len(converted),
+                "fruit_type": fruit_type,
+                "record_date": record_date,
+                "employee_id": first.get("employee_id"),
+                "emp_code": emp_code,
+                "employee_name": str(first.get("employee_name") or ""),
+                "total_weight": round(sum(production_record_weight_total(row) for row in converted), 3),
+                "total_amount": round(sum(safe_float(row.get("amount", row.get("raw_payload", {}).get("total_amount", 0))) for row in converted), 2),
+                "status": "queued",
+                "created_by": actor_username,
+            }
+            status, body = supabase_request(
+                "POST",
+                "production_save_queue",
+                queue_row,
+                prefer="return=representation",
+                timeout_seconds=5,
+            )
+            if status >= 400:
+                existing_status, existing = supabase_request(
+                    "GET",
+                    f"production_save_queue?queue_uid=eq.{quote(queue_uid)}&select=*&limit=1",
+                    timeout_seconds=5,
+                )
+                if existing_status < 400 and isinstance(existing, list) and existing:
+                    existing_row = existing[0]
+                    if hmac.compare_digest(str(existing_row.get("payload_hash") or ""), payload_hash):
+                        production_save_queue_wakeup.set()
+                        self.send_json({"data": production_queue_to_client(existing_row), "idempotent": True}, 200)
+                        return
+                    self.send_json({"error": "queue_uid already exists with different data."}, 409)
+                    return
+                self.send_json({"error": body, "migration": "supabase_production_save_queue_migration.sql"}, status)
+                return
+            saved = body[0] if isinstance(body, list) and body else None
+            if not isinstance(saved, dict):
+                self.send_json({"error": "Queue insert returned no row."}, 500)
+                return
+            production_save_queue_wakeup.set()
+            self.send_json({"data": production_queue_to_client(saved), "accepted": True}, 202)
+            return
+
+        queue_action_match = re.fullmatch(r"/api/production-save-queue/(\d+)/(verify|retry|cancel|link-existing)", parsed.path)
+        if queue_action_match:
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            queue_id = int(queue_action_match.group(1))
+            action = queue_action_match.group(2)
+            status, rows = supabase_request(
+                "GET",
+                f"production_save_queue?id=eq.{queue_id}&select=*&limit=1",
+                timeout_seconds=6,
+            )
+            if status >= 400:
+                self.send_json({"error": rows}, status)
+                return
+            if not isinstance(rows, list) or not rows:
+                self.send_json({"error": "Queue item was not found."}, 404)
+                return
+            job = rows[0]
+            actor_username = str(actor.get("username") or "unknown").strip()
+            is_owner = str(job.get("created_by") or "").casefold() == actor_username.casefold()
+            is_supervisor = account_level_number(actor.get("level")) >= 4
+
+            if action == "verify":
+                if job.get("status") == "succeeded":
+                    self.send_json({"data": production_queue_to_client(job, include_payload=True)})
+                    return
+                if job.get("status") in {"queued", "processing"}:
+                    self.send_json({"data": production_queue_to_client(job), "processing": True}, 202)
+                    return
+                if job.get("status") == "cancelled":
+                    self.send_json({"error": "Cancelled queues cannot be verified or restored."}, 409)
+                    return
+                payload_rows = job.get("payload") if isinstance(job.get("payload"), list) else []
+                match_type, matched_rows, details = inspect_production_queue_rows(payload_rows)
+                if match_type == "error":
+                    self.send_json({"error": details}, int(details.get("status") or 500))
+                    return
+                if match_type == "exact":
+                    values = production_queue_success_values(matched_rows)
+                    update_status, updated = update_production_queue(queue_id, values)
+                    if update_status >= 400 or not updated:
+                        self.send_json({"error": "Could not confirm the queue result."}, update_status if update_status >= 400 else 500)
+                        return
+                    production_queue_event(queue_id, "manual_verified", "succeeded", "Existing production records matched the queue.", actor_username, details)
+                    self.send_json({"data": production_queue_to_client(updated, include_payload=True), "match": "exact"})
+                    return
+                error_code = "possible_duplicate" if match_type == "near" else "not_found"
+                error_message = (
+                    str(details.get("error") or "พบข้อมูลใกล้เคียง ต้องตรวจสอบก่อนสร้างรายการใหม่")
+                    if match_type == "near"
+                    else "ไม่พบข้อมูลชุดนี้ในฐานข้อมูล"
+                )
+                update_status, updated = update_production_queue(
+                    queue_id,
+                    {
+                        "status": "needs_review",
+                        "duplicate_details": details,
+                        "error_code": error_code,
+                        "error_message": error_message,
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "locked_at": None,
+                        "locked_by": None,
+                    },
+                    expected_status=str(job.get("status") or "needs_review"),
+                )
+                if update_status >= 400 or not updated:
+                    self.send_json({"error": "Could not update queue verification."}, update_status if update_status >= 400 else 500)
+                    return
+                production_queue_event(queue_id, "manual_checked", "needs_review", error_message, actor_username, details)
+                self.send_json({"data": production_queue_to_client(updated, include_payload=True), "match": match_type})
+                return
+
+            if not (is_owner or is_supervisor):
+                self.send_json({"error": "Only the queue owner or C4 and higher may perform this action."}, 403)
+                return
+            if action == "retry":
+                if job.get("status") not in {"needs_review", "failed"}:
+                    self.send_json({"error": "Only failed or review queues can be submitted again."}, 409)
+                    return
+                if str(job.get("error_code") or "") == "possible_duplicate":
+                    self.send_json({"error": "Similar data already exists. Verify and link the existing records or cancel this queue."}, 409)
+                    return
+                update_status, updated = update_production_queue(
+                    queue_id,
+                    {
+                        "status": "queued",
+                        "attempt_count": 0,
+                        "next_attempt_at": datetime.now(timezone.utc).isoformat(),
+                        "finished_at": None,
+                        "error_code": None,
+                        "error_message": None,
+                        "locked_at": None,
+                        "locked_by": None,
+                    },
+                    expected_status=str(job.get("status") or "queued"),
+                )
+                if update_status >= 400 or not updated:
+                    self.send_json({"error": "Could not return the item to the queue."}, update_status if update_status >= 400 else 500)
+                    return
+                production_queue_event(queue_id, "manual_retry", "queued", "Queue was submitted again with the original payload.", actor_username)
+                production_save_queue_wakeup.set()
+                self.send_json({"data": production_queue_to_client(updated)})
+                return
+            if action == "cancel":
+                if job.get("status") in {"processing", "succeeded", "cancelled"}:
+                    self.send_json({"error": "Processing, completed, or cancelled queues cannot be cancelled."}, 409)
+                    return
+                update_status, updated = update_production_queue(
+                    queue_id,
+                    {
+                        "status": "cancelled",
+                        "cancelled_by": actor_username,
+                        "cancelled_at": datetime.now(timezone.utc).isoformat(),
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "locked_at": None,
+                        "locked_by": None,
+                    },
+                    expected_status=str(job.get("status") or "queued"),
+                )
+                if update_status >= 400 or not updated:
+                    self.send_json({"error": "Could not cancel the queue."}, update_status if update_status >= 400 else 500)
+                    return
+                production_queue_event(queue_id, "cancelled", "cancelled", str(payload.get("reason") or "Cancelled by user."), actor_username)
+                self.send_json({"data": production_queue_to_client(updated)})
+                return
+            if not is_supervisor:
+                self.send_json({"error": "C4 or higher is required to link an existing record."}, 403)
+                return
+            if job.get("status") != "needs_review" or str(job.get("error_code") or "") == "not_found":
+                self.send_json({"error": "Only verified duplicate candidates can be linked."}, 409)
+                return
+            candidate_ids = {
+                int(value)
+                for value in (job.get("duplicate_details") or {}).get("existing_ids", [])
+                if str(value).isdigit() and int(value) > 0
+            }
+            requested_ids = {
+                int(value)
+                for value in payload.get("record_ids", [])
+                if str(value).isdigit() and int(value) > 0
+            }
+            if not requested_ids or not requested_ids.issubset(candidate_ids):
+                self.send_json({"error": "Selected records are not verified duplicate candidates."}, 400)
+                return
+            record_status, existing_records = supabase_request(
+                "GET",
+                f"production_records?id=in.({','.join(str(value) for value in sorted(requested_ids))})&select=*&order=id.asc",
+                timeout_seconds=6,
+            )
+            if record_status >= 400 or not isinstance(existing_records, list) or len(existing_records) != len(requested_ids):
+                self.send_json({"error": existing_records if record_status >= 400 else "Existing records are incomplete."}, record_status if record_status >= 400 else 409)
+                return
+            update_status, updated = update_production_queue(
+                queue_id,
+                production_queue_success_values(existing_records),
+                expected_status=str(job.get("status") or "needs_review"),
+            )
+            if update_status >= 400 or not updated:
+                self.send_json({"error": "Could not link existing records."}, update_status if update_status >= 400 else 500)
+                return
+            production_queue_event(queue_id, "linked_existing", "succeeded", "C4 linked verified existing production records.", actor_username, {"record_ids": sorted(requested_ids)})
+            self.send_json({"data": production_queue_to_client(updated)})
+            return
+
         if parsed.path == "/api/production-records/bulk-sync":
             records = payload.get("records", [])
             if not isinstance(records, list) or not records:
@@ -6612,6 +7355,108 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             status, body = restore_supabase_backup(data)
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/backup/clear":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            actor_username = str(actor.get("username") or "").strip()
+            actor_status, actor_rows = supabase_request(
+                "GET",
+                f"account_users?username=eq.{quote(actor_username)}&select=username,fullname,user_level,status&limit=1",
+                timeout_seconds=6,
+            )
+            actor_account = actor_rows[0] if actor_status < 400 and isinstance(actor_rows, list) and actor_rows else None
+            if not actor_account or str(actor_account.get("status") or "") != "Active":
+                self.send_json({"error": "The account is missing, inactive, or could not be verified."}, 403)
+                return
+            if account_level_number(actor_account.get("user_level")) < 4:
+                self.send_json({"error": "C4 or higher is required for Backup / Clear."}, 403)
+                return
+            if not backup_authorized(self):
+                self.send_json({"error": "Backup code is required."}, 403)
+                return
+            scope = str(payload.get("scope") or "").strip().lower()
+            if scope not in {"queue", "main"}:
+                self.send_json({"error": "scope must be queue or main."}, 400)
+                return
+            if str(payload.get("confirmation") or "") != "BACKUP_CLEAR":
+                self.send_json({"error": "Backup / Clear confirmation is missing."}, 400)
+                return
+            if not backup_clear_lock.acquire(blocking=False):
+                self.send_json({"error": "Another Backup / Clear operation is already running."}, 409)
+                return
+            try:
+                tables = QUEUE_BACKUP_TABLES if scope == "queue" else BACKUP_TABLES
+                snapshot_status, snapshot_data = read_supabase_backup(tables)
+                if snapshot_status >= 400:
+                    self.send_json({"error": snapshot_data, "stage": "snapshot"}, snapshot_status)
+                    return
+                backup = backup_snapshot_payload(scope, actor_username, snapshot_data)
+                archive_content = backup_archive_bytes(backup)
+                checksum = backup_archive_checksum(archive_content)
+                timestamp = datetime.now(timezone.utc).strftime("%Y/%m/%Y%m%dT%H%M%SZ")
+                object_path = f"{scope}/{timestamp}-{checksum[:12]}.json"
+                archive_status, archive_result = supabase_storage_request("POST", object_path, archive_content)
+                if archive_status >= 400:
+                    self.send_json({
+                        "error": archive_result,
+                        "stage": "archive_upload",
+                        "migration": "supabase_backup_archive_migration.sql",
+                    }, archive_status)
+                    return
+                verify_status, verified_content = supabase_storage_request("GET", object_path)
+                verified_checksum = backup_archive_checksum(verified_content) if isinstance(verified_content, bytes) else ""
+                if verify_status >= 400 or not hmac.compare_digest(checksum, verified_checksum):
+                    self.send_json({
+                        "error": "The private archive could not be verified. No data was cleared.",
+                        "stage": "archive_verify",
+                        "archive": object_path,
+                    }, 500)
+                    return
+                clear_complete, cleared, clear_error = delete_backup_snapshot_rows(snapshot_data, scope)
+                audit_action = "BACKUP_CLEAR_QUEUE" if scope == "queue" else "BACKUP_CLEAR_MAIN"
+                audit_description = (
+                    f"Archived {backup['total_rows']} rows to {object_path}; "
+                    f"cleared {sum(cleared.values())} rows; checksum {checksum}; "
+                    f"complete={str(clear_complete).lower()}"
+                )
+                audit_status, audit_result = insert_audit_log_compatible({
+                    "action": audit_action,
+                    "module": "backup",
+                    "description": audit_description,
+                    "created_by": actor_username,
+                    "user_fullname": str(actor_account.get("fullname") or actor_username),
+                    "ip_address": self.client_address[0] if self.client_address else None,
+                    "metadata": {
+                        "scope": scope,
+                        "archive_path": object_path,
+                        "checksum": checksum,
+                        "snapshot_counts": backup["row_counts"],
+                        "cleared_counts": cleared,
+                        "clear_complete": clear_complete,
+                        "clear_error": clear_error,
+                    },
+                })
+                self.send_json({
+                    "backup": backup,
+                    "archive": {
+                        "bucket": BACKUP_ARCHIVE_BUCKET,
+                        "path": object_path,
+                        "checksum": checksum,
+                        "bytes": len(archive_content),
+                        "verified": True,
+                    },
+                    "cleared": cleared,
+                    "clear_complete": clear_complete,
+                    "clear_error": clear_error,
+                    "audit_saved": audit_status < 400,
+                    "audit_error": audit_result if audit_status >= 400 else None,
+                })
+            finally:
+                backup_clear_lock.release()
             return
 
         if parsed.path == "/api/auth/login":
@@ -7538,6 +8383,83 @@ class ReportHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/production-save-queue/lookup":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            queue_uid = query.get("queue_uid", [""])[0].strip()
+            if not queue_uid:
+                self.send_json({"error": "queue_uid is required."}, 400)
+                return
+            status, body = supabase_request(
+                "GET",
+                f"production_save_queue?queue_uid=eq.{quote(queue_uid)}&select=*&limit=1",
+                timeout_seconds=6,
+            )
+            if status >= 400:
+                self.send_json({"error": body}, status)
+                return
+            row = body[0] if isinstance(body, list) and body else None
+            self.send_json({"data": production_queue_to_client(row, include_payload=True) if isinstance(row, dict) else None})
+            return
+
+        if parsed.path == "/api/production-save-queue":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            try:
+                limit = min(max(int(query.get("limit", ["80"])[0]), 1), 200)
+            except (TypeError, ValueError):
+                limit = 80
+            fields = (
+                "id,queue_uid,batch_uid,record_count,fruit_type,record_date,employee_id,emp_code,"
+                "employee_name,total_weight,total_amount,status,attempt_count,max_attempts,started_at,"
+                "finished_at,result_record_ids,duplicate_details,error_code,error_message,"
+                "created_by,cancelled_by,cancelled_at,created_at,updated_at"
+            )
+            status, body = supabase_request(
+                "GET",
+                f"production_save_queue?select={fields}&order=created_at.desc,id.desc&limit={limit}",
+                timeout_seconds=6,
+            )
+            if status >= 400:
+                self.send_json({"error": body, "migration": "supabase_production_save_queue_migration.sql"}, status)
+                return
+            items = [production_queue_to_client(row) for row in body if isinstance(row, dict)] if isinstance(body, list) else []
+            self.send_json({"data": items})
+            return
+
+        queue_item_match = re.fullmatch(r"/api/production-save-queue/(\d+)", parsed.path)
+        if queue_item_match:
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            queue_id = int(queue_item_match.group(1))
+            status, body = supabase_request(
+                "GET",
+                f"production_save_queue?id=eq.{queue_id}&select=*&limit=1",
+                timeout_seconds=6,
+            )
+            if status >= 400:
+                self.send_json({"error": body}, status)
+                return
+            if not isinstance(body, list) or not body:
+                self.send_json({"error": "Queue item was not found."}, 404)
+                return
+            event_status, events = supabase_request(
+                "GET",
+                f"production_save_queue_events?queue_id=eq.{queue_id}&select=id,event_type,status,message,actor,metadata,created_at&order=created_at.asc,id.asc",
+                timeout_seconds=6,
+            )
+            self.send_json({
+                "data": production_queue_to_client(body[0], include_payload=True),
+                "events": events if event_status < 400 and isinstance(events, list) else [],
+            })
+            return
+
         if parsed.path == "/api/state":
             state = {}
             for table in LIVE_STATE_TABLES:
@@ -7675,22 +8597,19 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 
-        if parsed.path == "/api/backup":
+        if parsed.path in {"/api/backup", "/api/backup/queue"}:
             if not backup_authorized(self):
                 self.send_json({"error": "Backup code is required."}, 403)
                 return
-            status, body = read_supabase_backup()
-            self.send_json(
-                {
-                    "exported_at": datetime.utcnow().isoformat() + "Z",
-                    "app": "Pismai Factory Wage",
-                    "version": 2,
-                    "source": "supabase",
-                    "data": body if status < 400 else None,
-                    "error": body if status >= 400 else None,
-                },
-                status,
-            )
+            scope = "queue" if parsed.path.endswith("/queue") else "main"
+            tables = QUEUE_BACKUP_TABLES if scope == "queue" else BACKUP_TABLES
+            status, body = read_supabase_backup(tables)
+            actor = secret_room_actor(self) or {}
+            response = backup_snapshot_payload(scope, str(actor.get("username") or "backup-user"), body) if status < 400 else {
+                "data": None,
+                "error": body,
+            }
+            self.send_json(response, status)
             return
 
         if parsed.path == "/reports/employee-daily-pdf":
@@ -7762,6 +8681,13 @@ class ReportHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    queue_worker = threading.Thread(
+        target=production_save_queue_worker,
+        name="production-save-queue-worker",
+        daemon=True,
+    )
+    queue_worker.start()
+    production_save_queue_wakeup.set()
     server = ThreadingHTTPServer((HOST, PORT), ReportHandler)
     try:
         print(f"Report server running at http://{HOST}:{PORT}", flush=True)
