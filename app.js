@@ -4866,10 +4866,10 @@ function renderApp(user, route) {
       </header>
       <section class="content">
         <aside class="sidebar">
-          <div class="sidebar-brand">
-            <span>Pitsamai</span>
-            <strong>Factory Wage</strong>
-          </div>
+          <button class="sidebar-brand" data-route="dashboard" type="button" aria-label="กลับหน้า Home">
+            <img src="assets/pitsamai-logo.png" alt="" aria-hidden="true" />
+            <span>Pitsamai Factory Wage</span>
+          </button>
           <nav class="nav-stack">
             ${visibleModules
               .map(
@@ -4991,6 +4991,9 @@ function bindAppEvents(user, moduleItem) {
     button.addEventListener("click", () => {
       document.body.classList.remove("drawer-open");
       const nextRoute = button.dataset.route;
+      if (button.dataset.dashboardFruit) {
+        setSelectedProductionFruit(button.dataset.dashboardFruit);
+      }
       if (nextRoute === "summary-main") {
         summaryDate = new Date().toISOString().slice(0, 10);
       }
@@ -12394,7 +12397,76 @@ function renderDashboard(moduleItem) {
   `;
 }
 
+function getDashboardFruitIcon(fruitId) {
+  return {
+    mangosteen: "●",
+    durian: "◆",
+    mango: "◐",
+    coconut: "◒"
+  }[fruitId] || "●";
+}
+
+function renderHomeFruitCard(fruit, records) {
+  const fruitRecords = records.filter(
+    (record) => productionFruitTypeForRecord(record) === fruit.id
+  );
+  const totalWeight = fruitRecords.reduce(
+    (total, record) => total + getRecordTotalWeight(record),
+    0
+  );
+  const available = Boolean(productionFruitFieldLabels[fruit.id]);
+
+  return `
+    <button
+      class="home-fruit-card ${available ? "" : "is-pending"}"
+      type="button"
+      ${available ? `data-route="production" data-dashboard-fruit="${escapeHtml(fruit.id)}"` : "disabled"}
+    >
+      <span class="home-fruit-visual home-fruit-${escapeHtml(fruit.id)}" aria-hidden="true">
+        ${getDashboardFruitIcon(fruit.id)}
+      </span>
+      <span class="home-fruit-copy">
+        <strong>${escapeHtml(fruit.label)}</strong>
+        <small>${fruitRecords.length.toLocaleString("th-TH")} รายการ</small>
+        <b>${numberText(totalWeight)} กก.</b>
+      </span>
+      <span class="home-fruit-status ${available ? "is-ready" : "is-waiting"}">
+        ${available ? "พร้อมใช้งาน" : "เตรียมไว้ก่อน"}
+      </span>
+    </button>
+  `;
+}
+
+function renderHomeRecentRow(record, employeeMap) {
+  const employee = employeeMap.get(record.employee_id) || {};
+  const fruit = productionFruitOptions.find(
+    (item) => item.id === productionFruitTypeForRecord(record)
+  );
+  return `
+    <tr>
+      <td>${escapeHtml(record.record_time || "-")}</td>
+      <td><strong>${escapeHtml(record.employee_name || employee.fullname || record.emp_code || "-")}</strong></td>
+      <td>${escapeHtml(fruit?.label || "มังคุด")}</td>
+      <td>กอง ${escapeHtml(record.pile_no || "-")}</td>
+      <td><strong>${numberText(getRecordTotalWeight(record))} กก.</strong></td>
+      <td>${escapeHtml(record.created_by || "-")}</td>
+    </tr>
+  `;
+}
+
+function renderHomePileRow(pile, maxWeight) {
+  const width = maxWeight > 0 ? Math.max(8, (pile.weight / maxWeight) * 100) : 0;
+  return `
+    <div class="home-pile-row">
+      <span>กอง ${escapeHtml(pile.number)}</span>
+      <div class="home-pile-track"><i style="width:${width}%"></i></div>
+      <strong>${numberText(pile.weight)} กก.</strong>
+    </div>
+  `;
+}
+
 function renderDashboard(user, moduleItem) {
+  const today = new Date().toISOString().slice(0, 10);
   const dateLabel = new Intl.DateTimeFormat("th-TH", {
     weekday: "long",
     year: "numeric",
@@ -12402,76 +12474,94 @@ function renderDashboard(user, moduleItem) {
     day: "numeric"
   }).format(new Date());
   const canViewSummary = canOpen(user, "summary-all");
+  const records = getDashboardRecordsForDate(today);
+  const totals = getProductionTotals(records);
+  const employeeMap = new Map(getEmployees().map((employee) => [employee.id, employee]));
+  const latestRecords = [...records]
+    .sort((a, b) =>
+      `${b.record_date || ""} ${b.record_time || ""} ${b.created_at || ""}`.localeCompare(
+        `${a.record_date || ""} ${a.record_time || ""} ${a.created_at || ""}`
+      )
+    )
+    .slice(0, 5);
+  const pilesByNumber = new Map();
+  records.forEach((record) => {
+    const pileNumber = String(record.pile_no || "-");
+    pilesByNumber.set(
+      pileNumber,
+      (pilesByNumber.get(pileNumber) || 0) + getRecordTotalWeight(record)
+    );
+  });
+  const pileSummaries = Array.from(pilesByNumber, ([number, weight]) => ({ number, weight }))
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 5);
+  const maxPileWeight = pileSummaries[0]?.weight || 0;
 
   return `
-    <section class="factory-dashboard">
-      <div class="factory-hero">
-        <div class="factory-hero-copy">
+    <section class="factory-dashboard home-dashboard">
+      <header class="home-welcome">
+        <div>
           <p class="eyebrow">Pitsamai Frozen Fruits Co., Ltd.</p>
-          <h2>ยินดีต้อนรับสู่ระบบโรงงาน</h2>
-          <p>
-            ศูนย์ควบคุมงานบันทึกผลผลิตและค่าแรงประจำวัน
-            สำหรับฝ่ายผลิต ฝ่ายบุคคล และผู้ดูแลระบบ
-          </p>
-          <div class="factory-hero-actions">
-            <button class="btn btn-primary" type="button" data-route="production">บันทึกผลผลิต</button>
-            ${
-              canViewSummary
-                ? `<button class="btn btn-outline" type="button" data-route="summary-all">ดูสรุปข้อมูลทั้งหมด</button>`
-                : `<button class="btn btn-outline btn-locked" type="button" data-route="summary-all">สรุปข้อมูลถูกล็อก</button>`
-            }
-          </div>
+          <h2>ยินดีต้อนรับ คุณ ${escapeHtml(user.fullname)}</h2>
+          <p>ภาพรวมการทำงานประจำวัน</p>
+          <time datetime="${escapeHtml(today)}">${escapeHtml(dateLabel)}</time>
         </div>
-        <div class="factory-hero-brand">
-          <img src="assets/pitsamai-logo.png" alt="Pitsamai" />
-          <span>Factory Wage System</span>
+        <div class="home-welcome-actions">
+          <button class="btn btn-primary" type="button" data-route="production">
+            <span aria-hidden="true">▣</span> บันทึกผลผลิต
+          </button>
+          ${canViewSummary
+            ? `<button class="btn btn-outline" type="button" data-route="summary-all"><span aria-hidden="true">▤</span> ดูสรุปทั้งหมด</button>`
+            : `<button class="btn btn-outline btn-locked" type="button" data-route="summary-all">สรุปข้อมูลถูกล็อก</button>`}
         </div>
-      </div>
+      </header>
 
-      <div class="factory-status-strip">
-        <div>
-          <span>วันที่ใช้งาน</span>
-          <strong>${escapeHtml(dateLabel)}</strong>
-        </div>
-        <div>
-          <span>ผู้ใช้งาน</span>
-          <strong>${escapeHtml(user.fullname)}</strong>
-        </div>
-        <div>
-          <span>สิทธิ์ระบบ</span>
-          <strong>${escapeHtml(user.role_label || user.role)}</strong>
-        </div>
-      </div>
+      <section class="home-kpi-strip" aria-label="ภาพรวมวันนี้">
+        <div class="home-kpi home-kpi-weight"><span aria-hidden="true">▣</span><p>น้ำหนักรวมวันนี้<strong>${numberText(totals.total)} <small>กก.</small></strong></p></div>
+        <div class="home-kpi home-kpi-money"><span aria-hidden="true">฿</span><p>ยอดเงินวันนี้<strong>${money(totals.amount)}</strong></p></div>
+        <div class="home-kpi home-kpi-people"><span aria-hidden="true">●</span><p>พนักงานที่มีรายการ<strong>${totals.people.size.toLocaleString("th-TH")} <small>คน</small></strong></p></div>
+        <div class="home-kpi home-kpi-piles"><span aria-hidden="true">▦</span><p>จำนวนกอง<strong>${pilesByNumber.size.toLocaleString("th-TH")} <small>กอง</small></strong></p></div>
+      </section>
 
-      <section class="factory-section">
-        <div class="section-title-row">
-          <div>
-            <h3>เมนูงานหลัก</h3>
-            <p>เลือกงานที่ต้องการดำเนินการในระบบโรงงาน</p>
-          </div>
+      <section class="home-section home-fruit-section">
+        <div class="home-section-heading">
+          <div><h3>งานผลผลิตวันนี้</h3><p>เลือกผลไม้เพื่อไปยังหน้าบันทึกผลผลิต</p></div>
+          <span>${records.length.toLocaleString("th-TH")} รายการ</span>
         </div>
-        <div class="factory-action-grid">
-          ${renderDashboardActionCard(user, "production", "▣", "บันทึกผลผลิต", "กรอกน้ำหนักน้ำ ดอก และค่าแรงของพนักงาน")}
-          ${renderDashboardActionCard(user, "summary-all", "▤", "สรุปข้อมูลทั้งหมด", "เปิดหน้ารายงานตัวเลข กราฟ และตารางรายละเอียด")}
-          ${renderDashboardActionCard(user, "summary-person", "◎", "สรุปรายบุคคล", "ตรวจสอบผลงานแยกตามพนักงาน")}
-          ${renderDashboardActionCard(user, "time-report", "◷", "เวลาทำงาน", "ดูและจัดการข้อมูลเวลาเข้างานตามสิทธิ์")}
-          ${renderDashboardActionCard(user, "reports", "▧", "ส่งออกรายงาน", "สร้างไฟล์ PDF และ Excel สำหรับส่งต่อ")}
-          ${renderDashboardActionCard(user, "settings", "⚙", "ตั้งค่าระบบ", "จัดการข้อมูลหลักและสิทธิ์ผู้ใช้งาน")}
+        <div class="home-fruit-grid">
+          ${productionFruitOptions.map((fruit) => renderHomeFruitCard(fruit, records)).join("")}
         </div>
       </section>
 
-      <section class="factory-section">
-        <div class="factory-notice">
-          <div>
-            <h3>แนวทางการใช้งานประจำวัน</h3>
-            <p>เริ่มจากบันทึกผลผลิต ตรวจสอบความถูกต้อง แล้วจึงเปิดหน้าสรุปเพื่อพิมพ์หรือส่งต่อรายงาน</p>
+      <section class="home-lower-grid">
+        <section class="home-section home-recent-card">
+          <div class="home-section-heading">
+            <div><h3>รายการล่าสุด</h3><p>ข้อมูลผลผลิตที่บันทึกในวันนี้</p></div>
+            <button class="home-text-button" type="button" data-route="summary-all">ดูทั้งหมด</button>
           </div>
-          ${
-            canViewSummary
-              ? `<button class="btn btn-outline" type="button" data-route="summary-all">ไปหน้าสรุป</button>`
-              : `<button class="btn btn-primary" type="button" data-route="production">เริ่มบันทึกผลผลิต</button>`
-          }
-        </div>
+          <div class="table-scroll">
+            <table class="home-recent-table">
+              <thead><tr><th>เวลา</th><th>พนักงาน</th><th>ผลไม้</th><th>กอง</th><th>น้ำหนักรวม</th><th>ผู้บันทึก</th></tr></thead>
+              <tbody>
+                ${latestRecords.length
+                  ? latestRecords.map((record) => renderHomeRecentRow(record, employeeMap)).join("")
+                  : `<tr><td colspan="6" class="empty-cell">ยังไม่มีรายการผลผลิตในวันนี้</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="home-section home-pile-card">
+          <div class="home-section-heading">
+            <div><h3>สรุปตามกอง</h3><p>เรียงตามน้ำหนักรวมวันนี้</p></div>
+            ${canViewSummary ? `<button class="home-text-button" type="button" data-route="summary-all">ดูทั้งหมด</button>` : ""}
+          </div>
+          <div class="home-pile-list">
+            ${pileSummaries.length
+              ? pileSummaries.map((pile) => renderHomePileRow(pile, maxPileWeight)).join("")
+              : `<div class="home-empty">ยังไม่มีข้อมูลกองในวันนี้</div>`}
+          </div>
+        </section>
       </section>
     </section>
   `;
