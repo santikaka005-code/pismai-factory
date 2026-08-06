@@ -3967,10 +3967,37 @@ function findDuplicateTimeRecord(empCode, recordDate, excludeId = null) {
   )) || null;
 }
 
-function assertNoDuplicateTimeRecord(empCode, recordDate, excludeId = null) {
-  const duplicate = findDuplicateTimeRecord(empCode, recordDate, excludeId);
-  if (duplicate) {
-    throw new Error(`พนักงานรหัส ${empCode} มีรายการวันที่ ${recordDate} แล้ว กรุณากดแก้ไขรายการเดิมแทน`);
+function getTimeRecordInterval(clockIn, clockOut) {
+  const start = parseTimeToMinutes(clockIn);
+  const rawEnd = parseTimeToMinutes(clockOut);
+  if (start === null || rawEnd === null) return null;
+  return { start, end: rawEnd <= start ? rawEnd + 24 * 60 : rawEnd };
+}
+
+function timeRecordIntervalsOverlap(firstClockIn, firstClockOut, secondClockIn, secondClockOut) {
+  const first = getTimeRecordInterval(firstClockIn, firstClockOut);
+  const second = getTimeRecordInterval(secondClockIn, secondClockOut);
+  if (!first || !second) return false;
+  return first.start < second.end && second.start < first.end;
+}
+
+function findConflictingTimeRecord(empCode, recordDate, clockIn, clockOut, excludeId = null) {
+  const normalizedCode = normalizeTimeEmployeeCodeInput(empCode);
+  return getTimeRecords().find((record) => (
+    (excludeId === null || Number(record.id) !== Number(excludeId)) &&
+    normalizeTimeEmployeeCodeInput(record.emp_code || "") === normalizedCode &&
+    record.record_date === recordDate &&
+    timeRecordIntervalsOverlap(clockIn, clockOut, record.clock_in, record.clock_out)
+  )) || null;
+}
+
+function assertNoConflictingTimeRecord(empCode, recordDate, clockIn, clockOut, excludeId = null) {
+  const conflict = findConflictingTimeRecord(empCode, recordDate, clockIn, clockOut, excludeId);
+  if (conflict) {
+    throw new Error(
+      `เวลาของพนักงานรหัส ${empCode} ทับกับรายการเดิม ${conflict.clock_in}-${conflict.clock_out} ` +
+      `วันที่ ${recordDate} กรุณาตรวจสอบหรือแก้ไขรายการเดิม`
+    );
   }
 }
 
@@ -3994,8 +4021,8 @@ async function apiCreateTimeRecord(payload, user) {
   const records = getTimeRecords();
   const recordDate = String(payload.record_date || "").trim();
   const empCode = normalizeTimeEmployeeCodeInput(payload.emp_code);
-  assertNoDuplicateTimeRecord(empCode, recordDate);
   const record = buildTimeRecord(payload, user);
+  assertNoConflictingTimeRecord(empCode, recordDate, record.clock_in, record.clock_out);
 
   const [cloudRecord] = await saveTimeRowsToCloud(record, { mode: "insert" });
   const savedRecord = cloudRecord || record;
@@ -4023,7 +4050,13 @@ async function apiUpdateTimeRecord(id, payload, user) {
     updated_by: user.fullname,
     updated_at: new Date().toISOString()
   };
-  assertNoDuplicateTimeRecord(nextRecord.emp_code, nextRecord.record_date, id);
+  assertNoConflictingTimeRecord(
+    nextRecord.emp_code,
+    nextRecord.record_date,
+    nextRecord.clock_in,
+    nextRecord.clock_out,
+    id
+  );
 
   const [cloudRecord] = await saveTimeRowsToCloud(nextRecord, { mode: "upsert" });
   const savedRecord = cloudRecord || nextRecord;
@@ -10736,7 +10769,7 @@ function renderTimeReport(user, moduleItem) {
             <div><span>ค่าแรงไม่ครบ 8 ชั่วโมง</span><strong>ปัดเป็นบาท: ชั่วโมงสุทธิ × ฐานรายวันของพนักงาน ÷ 8</strong></div>
             <div><span>ฐานรายวัน</span><strong>กลุ่มปกติ ${TIME_DAILY_WAGE} บาท · กลุ่มพิเศษเลือกได้ 347 / 365 / 500 บาท</strong></div>
             <div><span>ค่าล่วงเวลา</span><strong>ส่วนที่เกิน 8 ชั่วโมง × ค่า OT ที่ตั้งไว้รายคน</strong></div>
-            <div><span>กันกรอกซ้ำ</span><strong>พนักงาน 1 คนบันทึกได้ 1 รายการต่อวัน หากผิดให้กดแก้ไขรายการเดิม</strong></div>
+            <div><span>กันกรอกซ้ำ</span><strong>วันเดียวกันบันทึกได้หลายรอบเมื่อเวลาไม่ทับกัน · รอบใหม่ต้องเริ่มตั้งแต่เวลาออกรอบก่อนเป็นต้นไป</strong></div>
             <div><span>ประวัติการแก้ไข</span><strong>แก้ภายใน 2 นาทีไม่ลง Log · เกิน 2 นาทีหรือข้ามวันจะลง Audit Log</strong></div>
           </div>
         </section>
@@ -10882,7 +10915,7 @@ function renderWeeklyTimeEntry(user) {
             <div><span>ค่าแรงปกติ</span><strong>ฐานรายวันของพนักงาน ÷ 8 × ชั่วโมงสุทธิ แล้วปัดเป็นบาท</strong></div>
             <div><span>ฐานครบ 8 ชั่วโมง</span><strong>กลุ่มปกติ ${TIME_DAILY_WAGE} บาท · กลุ่มพิเศษเลือกได้ 347 / 365 / 500 บาท</strong></div>
             <div><span>เกิน 8 ชั่วโมง</span><strong>คิด OT ตามค่าที่ตั้งไว้ในพนักงานแต่ละคน</strong></div>
-            <div><span>กันกรอกซ้ำ</span><strong>วันไหนมีรายการแล้ว ระบบจะให้แก้รายการเดิมแทนการบันทึกซ้ำ</strong></div>
+            <div><span>กันกรอกซ้ำ</span><strong>วันเดียวกันบันทึกได้หลายรอบเมื่อเวลาไม่ทับกัน · ช่วงเวลาที่เหลื่อมกันจะไม่ถูกบันทึก</strong></div>
           </div>
           <div class="weekly-actions">
             <button class="btn btn-outline" id="clearWeeklyTime" type="button">ล้างตาราง</button>

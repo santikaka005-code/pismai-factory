@@ -1195,6 +1195,105 @@ def reserve_time_record_id(refresh: bool = False) -> int:
     return next_id
 
 
+def time_value_to_minutes(value: object) -> int | None:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})(?::\d{2})?", str(value or "").strip())
+    if not match:
+        return None
+    hours, minutes = (int(part) for part in match.groups())
+    if hours > 23 or minutes > 59:
+        return None
+    return hours * 60 + minutes
+
+
+def time_record_interval(clock_in: object, clock_out: object) -> tuple[int, int] | None:
+    start = time_value_to_minutes(clock_in)
+    end = time_value_to_minutes(clock_out)
+    if start is None or end is None:
+        return None
+    if end <= start:
+        end += 24 * 60
+    return start, end
+
+
+def time_record_intervals_overlap(first: dict, second: dict) -> bool:
+    first_interval = time_record_interval(
+        first.get("check_in") or first.get("clock_in"),
+        first.get("check_out") or first.get("clock_out"),
+    )
+    second_interval = time_record_interval(
+        second.get("check_in") or second.get("clock_in"),
+        second.get("check_out") or second.get("clock_out"),
+    )
+    if first_interval is None or second_interval is None:
+        return False
+    return first_interval[0] < second_interval[1] and second_interval[0] < first_interval[1]
+
+
+def time_record_identity(row: dict) -> tuple[str, str]:
+    raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+    work_date = row.get("work_date") or row.get("record_date") or raw.get("record_date") or raw.get("date")
+    emp_code = row.get("emp_code") or raw.get("emp_code")
+    return str(work_date or "").strip(), str(emp_code or "").strip()
+
+
+def validate_time_record_conflicts(rows: list[dict]) -> tuple[int, dict | None]:
+    for index, row in enumerate(rows):
+        work_date, emp_code = time_record_identity(row)
+        interval = time_record_interval(
+            row.get("check_in") or row.get("clock_in"),
+            row.get("check_out") or row.get("clock_out"),
+        )
+        if not work_date or not emp_code or interval is None:
+            return 400, {"error": "ข้อมูลวันที่ รหัสพนักงาน หรือเวลาเข้าออกไม่ถูกต้อง"}
+
+        for other in rows[:index]:
+            if time_record_identity(other) != (work_date, emp_code):
+                continue
+            if row.get("id") in (None, "") and other.get("id") in (None, "") and time_record_intervals_overlap(row, other):
+                return 409, {
+                    "error": f"เวลาของพนักงานรหัส {emp_code} วันที่ {work_date} ทับกันภายในชุดที่ส่งมา"
+                }
+
+        status, existing_rows = supabase_request(
+            "GET",
+            "time_records?"
+            f"work_date=eq.{quote(work_date)}&emp_code=eq.{quote(emp_code)}&"
+            "select=id,work_date,emp_code,check_in,check_out,raw_payload",
+        )
+        if status >= 400:
+            return status, {"error": existing_rows}
+        incoming_id = row.get("id")
+        existing_list = existing_rows if isinstance(existing_rows, list) else []
+        existing_self = next(
+            (
+                existing
+                for existing in existing_list
+                if incoming_id not in (None, "") and str(existing.get("id")) == str(incoming_id)
+            ),
+            None,
+        )
+        if existing_self is not None:
+            current_interval = time_record_interval(existing_self.get("check_in"), existing_self.get("check_out"))
+            if current_interval == interval:
+                continue
+
+        for existing in existing_list:
+            if incoming_id not in (None, "") and str(existing.get("id")) == str(incoming_id):
+                continue
+            if time_record_intervals_overlap(row, existing):
+                existing_raw = existing.get("raw_payload") if isinstance(existing.get("raw_payload"), dict) else {}
+                old_in = existing.get("check_in") or existing_raw.get("clock_in")
+                old_out = existing.get("check_out") or existing_raw.get("clock_out")
+                return 409, {
+                    "error": (
+                        f"เวลาของพนักงานรหัส {emp_code} ทับกับรายการเดิม "
+                        f"{old_in}-{old_out} วันที่ {work_date}"
+                    ),
+                    "conflict_id": existing.get("id"),
+                }
+    return 200, None
+
+
 def insert_time_records_compatible(rows: list[dict]) -> tuple[int, list | dict | str | None]:
     if not rows:
         return 200, []
@@ -6943,6 +7042,10 @@ class ReportHandler(BaseHTTPRequestHandler):
                         insert_row["raw_payload"] = {key: value for key, value in raw_payload.items() if key != "id"}
                     insert_rows.append(insert_row)
                 with time_record_insert_lock:
+                    status, conflict = validate_time_record_conflicts(insert_rows)
+                    if status >= 400:
+                        self.send_json({"data": None, **(conflict or {"error": "time record conflict"})}, status)
+                        return
                     status, body = insert_time_records_compatible(insert_rows)
                 if status >= 400:
                     self.send_json({"data": None, "error": body}, status)
@@ -6958,6 +7061,10 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "mode must be insert, upsert, or delete"}, 400)
                 return
             with live_state_sync_lock:
+                status, conflict = validate_time_record_conflicts(converted)
+                if status >= 400:
+                    self.send_json({"data": None, **(conflict or {"error": "time record conflict"})}, status)
+                    return
                 status, body = sync_rows_by_id("time_records", converted)
             if status >= 400:
                 self.send_json({"data": None, "error": body}, status)
