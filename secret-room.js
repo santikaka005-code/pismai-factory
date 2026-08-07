@@ -12,7 +12,10 @@ const SecretRoom = (() => {
     notificationTimer: null,
     notificationUsername: "",
     notificationInitialized: false,
-    unreadCount: 0
+    unreadCount: 0,
+    unreadMessageCount: 0,
+    unreadPostCount: 0,
+    latestPostId: 0
   };
   const baseDocumentTitle = document.title.replace(/^\(\d+\+?\)\s*/, "");
 
@@ -38,13 +41,17 @@ const SecretRoom = (() => {
     return count > 99 ? "99+" : String(count);
   }
 
-  function showNotificationToast(count) {
+  function showNotificationToast(count, postCount = 0, messageCount = 0) {
     document.querySelector("[data-community-notification-toast]")?.remove();
     const toast = document.createElement("button");
     toast.type = "button";
     toast.className = "community-notification-toast";
     toast.dataset.communityNotificationToast = "";
-    toast.innerHTML = `<span class="community-notification-dot"></span><span><strong>มีข้อความใหม่ใน Community</strong><small>มี ${unreadLabel(count)} ข้อความที่ยังไม่ได้อ่าน</small></span>`;
+    const details = [
+      postCount ? `โพสต์ใหม่ ${unreadLabel(postCount)}` : "",
+      messageCount ? `แชทใหม่ ${unreadLabel(messageCount)}` : ""
+    ].filter(Boolean).join(" · ");
+    toast.innerHTML = `<span class="community-notification-dot"></span><span><strong>มีรายการใหม่ใน Community</strong><small>${escapeHtml(details || `ยังไม่ได้อ่าน ${unreadLabel(count)} รายการ`)}</small></span>`;
     toast.addEventListener("click", () => {
       toast.remove();
       location.hash = "#/secret-room";
@@ -57,10 +64,13 @@ const SecretRoom = (() => {
     }, 6500);
   }
 
-  function publishUnreadCount(value, { notify = false } = {}) {
+  function publishUnreadCount(value, { notify = false, postCount, messageCount, latestPostId } = {}) {
     const nextCount = Math.max(0, Number(value) || 0);
     const previousCount = state.unreadCount;
     state.unreadCount = nextCount;
+    if (postCount !== undefined) state.unreadPostCount = Math.max(0, Number(postCount) || 0);
+    if (messageCount !== undefined) state.unreadMessageCount = Math.max(0, Number(messageCount) || 0);
+    if (latestPostId !== undefined) state.latestPostId = Math.max(0, Number(latestPostId) || 0);
     document.querySelectorAll("[data-secret-unread-badge]").forEach((badge) => {
       badge.textContent = unreadLabel(nextCount);
       badge.hidden = nextCount === 0;
@@ -72,7 +82,7 @@ const SecretRoom = (() => {
     });
     document.title = nextCount ? `(${unreadLabel(nextCount)}) ${baseDocumentTitle}` : baseDocumentTitle;
     if (notify && state.notificationInitialized && nextCount > previousCount) {
-      showNotificationToast(nextCount);
+      showNotificationToast(nextCount, state.unreadPostCount, state.unreadMessageCount);
     }
     state.notificationInitialized = true;
   }
@@ -81,7 +91,12 @@ const SecretRoom = (() => {
     if (!getSession()?.user) return;
     try {
       const response = await api("/notifications");
-      publishUnreadCount(response?.data?.unread_count, { notify });
+      publishUnreadCount(response?.data?.unread_count, {
+        notify,
+        postCount: response?.data?.unread_post_count,
+        messageCount: response?.data?.unread_message_count,
+        latestPostId: response?.data?.latest_post_id
+      });
     } catch (error) {
       if (error?.status === 401) {
         stopNotifications();
@@ -113,6 +128,9 @@ const SecretRoom = (() => {
     state.notificationTimer = null;
     state.notificationUsername = "";
     state.notificationInitialized = false;
+    state.unreadMessageCount = 0;
+    state.unreadPostCount = 0;
+    state.latestPostId = 0;
     publishUnreadCount(0);
     document.querySelector("[data-community-notification-toast]")?.remove();
   }
@@ -255,7 +273,8 @@ const SecretRoom = (() => {
       state.coworkers = coworkers.data || [];
       state.posts = posts.data || [];
       state.chats = chats.data || [];
-      publishUnreadCount(state.chats.reduce((sum, chat) => sum + Number(chat.unread_count || 0), 0));
+      state.unreadMessageCount = state.chats.reduce((sum, chat) => sum + Number(chat.unread_count || 0), 0);
+      publishUnreadCount(state.unreadMessageCount + state.unreadPostCount);
       if (state.activeUser) {
         state.activeUser = state.coworkers.find((person) => person.username === state.activeUser.username) || state.activeUser;
       }
@@ -281,7 +300,8 @@ const SecretRoom = (() => {
       await api("/messages/read", { method: "POST", body: JSON.stringify({ username }) });
       const chat = state.chats.find((item) => item.username === username);
       if (chat) chat.unread_count = 0;
-      publishUnreadCount(state.chats.reduce((sum, item) => sum + Number(item.unread_count || 0), 0));
+      state.unreadMessageCount = state.chats.reduce((sum, item) => sum + Number(item.unread_count || 0), 0);
+      publishUnreadCount(state.unreadMessageCount + state.unreadPostCount);
     } catch (error) {
       state.error = error.message;
     }
@@ -339,6 +359,7 @@ const SecretRoom = (() => {
         state.tab = button.dataset.secretTab;
         state.error = "";
         update();
+        if (state.tab === "community") markCommunityRead();
       });
     });
     loadBase();
@@ -355,7 +376,8 @@ const SecretRoom = (() => {
           }).catch(() => null);
           const activeChat = state.chats.find((chat) => chat.username === state.activeUser.username);
           if (activeChat) activeChat.unread_count = 0;
-          publishUnreadCount(state.chats.reduce((sum, chat) => sum + Number(chat.unread_count || 0), 0));
+          state.unreadMessageCount = state.chats.reduce((sum, chat) => sum + Number(chat.unread_count || 0), 0);
+          publishUnreadCount(state.unreadMessageCount + state.unreadPostCount);
           update();
         }
       }
@@ -365,6 +387,19 @@ const SecretRoom = (() => {
   function stop() {
     if (state.pollTimer) window.clearInterval(state.pollTimer);
     state.pollTimer = null;
+  }
+
+  async function markCommunityRead() {
+    const latestPostId = Math.max(state.latestPostId, ...state.posts.map((post) => Number(post.id) || 0));
+    if (!latestPostId) return;
+    try {
+      await api("/community/read", { method: "POST", body: JSON.stringify({ post_id: latestPostId }) });
+      state.latestPostId = latestPostId;
+      state.unreadPostCount = 0;
+      publishUnreadCount(state.unreadMessageCount);
+    } catch (error) {
+      console.warn("Community read state update failed.", error);
+    }
   }
 
   return {

@@ -1117,6 +1117,7 @@ function visibleNavModulesForUser(user) {
 function canOpen(user, moduleId) {
   const moduleItem = modules.find((item) => item.id === moduleId);
   if (!moduleItem || !user) return false;
+  if (moduleId === "secret-room") return true;
   if (moduleId === "audit-log" && !["C6", "C7"].includes(getUserLevel(user))) return false;
   if (isTopLevelUser(user)) return true;
   return getAllowedRoutesForUser(user).includes(moduleId);

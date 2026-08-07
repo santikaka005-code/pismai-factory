@@ -88,6 +88,7 @@ BACKUP_TABLES = [
     "production_save_queue_events",
     "audit_logs",
     "community_posts",
+    "community_read_states",
     "secret_messages",
 ]
 QUEUE_BACKUP_TABLES = ["production_save_queue", "production_save_queue_events"]
@@ -6481,6 +6482,35 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"data": {"updated": status < 400}, "error": body if status >= 400 else None}, status)
                 return
 
+            if parsed.path == "/api/secret-room/community/read":
+                post_id = payload.get("post_id")
+                try:
+                    post_id = max(0, int(post_id))
+                except (TypeError, ValueError):
+                    self.send_json({"error": "post_id must be an integer."}, 400)
+                    return
+                read_status, read_states = supabase_request(
+                    "GET",
+                    f"community_read_states?username=eq.{quote(actor_username)}&select=last_read_post_id&limit=1",
+                )
+                if read_status >= 400:
+                    self.send_json({"error": read_states}, read_status)
+                    return
+                if isinstance(read_states, list) and read_states:
+                    post_id = max(post_id, int(read_states[0].get("last_read_post_id") or 0))
+                status, body = supabase_request(
+                    "POST",
+                    "community_read_states?on_conflict=username",
+                    {
+                        "username": actor_username,
+                        "last_read_post_id": post_id,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    prefer="resolution=merge-duplicates,return=representation",
+                )
+                self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+                return
+
             self.send_error(404, "Not found")
             return
 
@@ -8332,18 +8362,39 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
 
             if parsed.path == "/api/secret-room/notifications":
-                status, body = supabase_request(
+                message_status, messages = supabase_request(
                     "GET",
                     f"secret_messages?recipient_username=eq.{quote(actor_username)}&is_read=eq.false&select=id,created_at&order=created_at.desc&limit=1000",
                 )
-                if status >= 400:
-                    self.send_json({"error": body}, status)
+                if message_status >= 400:
+                    self.send_json({"error": messages}, message_status)
                     return
-                unread_messages = body if isinstance(body, list) else []
+                read_status, read_states = supabase_request(
+                    "GET",
+                    f"community_read_states?username=eq.{quote(actor_username)}&select=last_read_post_id&limit=1",
+                )
+                if read_status >= 400:
+                    self.send_json({"error": read_states}, read_status)
+                    return
+                last_read_post_id = 0
+                if isinstance(read_states, list) and read_states:
+                    last_read_post_id = int(read_states[0].get("last_read_post_id") or 0)
+                post_status, posts = supabase_request(
+                    "GET",
+                    f"community_posts?id=gt.{last_read_post_id}&author_username=neq.{quote(actor_username)}&select=id,created_at&order=id.desc&limit=1000",
+                )
+                if post_status >= 400:
+                    self.send_json({"error": posts}, post_status)
+                    return
+                unread_messages = messages if isinstance(messages, list) else []
+                unread_posts = posts if isinstance(posts, list) else []
                 self.send_json({
                     "data": {
-                        "unread_count": len(unread_messages),
+                        "unread_count": len(unread_messages) + len(unread_posts),
+                        "unread_message_count": len(unread_messages),
+                        "unread_post_count": len(unread_posts),
                         "latest_message_at": unread_messages[0].get("created_at") if unread_messages else None,
+                        "latest_post_id": unread_posts[0].get("id") if unread_posts else last_read_post_id,
                     }
                 })
                 return
