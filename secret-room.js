@@ -15,12 +15,17 @@ const SecretRoom = (() => {
     unreadCount: 0,
     unreadMessageCount: 0,
     unreadPostCount: 0,
-    latestPostId: 0
+    latestPostId: 0,
+    lastReadPostId: 0
   };
   const baseDocumentTitle = document.title.replace(/^\(\d+\+?\)\s*/, "");
 
   function api(path, options = {}) {
     return cloudApiRequest(`/api/secret-room${path}`, options);
+  }
+
+  function communityReadStorageKey() {
+    return `pismai-community-last-read:${state.notificationUsername}`;
   }
 
   function initials(name = "") {
@@ -90,7 +95,7 @@ const SecretRoom = (() => {
   async function refreshNotifications({ notify = true } = {}) {
     if (!getSession()?.user) return;
     try {
-      const response = await api("/notifications");
+      const response = await api(`/notifications?after_post_id=${state.lastReadPostId}`);
       publishUnreadCount(response?.data?.unread_count, {
         notify,
         postCount: response?.data?.unread_post_count,
@@ -114,6 +119,8 @@ const SecretRoom = (() => {
       state.notificationUsername = username;
       state.notificationInitialized = false;
       state.unreadCount = 0;
+      state.lastReadPostId = Math.max(0, Number(localStorage.getItem(communityReadStorageKey())) || 0);
+      state.latestPostId = state.lastReadPostId;
     }
     if (state.notificationTimer) {
       publishUnreadCount(state.unreadCount);
@@ -131,6 +138,7 @@ const SecretRoom = (() => {
     state.unreadMessageCount = 0;
     state.unreadPostCount = 0;
     state.latestPostId = 0;
+    state.lastReadPostId = 0;
     publishUnreadCount(0);
     document.querySelector("[data-community-notification-toast]")?.remove();
   }
@@ -389,17 +397,14 @@ const SecretRoom = (() => {
     state.pollTimer = null;
   }
 
-  async function markCommunityRead() {
+  function markCommunityRead() {
     const latestPostId = Math.max(state.latestPostId, ...state.posts.map((post) => Number(post.id) || 0));
     if (!latestPostId) return;
-    try {
-      await api("/community/read", { method: "POST", body: JSON.stringify({ post_id: latestPostId }) });
-      state.latestPostId = latestPostId;
-      state.unreadPostCount = 0;
-      publishUnreadCount(state.unreadMessageCount);
-    } catch (error) {
-      console.warn("Community read state update failed.", error);
-    }
+    state.latestPostId = latestPostId;
+    state.lastReadPostId = latestPostId;
+    localStorage.setItem(communityReadStorageKey(), String(latestPostId));
+    state.unreadPostCount = 0;
+    publishUnreadCount(state.unreadMessageCount);
   }
 
   return {

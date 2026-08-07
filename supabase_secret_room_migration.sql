@@ -29,15 +29,8 @@ create index if not exists idx_secret_messages_sender_created
 create index if not exists idx_secret_messages_recipient_created
   on public.secret_messages (recipient_username, created_at desc);
 
-create table if not exists public.community_read_states (
-  username text primary key,
-  last_read_post_id bigint not null default 0,
-  updated_at timestamptz not null default now()
-);
-
 alter table public.community_posts enable row level security;
 alter table public.secret_messages enable row level security;
-alter table public.community_read_states enable row level security;
 
 -- The browser never accesses these tables directly. report_server.py uses the
 -- service role after verifying the signed website session token.
