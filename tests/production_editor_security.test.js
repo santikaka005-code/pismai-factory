@@ -66,6 +66,8 @@ assert(
   "Production summary rows must enforce record-level edit permission"
 );
 assert(source.includes("expected_updated_at: existingRecord.updated_at"), "Production delete must use optimistic concurrency");
+assert(source.includes("getProductionClientUid(response.data) !== getProductionClientUid(existingRecord)"), "Production edit must verify stable client_uid");
+assert(source.includes("getProductionClientUid(record) !== existingUid"), "Production edit must remove stale local UID duplicates");
 assert(source.includes("Audit Log"), "Production editor must explain audit logging");
 
 console.log("Production editor permission and concurrency tests passed.");

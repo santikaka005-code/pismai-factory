@@ -7237,6 +7237,29 @@ class ReportHandler(BaseHTTPRequestHandler):
 
             existing_row = existing_rows[0]
             before = live_state_to_client("production_records", existing_row)
+            record_client_uid = production_record_client_uid(existing_row)
+            if not record_client_uid:
+                self.send_json({"error": "รายการนี้ไม่มี client_uid จึงหยุดการลบเพื่อป้องกันการลบผิดรายการ"}, 409)
+                return
+            uid_filter_field = quote("raw_payload->>client_uid", safe="")
+            uid_status, uid_rows = supabase_request(
+                "GET",
+                f"production_records?{uid_filter_field}=eq.{quote(record_client_uid)}&select=id&order=id.asc&limit=3",
+            )
+            if uid_status >= 400:
+                self.send_json({"error": uid_rows}, uid_status)
+                return
+            uid_ids = [int(row.get("id")) for row in uid_rows if isinstance(row, dict) and str(row.get("id") or "").isdigit()] if isinstance(uid_rows, list) else []
+            if uid_ids != [record_id]:
+                self.send_json(
+                    {
+                        "error": "พบรายการซ้ำก่อนแก้ไข ระบบหยุดไว้เพื่อไม่ให้แก้เพียงบางรายการ",
+                        "client_uid": record_client_uid,
+                        "existing_ids": uid_ids,
+                    },
+                    409,
+                )
+                return
             expected_updated_at = str(payload.get("expected_updated_at") or "")
             current_updated_at = str(before.get("updated_at") or before.get("created_at") or "")
             if expected_updated_at and expected_updated_at != current_updated_at:
@@ -7345,6 +7368,29 @@ class ReportHandler(BaseHTTPRequestHandler):
 
             existing_row = existing_rows[0]
             before = live_state_to_client("production_records", existing_row)
+            record_client_uid = production_record_client_uid(existing_row)
+            if not record_client_uid:
+                self.send_json({"error": "รายการนี้ไม่มี client_uid จึงหยุดการแก้ไขเพื่อป้องกันการสร้างรายการใหม่"}, 409)
+                return
+            uid_filter_field = quote("raw_payload->>client_uid", safe="")
+            uid_status, uid_rows = supabase_request(
+                "GET",
+                f"production_records?{uid_filter_field}=eq.{quote(record_client_uid)}&select=id&order=id.asc&limit=3",
+            )
+            if uid_status >= 400:
+                self.send_json({"error": uid_rows}, uid_status)
+                return
+            uid_ids = [int(row.get("id")) for row in uid_rows if isinstance(row, dict) and str(row.get("id") or "").isdigit()] if isinstance(uid_rows, list) else []
+            if uid_ids != [record_id]:
+                self.send_json(
+                    {
+                        "error": "พบรายการซ้ำก่อนแก้ไข ระบบหยุดไว้เพื่อไม่ให้แก้เพียงบางรายการ",
+                        "client_uid": record_client_uid,
+                        "existing_ids": uid_ids,
+                    },
+                    409,
+                )
+                return
             expected_updated_at = str(payload.get("expected_updated_at") or "")
             current_updated_at = str(before.get("updated_at") or before.get("created_at") or "")
             if expected_updated_at and expected_updated_at != current_updated_at:
@@ -7453,7 +7499,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             converted.pop("id", None)
             status, updated_rows = supabase_request(
                 "PATCH",
-                f"production_records?id=eq.{record_id}",
+                f"production_records?id=eq.{record_id}&{uid_filter_field}=eq.{quote(record_client_uid)}",
                 converted,
                 prefer="return=representation",
             )
@@ -7463,6 +7509,11 @@ class ReportHandler(BaseHTTPRequestHandler):
             updated_row = updated_rows[0] if isinstance(updated_rows, list) and updated_rows else None
             if not updated_row:
                 self.send_json({"error": "Production record update returned no row."}, 500)
+                return
+            if int(updated_row.get("id") or 0) != record_id or production_record_client_uid(updated_row) != record_client_uid:
+                rollback = {key: value for key, value in existing_row.items() if key != "id"}
+                supabase_request("PATCH", f"production_records?id=eq.{record_id}", rollback, prefer="return=minimal")
+                self.send_json({"error": "การแก้ไขเปลี่ยนตัวตนรายการ ระบบย้อนข้อมูลเดิมกลับแล้ว"}, 409)
                 return
             after = live_state_to_client("production_records", updated_row)
             tracked_fields = [

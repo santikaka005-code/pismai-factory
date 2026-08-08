@@ -8472,7 +8472,17 @@ async function saveProductionEditorRecord(user, formElement) {
         actor_fullname: user.fullname
       })
     });
-    const merged = getProductionRecords().map((record) => Number(record.id) === Number(existingRecord.id) ? response.data : record);
+    if (Number(response.data?.id) !== Number(existingRecord.id) || getProductionClientUid(response.data) !== getProductionClientUid(existingRecord)) {
+      throw new Error("Cloud ส่งตัวตนรายการกลับมาไม่ตรง ระบบจึงไม่รับผลการแก้ไข");
+    }
+    const existingUid = getProductionClientUid(existingRecord);
+    const merged = [
+      ...getProductionRecords().filter((record) => (
+        Number(record.id) !== Number(existingRecord.id) &&
+        (!existingUid || getProductionClientUid(record) !== existingUid)
+      )),
+      response.data
+    ].sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
     applyingCloudState = true;
     localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
     applyingCloudState = false;

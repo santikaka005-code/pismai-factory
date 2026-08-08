@@ -38,6 +38,10 @@ class ProductionEditorServerTest(unittest.TestCase):
         self.assertIn('"action": "UPDATE_PRODUCTION"', route)
         self.assertIn("expected_updated_at", route)
         self.assertIn("production change was rolled back", route)
+        self.assertIn("record_client_uid = production_record_client_uid(existing_row)", route)
+        self.assertIn("uid_ids != [record_id]", route)
+        self.assertIn('f"production_records?id=eq.{record_id}&{uid_filter_field}=eq.{quote(record_client_uid)}"', route)
+        self.assertIn('production_record_client_uid(updated_row) != record_client_uid', route)
 
     def test_c1_to_c3_can_edit_only_their_own_record_within_five_minutes(self):
         actor = {"username": "operator", "level": "C2"}
