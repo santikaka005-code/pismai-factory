@@ -7152,6 +7152,8 @@ const BACKUP_DATA_KEYS = [
   "community_posts",
   "secret_messages"
 ];
+const SUPABASE_FREE_DATABASE_BYTES = 500 * 1024 * 1024;
+const BACKUP_STORAGE_WARNING_PERCENT = 85;
 
 function resetBackupSecurityState() {
   backupUnlocked = false;
@@ -7228,6 +7230,56 @@ function formatBackupFileSize(bytes) {
   const size = Number(bytes || 0);
   if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toLocaleString("th-TH", { maximumFractionDigits: 1 })} MB`;
   return `${Math.max(1, Math.ceil(size / 1024)).toLocaleString("th-TH")} KB`;
+}
+
+function getBackupStorageUsage() {
+  const serverUsage = backupSnapshot?.storage_usage;
+  const usedBytes = Number(serverUsage?.used_bytes) || new Blob([JSON.stringify(backupSnapshot || {})]).size;
+  const limitBytes = Number(serverUsage?.limit_bytes) || SUPABASE_FREE_DATABASE_BYTES;
+  const warningPercent = Number(serverUsage?.warning_percent) || BACKUP_STORAGE_WARNING_PERCENT;
+  const percent = Math.min(100, Math.max(0, (usedBytes / limitBytes) * 100));
+  const level = percent >= warningPercent ? "critical" : percent >= 70 ? "watch" : percent >= 45 ? "moderate" : "healthy";
+  return {
+    usedBytes,
+    limitBytes,
+    remainingBytes: Math.max(0, limitBytes - usedBytes),
+    warningPercent,
+    percent,
+    level,
+    label: level === "critical" ? "ถึงระดับสำรองและเคลียร์" : level === "watch" ? "ใกล้ระดับแจ้งเตือน" : level === "moderate" ? "ใช้งานปานกลาง" : "พื้นที่พร้อมใช้งาน"
+  };
+}
+
+function renderBackupStorageMeter() {
+  const usage = getBackupStorageUsage();
+  const displayPercent = usage.percent < 0.1 && usage.usedBytes > 0 ? "< 0.1" : usage.percent.toLocaleString("th-TH", { maximumFractionDigits: 1 });
+  const fillPercent = Math.max(usage.percent > 0 ? 1.2 : 0, usage.percent);
+  return `
+    <section class="backup-storage-card is-${usage.level}" aria-label="สถานะพื้นที่ฐานข้อมูล Supabase">
+      <div class="backup-storage-card-head">
+        <div>
+          <span class="backup-storage-kicker"><i></i> SUPABASE FREE DATABASE</span>
+          <h3>สถานะพื้นที่ฐานข้อมูล</h3>
+          <p>ติดตามขนาดข้อมูลที่ระบบสำรองได้ เทียบกับโควตา Free Plan 500 MB</p>
+        </div>
+        <div class="backup-storage-score"><strong>${displayPercent}%</strong><span>${escapeHtml(usage.label)}</span></div>
+      </div>
+      <div class="backup-storage-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(usage.percent)}">
+        <span class="backup-storage-fill" style="width:${fillPercent}%"></span>
+        <i class="backup-storage-threshold" style="left:${usage.warningPercent}%"><b>${usage.warningPercent}%</b></i>
+      </div>
+      <div class="backup-storage-scale"><span>0 MB</span><span>ระดับเตือน ${usage.warningPercent}%</span><span>500 MB</span></div>
+      <div class="backup-storage-facts">
+        <div><span>ข้อมูลปัจจุบัน</span><strong>${formatBackupFileSize(usage.usedBytes)}</strong></div>
+        <div><span>พื้นที่คงเหลือ</span><strong>${formatBackupFileSize(usage.remainingBytes)}</strong></div>
+        <div><span>จำนวนข้อมูล</span><strong>${backupTotalRows().toLocaleString("th-TH")} รายการ</strong></div>
+      </div>
+      <div class="backup-storage-advice">
+        <span>${usage.level === "critical" ? "!" : "✓"}</span>
+        <p><strong>${usage.level === "critical" ? "ควร Backup / เคลียร์ข้อมูลเก่าแล้ว" : "สถานะยังปลอดภัย"}</strong><small>${usage.level === "critical" ? "ระบบแตะเกณฑ์ 85% ที่กำหนด กรุณาสำรอง ตรวจสอบไฟล์ และเคลียร์ตามขั้นตอน" : `ระบบจะแจ้งเตือนเมื่อข้อมูลถึง ${usage.warningPercent}% หรือประมาณ ${formatBackupFileSize(usage.limitBytes * usage.warningPercent / 100)}`}</small></p>
+      </div>
+      <small class="backup-storage-note">* เป็นขนาดข้อมูลเชิงตรรกะจาก Snapshot ล่าสุด ไม่รวมดัชนีและ overhead ภายใน PostgreSQL ควรตรวจเทียบ Dashboard เป็นระยะ</small>
+    </section>`;
 }
 
 function formatBackupDateTime(value) {
@@ -7364,6 +7416,7 @@ function renderBackupOverview(user) {
   const estimatedBytes = new Blob([JSON.stringify(backupSnapshot || {})]).size;
   const canClear = canManageAllProductionRecords(user);
   return `
+    ${renderBackupStorageMeter()}
     <section class="backup-workspace-grid">
       <div class="backup-primary-workspace">
         <div class="backup-section-heading">
@@ -15438,7 +15491,7 @@ function renderSummaryGroupReport(moduleItem) {
         <div class="table-scroll">
           <table>
             <thead><tr><th>วันที่</th><th>กลุ่ม</th><th>ผลไม้</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th>${showStandardWeights ? `<th>${escapeHtml(groupWeightLabels.water || "น้ำหนักช่อง 1")}</th><th>${escapeHtml(groupWeightLabels.flower || "น้ำหนักช่อง 2")}</th>` : ""}${showDurianWeight ? "<th>น้ำหนักทุเรียน</th>" : ""}<th>รวมเงิน</th></tr></thead>
-            <tbody>${records.length ? records.slice(0, 200).map(renderGroupReportDetailRow).join("") : `<tr><td colspan="${detailColumnCount}" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+            <tbody>${records.length ? records.map(renderGroupReportDetailRow).join("") : `<tr><td colspan="${detailColumnCount}" class="empty-cell">ยังไม่มีข้อมูล</td></tr>`}</tbody>
           </table>
         </div>
       </section>

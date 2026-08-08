@@ -101,6 +101,8 @@ MAIN_CLEAR_TABLES = [
     "production_save_queue",
 ]
 BACKUP_ARCHIVE_BUCKET = "pismai-backup-archives"
+SUPABASE_FREE_DATABASE_BYTES = 500 * 1024 * 1024
+DATABASE_STORAGE_WARNING_PERCENT = 85
 LIVE_STATE_TABLES = {
     "production_sessions",
     "production_records",
@@ -1587,6 +1589,7 @@ def supabase_request(
     payload: dict | list | None = None,
     prefer: str | None = None,
     timeout_seconds: float = 20,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, dict | list | str | None]:
     if not supabase_configured():
         return 503, {"error": "Supabase environment variables are not configured."}
@@ -1600,6 +1603,8 @@ def supabase_request(
     }
     if prefer:
         headers["Prefer"] = prefer
+    if extra_headers:
+        headers.update(extra_headers)
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
@@ -1622,6 +1627,28 @@ def supabase_request(
         return error.code, body
     except Exception as error:
         return 500, {"error": str(error)}
+
+
+def supabase_get_all(path: str, page_size: int = 100, timeout_seconds: float = 20) -> tuple[int, list | dict | str | None]:
+    """Read every PostgREST page so exports never inherit a server row cap."""
+    page_size = max(1, min(int(page_size), 1000))
+    rows: list = []
+    offset = 0
+    while True:
+        status, body = supabase_request(
+            "GET",
+            path,
+            timeout_seconds=timeout_seconds,
+            extra_headers={"Range-Unit": "items", "Range": f"{offset}-{offset + page_size - 1}"},
+        )
+        if status >= 400:
+            return status, body
+        if not isinstance(body, list):
+            return 502, {"error": "Supabase collection response was not a list."}
+        rows.extend(body)
+        if len(body) < page_size:
+            return status, rows
+        offset += len(body)
 
 
 def insert_audit_log_compatible(audit_row: dict) -> tuple[int, dict | list | str | None]:
@@ -1721,7 +1748,7 @@ def backup_authorized(handler: BaseHTTPRequestHandler) -> bool:
 def read_supabase_backup(tables: list[str] | None = None) -> tuple[int, dict]:
     backup_data = {}
     for table in tables or BACKUP_TABLES:
-        status, body = supabase_request("GET", f"{table}?select=*")
+        status, body = supabase_get_all(f"{table}?select=*&order=id.asc")
         if status >= 400:
             return status, {"error": body, "table": table}
         backup_data[table] = body if isinstance(body, list) else []
@@ -1782,7 +1809,7 @@ def backup_snapshot_payload(scope: str, actor: str, data: dict) -> dict:
         for table, rows in data.items()
         if isinstance(rows, list)
     }
-    return {
+    snapshot = {
         "exported_at": exported_at,
         "cutoff_at": exported_at,
         "app": "Pismai Factory Wage",
@@ -1794,6 +1821,18 @@ def backup_snapshot_payload(scope: str, actor: str, data: dict) -> dict:
         "total_rows": sum(row_counts.values()),
         "data": data,
     }
+    logical_bytes = len(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    percent = min(100, (logical_bytes / SUPABASE_FREE_DATABASE_BYTES) * 100)
+    snapshot["storage_usage"] = {
+        "used_bytes": logical_bytes,
+        "limit_bytes": SUPABASE_FREE_DATABASE_BYTES,
+        "remaining_bytes": max(0, SUPABASE_FREE_DATABASE_BYTES - logical_bytes),
+        "percent": round(percent, 2),
+        "warning_percent": DATABASE_STORAGE_WARNING_PERCENT,
+        "warning": percent >= DATABASE_STORAGE_WARNING_PERCENT,
+        "measurement": "logical_backup_size",
+    }
+    return snapshot
 
 
 def backup_snapshot_ids(data: dict, table: str) -> list[int]:
@@ -4521,7 +4560,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
     story += [Paragraph("สรุปตามกอง", section), pile_table, Spacer(1, 7 * mm)]
 
     detail_rows = [["วันที่", "เวลา", "รหัส", "ชื่อพนักงาน", "สินค้า", "กอง", "น้ำหนักน้ำ", "น้ำหนักดอก", "ยอดเงิน"]]
-    for record in records[:80]:
+    for record in records:
         detail_rows.append(
             [
                 format_report_date(record.get("record_date") or record.get("date") or ""),
@@ -4977,7 +5016,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
                 ]))
                 story.extend([detail_page_header, Spacer(1, 4 * mm)])
             detail_rows = [[label for _, label, _ in detail_defs]]
-            for record in records[:100]:
+            for record in records:
                 detail_rows.append([getter(record) for _, _, getter in detail_defs])
             width_weights = {
                 "date": 25, "time": 17, "empCode": 24, "employeeName": 53, "pile": 14,
@@ -5505,14 +5544,14 @@ def build_group_report_pdf(payload: dict) -> bytes:
         add_table(
             "รายละเอียดพนักงานในกลุ่ม",
             ["กลุ่ม", "รหัส", "ชื่อ", "รายการ", *weight_headers(), "รวม", "เงิน", "เบี้ยขยัน", "หักทั่วไป", "หัก 3%", "สุทธิ"],
-            [[row["pay_group"], row["emp_code"], row["fullname"], row["records"], *summary_weight_values(row), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("withholding_tax_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in employee_rows[:80]],
+            [[row["pay_group"], row["emp_code"], row["fullname"], row["records"], *summary_weight_values(row), report_number(row["total"]), money(row["amount"]), money(row.get("bonus_amount", 0)), money(row.get("deduction_amount", 0)), money(row.get("withholding_tax_amount", 0)), money(row.get("net_amount", row["amount"]))] for row in employee_rows],
         )
 
     if options["details"]:
         add_table(
             "รายละเอียดรายการ",
             ["วันที่", "กลุ่ม", "ผลไม้", "รหัส", "ชื่อ", "กอง", *weight_headers(), "รวม", "รวมเงิน"],
-            [[format_report_date(record["record_date"]), record["pay_group"], record["fruit_label"], record.get("emp_code", ""), record.get("employee_name", ""), record.get("pile_no") or record.get("pile", ""), *detail_weight_values(record), report_number(production_total_weight(record)), money(record.get("total_amount", record.get("grand_total", 0)))] for record in records[:100]],
+            [[format_report_date(record["record_date"]), record["pay_group"], record["fruit_label"], record.get("emp_code", ""), record.get("employee_name", ""), record.get("pile_no") or record.get("pile", ""), *detail_weight_values(record), report_number(production_total_weight(record)), money(record.get("total_amount", record.get("grand_total", 0)))] for record in records],
         )
 
     if len(story) <= 4:
@@ -6328,7 +6367,7 @@ def build_time_summary_pdf(payload: dict) -> bytes:
     story += [Paragraph("สรุปรายวัน", section), daily_table, Spacer(1, 7 * mm)]
 
     employee_table_rows = [["รหัส", "ชื่อพนักงาน", "แผนก", "วัน", "รายการ", "เวลาสุทธิ", "สาย", "ออกก่อน"]]
-    for row in employee_rows[:80]:
+    for row in employee_rows:
         employee_table_rows.append([
             str(row["emp_code"]),
             Paragraph(
@@ -8585,7 +8624,7 @@ class ReportHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/state":
             state = {}
             for table in LIVE_STATE_TABLES:
-                status, body = supabase_request("GET", f"{table}?select=*&order=id.asc")
+                status, body = supabase_get_all(f"{table}?select=*&order=id.asc")
                 if status >= 400:
                     self.send_json({"error": body, "table": table}, status)
                     return
@@ -8607,7 +8646,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                     f"pay_group.ilike.*{escaped}*"
                     ")"
                 )
-            status, body = supabase_request("GET", f"employees?{params}")
+            status, body = supabase_get_all(f"employees?{params}")
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 
@@ -8657,7 +8696,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                     f"employee_type.ilike.*{escaped}*"
                     ")"
                 )
-            status, body = supabase_request("GET", f"time_employees?{params}")
+            status, body = supabase_get_all(f"time_employees?{params}")
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 
@@ -8672,7 +8711,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 params += f"&end_date=gte.{quote(start_date)}"
             if end_date:
                 params += f"&start_date=lte.{quote(end_date)}"
-            status, body = supabase_request("GET", f"deduction_records?{params}")
+            status, body = supabase_get_all(f"deduction_records?{params}")
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 
@@ -8687,7 +8726,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 params += f"&applied_date=gte.{quote(start_date)}"
             if end_date:
                 params += f"&applied_date=lte.{quote(end_date)}"
-            status, body = supabase_request("GET", f"deduction_applications?{params}")
+            status, body = supabase_get_all(f"deduction_applications?{params}")
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 

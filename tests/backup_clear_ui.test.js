@@ -8,6 +8,9 @@ const migration = fs.readFileSync("supabase_backup_archive_migration.sql", "utf8
 assert.match(app, /data-open-backup-clear="main"/);
 assert.match(app, /data-open-backup-clear="queue"/);
 assert.match(app, /id="exportQueueBackup"/);
+assert.match(app, /BACKUP_STORAGE_WARNING_PERCENT = 85/);
+assert.match(app, /renderBackupStorageMeter/);
+assert.match(app, /backup-storage-threshold/);
 assert.match(app, /confirmation: "BACKUP_CLEAR"/);
 assert.match(app, /Private Archive/);
 assert.match(app, /production_save_queue_events/);
