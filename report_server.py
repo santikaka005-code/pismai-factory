@@ -887,6 +887,29 @@ def inspect_production_queue_rows(rows: list[dict]) -> tuple[str, list[dict], di
     }
 
 
+def production_uid_uniqueness_error(rows: list[dict]) -> dict | None:
+    for row in rows:
+        uid = production_record_client_uid(row)
+        if not uid:
+            return {"error": "Production record is missing client_uid.", "duplicate_guard": "missing_client_uid"}
+        uid_filter_field = quote("raw_payload->>client_uid", safe="")
+        status, matches = supabase_request(
+            "GET",
+            f"production_records?{uid_filter_field}=eq.{quote(uid)}&select=id&order=id.asc&limit=3",
+        )
+        if status >= 400:
+            return {"error": "Could not verify production client_uid uniqueness.", "duplicate_guard": "uid_verify_failed", "status": status}
+        ids = [int(item.get("id")) for item in matches if isinstance(item, dict) and str(item.get("id") or "").isdigit()] if isinstance(matches, list) else []
+        if len(ids) != 1:
+            return {
+                "error": "พบ client_uid ซ้ำในฐานข้อมูล ระบบหยุดคิวไว้เพื่อตรวจสอบ",
+                "duplicate_guard": "duplicate_client_uid",
+                "client_uid": uid,
+                "existing_ids": ids,
+            }
+    return None
+
+
 def validate_production_queue_rows(rows: list[dict]) -> str | None:
     today = datetime.now(timezone(timedelta(hours=7))).date().isoformat()
     for index, row in enumerate(rows, start=1):
@@ -1008,6 +1031,24 @@ def process_production_save_queue_job(job: dict) -> None:
     with production_record_insert_lock:
         status, body = insert_production_records_compatible(rows)
     if status < 400 and isinstance(body, list) and len(body) == len(rows):
+        uid_error = production_uid_uniqueness_error(rows)
+        if uid_error:
+            update_production_queue(
+                queue_id,
+                {
+                    "status": "needs_review",
+                    "duplicate_details": uid_error,
+                    "error_code": str(uid_error.get("duplicate_guard") or "duplicate_client_uid"),
+                    "error_message": str(uid_error.get("error")),
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "locked_at": None,
+                    "locked_by": None,
+                },
+                expected_status="processing",
+                worker_id=production_save_queue_worker_id,
+            )
+            production_queue_event(queue_id, "uid_duplicate_review", "needs_review", str(uid_error.get("error")), production_save_queue_worker_id, uid_error)
+            return
         finish_production_queue_success(job, body)
         return
     if status >= 400:
@@ -1330,8 +1371,28 @@ def ensure_row_id(table: str, row: dict) -> dict:
 def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
     synced = []
     next_id = None
+    seen_production_uids: set[str] = set()
     for row in rows:
         clean_row = dict(row)
+        incoming_raw = clean_row.get("raw_payload") if isinstance(clean_row.get("raw_payload"), dict) else {}
+        incoming_production_uid = str(incoming_raw.get("client_uid") or "").strip() if table == "production_records" else ""
+        if incoming_production_uid:
+            if incoming_production_uid in seen_production_uids:
+                continue
+            seen_production_uids.add(incoming_production_uid)
+            uid_filter_field = quote("raw_payload->>client_uid", safe="")
+            uid_status, uid_rows = supabase_request(
+                "GET",
+                f"production_records?{uid_filter_field}=eq.{quote(incoming_production_uid)}&select=*&order=id.asc&limit=2",
+            )
+            if uid_status >= 400:
+                return uid_status, {"error": uid_rows, "table": table, "client_uid": incoming_production_uid}
+            if isinstance(uid_rows, list) and uid_rows:
+                # A browser cache may carry a stale numeric id. client_uid is
+                # the durable identity: return the central row and never mint
+                # another id for the same logical production record.
+                synced.append(uid_rows[0])
+                continue
         if clean_row.get("id") in [None, ""]:
             if next_id is None:
                 next_id = next_table_id(table)
@@ -7481,7 +7542,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 # Never delete rows missing from one browser's local snapshot.
                 # Multiple stations submit concurrently and each may only know
                 # about its own most recent records.
-                read_status, read_body = supabase_request("GET", f"{table}?select=*&order=id.asc")
+                read_status, read_body = supabase_get_all(f"{table}?select=*&order=id.asc")
                 if read_status >= 400:
                     self.send_json({"error": read_body, "table": table}, read_status)
                     return

@@ -2004,17 +2004,25 @@ async function bootstrapLiveStateFromCloud() {
       if (needsMigration && localRows.length) {
         const merged = [...cloudRows];
         const byId = new Map(cloudRows.map((row) => [String(row.id), row]));
+        const byProductionUid = table === "production_records"
+          ? new Map(cloudRows.map((row) => [getProductionClientUid(row), row]).filter(([uid]) => uid))
+          : new Map();
         let nextId = Math.max(0, ...cloudRows.map((row) => Number(row.id) || 0));
         localRows.forEach((localRow) => {
+          const productionUid = table === "production_records" ? getProductionClientUid(localRow) : "";
+          if (productionUid && byProductionUid.has(productionUid)) return;
           const existing = byId.get(String(localRow.id));
           if (!existing) {
             merged.push(localRow);
             byId.set(String(localRow.id), localRow);
+            if (productionUid) byProductionUid.set(productionUid, localRow);
             return;
           }
           if (JSON.stringify(existing) === JSON.stringify(localRow)) return;
           nextId += 1;
-          merged.push({ ...localRow, id: nextId });
+          const migratedRow = { ...localRow, id: nextId };
+          merged.push(migratedRow);
+          if (productionUid) byProductionUid.set(productionUid, migratedRow);
         });
         await cloudApiRequest("/api/state", {
           method: "POST",
