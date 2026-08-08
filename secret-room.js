@@ -16,7 +16,9 @@ const SecretRoom = (() => {
     unreadMessageCount: 0,
     unreadPostCount: 0,
     latestPostId: 0,
-    lastReadPostId: 0
+    lastReadPostId: 0,
+    communityDraft: "",
+    messageDrafts: {}
   };
   const baseDocumentTitle = document.title.replace(/^\(\d+\+?\)\s*/, "");
 
@@ -199,7 +201,7 @@ const SecretRoom = (() => {
           <form class="community-composer" data-community-form>
             <div class="secret-avatar compact">${escapeHtml(initials(user.fullname || user.username))}</div>
             <div>
-              <textarea name="content" maxlength="2000" rows="3" placeholder="แบ่งปันข้อความกับเพื่อนร่วมงาน..." required></textarea>
+              <textarea name="content" maxlength="2000" rows="3" placeholder="แบ่งปันข้อความกับเพื่อนร่วมงาน..." required>${escapeHtml(state.communityDraft)}</textarea>
               <div class="composer-footer"><small>ทุกคนในระบบจะเห็นโพสต์นี้</small><button type="submit">โพสต์</button></div>
             </div>
           </form>
@@ -220,6 +222,8 @@ const SecretRoom = (() => {
 
   function renderChat() {
     const active = state.activeUser;
+    const draftKey = String(active?.username || "").toLowerCase();
+    const messageDraft = state.messageDrafts[draftKey] || "";
     return `
       <div class="secret-chat-layout">
         <aside class="chat-list">
@@ -246,7 +250,7 @@ const SecretRoom = (() => {
                 </div>`).join("") : `<div class="secret-empty"><strong>เริ่มบทสนทนา</strong><span>ข้อความนี้เห็นได้เฉพาะคุณและคู่สนทนา</span></div>`}
             </div>
             <form class="message-composer" data-message-form>
-              <textarea name="content" rows="1" maxlength="4000" placeholder="พิมพ์ข้อความ..." required></textarea>
+              <textarea name="content" rows="1" maxlength="4000" placeholder="พิมพ์ข้อความ..." required>${escapeHtml(messageDraft)}</textarea>
               <button type="submit">ส่ง</button>
             </form>` : `<div class="chat-placeholder"><span class="chat-placeholder-icon">•••</span><strong>เลือกบทสนทนา</strong><p>เลือกจากประวัติด้านซ้าย หรือเริ่มแชทจากหน้าเพื่อนร่วมงาน</p></div>`}
         </section>
@@ -256,6 +260,12 @@ const SecretRoom = (() => {
   function update() {
     const root = document.querySelector("[data-secret-room]");
     if (!root) return;
+    const activeComposer = document.activeElement?.matches?.("[data-message-form] textarea, [data-community-form] textarea")
+      ? document.activeElement
+      : null;
+    const activeComposerName = activeComposer?.closest("form")?.hasAttribute("data-message-form") ? "message" : "community";
+    const selectionStart = activeComposer?.selectionStart;
+    const selectionEnd = activeComposer?.selectionEnd;
     root.querySelectorAll("[data-secret-tab]").forEach((button) => button.classList.toggle("active", button.dataset.secretTab === state.tab));
     const online = state.coworkers.filter((person) => person.is_online).length;
     const onlineNode = root.querySelector("[data-secret-online-count]");
@@ -269,6 +279,12 @@ const SecretRoom = (() => {
     requestAnimationFrame(() => {
       const list = document.querySelector("[data-message-list]");
       if (list) list.scrollTop = list.scrollHeight;
+      if (activeComposer) {
+        const selector = activeComposerName === "message" ? "[data-message-form] textarea" : "[data-community-form] textarea";
+        const restoredComposer = document.querySelector(selector);
+        restoredComposer?.focus();
+        restoredComposer?.setSelectionRange(selectionStart, selectionEnd);
+      }
     });
   }
 
@@ -330,6 +346,7 @@ const SecretRoom = (() => {
       button.disabled = true;
       try {
         await api("/posts", { method: "POST", body: JSON.stringify({ content }) });
+        state.communityDraft = "";
         form.reset();
         const response = await api("/posts");
         state.posts = response.data || [];
@@ -338,6 +355,13 @@ const SecretRoom = (() => {
         window.alert(error.message || "โพสต์ไม่สำเร็จ");
         button.disabled = false;
       }
+    });
+    document.querySelector("[data-community-form] textarea")?.addEventListener("input", (event) => {
+      state.communityDraft = event.currentTarget.value;
+    });
+    document.querySelector("[data-message-form] textarea")?.addEventListener("input", (event) => {
+      const draftKey = String(state.activeUser?.username || "").toLowerCase();
+      if (draftKey) state.messageDrafts[draftKey] = event.currentTarget.value;
     });
     document.querySelector("[data-message-form]")?.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -348,6 +372,7 @@ const SecretRoom = (() => {
       button.disabled = true;
       try {
         await api("/messages", { method: "POST", body: JSON.stringify({ recipient_username: state.activeUser.username, content }) });
+        delete state.messageDrafts[String(state.activeUser.username || "").toLowerCase()];
         form.reset();
         await openChat(state.activeUser.username);
         const chats = await api("/chats");
