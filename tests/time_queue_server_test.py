@@ -43,6 +43,20 @@ class TimeQueueServerTest(unittest.TestCase):
         finish.assert_called_once()
         self.assertEqual(finish.call_args.args[2], "idempotent_recovery")
 
+    def test_existing_rows_recovers_exact_shift_when_old_row_has_no_dedupe_key(self):
+        queued = self.row(queue_dedupe_key="queue-key")
+        saved = {**queued, "id": 91, "queue_dedupe_key": None}
+        with patch.object(
+            report_server,
+            "supabase_request",
+            side_effect=[(200, []), (200, [saved])],
+        ) as request:
+            status, rows = report_server.time_queue_existing_rows([queued])
+        self.assertEqual(status, 200)
+        self.assertEqual([row["id"] for row in rows], [91])
+        self.assertIn("work_date=eq.2026-08-13", request.call_args_list[1].args[1])
+        self.assertIn("check_in=eq.08%3A00", request.call_args_list[1].args[1])
+
     def test_worker_stops_overlapping_time_for_review(self):
         rows = [self.row()]
         with (

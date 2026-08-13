@@ -1250,14 +1250,56 @@ def time_queue_row_key(queue_uid: str, index: int) -> str:
 
 def time_queue_existing_rows(rows: list[dict]) -> tuple[int, list[dict] | dict]:
     keys = [str(row.get("queue_dedupe_key") or "") for row in rows if row.get("queue_dedupe_key")]
-    if not keys:
-        return 200, []
-    status, body = supabase_request(
-        "GET",
-        f"time_records?queue_dedupe_key=in.({','.join(quote(key) for key in keys)})&select=*",
-        timeout_seconds=6,
-    )
-    return status, body if isinstance(body, list) else body
+    matched_rows: list[dict] = []
+    if keys:
+        status, body = supabase_request(
+            "GET",
+            f"time_records?queue_dedupe_key=in.({','.join(quote(key) for key in keys)})&select=*",
+            timeout_seconds=6,
+        )
+        if status >= 400:
+            return status, body
+        if isinstance(body, list):
+            matched_rows.extend(row for row in body if isinstance(row, dict))
+
+    matched_keys = {str(row.get("queue_dedupe_key") or "") for row in matched_rows}
+    used_ids = {str(row.get("id") or "") for row in matched_rows}
+    # A database insert can succeed immediately before the queue status update
+    # fails. Older rows may therefore have no dedupe key. An exact business-key
+    # match is safe to recover because identical/overlapping shifts are never
+    # valid as a second attendance record.
+    for row in rows:
+        dedupe_key = str(row.get("queue_dedupe_key") or "")
+        if dedupe_key and dedupe_key in matched_keys:
+            continue
+        work_date, emp_code = time_record_identity(row)
+        check_in = str(row.get("check_in") or row.get("clock_in") or "").strip()
+        check_out = str(row.get("check_out") or row.get("clock_out") or "").strip()
+        if not work_date or not emp_code or not check_in or not check_out:
+            continue
+        exact_status, exact_body = supabase_request(
+            "GET",
+            "time_records?"
+            f"work_date=eq.{quote(work_date)}&emp_code=eq.{quote(emp_code)}&"
+            f"check_in=eq.{quote(check_in)}&check_out=eq.{quote(check_out)}&"
+            "select=*&order=id.asc&limit=2",
+            timeout_seconds=6,
+        )
+        if exact_status >= 400:
+            return exact_status, exact_body
+        exact_match = next(
+            (
+                candidate for candidate in exact_body if isinstance(candidate, dict)
+                and str(candidate.get("id") or "") not in used_ids
+            ),
+            None,
+        ) if isinstance(exact_body, list) else None
+        if exact_match:
+            matched_rows.append(exact_match)
+            used_ids.add(str(exact_match.get("id") or ""))
+            if dedupe_key:
+                matched_keys.add(dedupe_key)
+    return 200, matched_rows
 
 
 def finish_time_queue(job: dict, rows: list[dict], event_type: str = "succeeded") -> None:
