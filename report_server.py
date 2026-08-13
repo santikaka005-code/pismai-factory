@@ -1331,29 +1331,31 @@ def finish_time_queue(job: dict, rows: list[dict], event_type: str = "succeeded"
             if operation == "update"
             else f"Added queued time record {row.get('emp_code', '')} {row.get('check_in', '')}-{row.get('check_out', '')}"
         )
-        audit_status, audit_body = supabase_request(
-            "POST", "audit_logs",
+        audit_status, audit_body = insert_audit_log_compatible(
             {"action": "UPDATE_TIME_RECORD" if operation == "update" else "INSERT_TIME_RECORD",
              "module": "time_records", "description": detail, "created_by": job.get("created_by"),
              "user_fullname": job.get("created_by"),
              "metadata": {"time_queue_uid": queue_uid, "queue_id": job.get("id"), "record_id": row.get("id")}},
-            prefer="return=minimal", timeout_seconds=5,
         )
         if audit_status >= 400:
             audit_failure = (audit_status, supabase_error_text(audit_body) or "Audit insert failed.")
             break
-    if audit_failure:
-        fail_time_queue(job, "audit_log_failed", audit_failure[1], retryable=audit_failure[0] >= 500)
-        return
     values = {
         "status": "succeeded", "result_record_ids": record_ids, "result_payload": client_rows,
-        "error_code": None, "error_message": None, "finished_at": datetime.now(timezone.utc).isoformat(),
+        "error_code": "audit_log_pending" if audit_failure else None,
+        "error_message": audit_failure[1] if audit_failure else None,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
         "locked_at": None, "locked_by": None,
     }
     status, updated = update_time_queue(int(job.get("id") or 0), values, expected_status="processing")
     if status < 400 and updated:
-        time_queue_event(int(job["id"]), event_type, "succeeded", f"Saved {len(rows)} time record(s).", time_save_queue_worker_id,
-                         {"record_ids": record_ids})
+        final_event = "succeeded_audit_pending" if audit_failure else event_type
+        event_message = (
+            f"Saved {len(rows)} time record(s); audit log is pending: {audit_failure[1]}"
+            if audit_failure else f"Saved {len(rows)} time record(s)."
+        )
+        time_queue_event(int(job["id"]), final_event, "succeeded", event_message, time_save_queue_worker_id,
+                         {"record_ids": record_ids, "audit_pending": bool(audit_failure)})
 
 
 def fail_time_queue(job: dict, code: str, message: str, retryable: bool = False) -> None:

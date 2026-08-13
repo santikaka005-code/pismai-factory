@@ -11173,6 +11173,9 @@ function getTimeQueueReason(item) {
       : ["รอ Worker รับคิว", "ข้อมูลถูกเก็บในฐานกลางแล้ว กำลังรอประมวลผล"];
   }
   if (item.status === "processing") return ["กำลังตรวจและบันทึก", "Worker กำลังตรวจพนักงาน เวลาทับ และความถูกต้องของข้อมูล"];
+  if (item.status === "succeeded" && item.error_code === "audit_log_pending") {
+    return ["บันทึกข้อมูลสำเร็จ", "ข้อมูลเวลาอยู่ในฐานและใช้ในรายงานได้แล้ว ส่วน Audit Log ถูกแยกไว้รอซ่อม"];
+  }
   if (item.status === "succeeded") return ["บันทึกสำเร็จ", "ตรวจพบข้อมูลครบใน time_records แล้ว"];
   return reasonByCode[item.error_code] || ["ต้องตรวจสอบ", item.error_message || "ระบบหยุดคิวไว้เพื่อป้องกันข้อมูลผิดพลาด"];
 }

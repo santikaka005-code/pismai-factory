@@ -104,17 +104,20 @@ class TimeQueueServerTest(unittest.TestCase):
         self.assertEqual(finish.call_args.args[1], [recovered, inserted])
         self.assertEqual(finish.call_args.args[2], "partial_recovery")
 
-    def test_queue_does_not_finish_when_audit_log_is_unavailable(self):
+    def test_saved_queue_finishes_with_warning_when_audit_log_is_unavailable(self):
         rows = [{**self.row(), "id": 81}]
         job = self.job(rows, queue_uid="queue-a")
         with (
             patch.object(report_server, "supabase_request", return_value=(503, {"message": "offline"})),
-            patch.object(report_server, "fail_time_queue") as fail,
-            patch.object(report_server, "update_time_queue") as update,
+            patch.object(report_server, "update_time_queue", return_value=(200, {"id": 10})) as update,
+            patch.object(report_server, "time_queue_event") as event,
         ):
             report_server.finish_time_queue(job, rows)
-        update.assert_not_called()
-        fail.assert_called_once_with(job, "audit_log_failed", "offline", retryable=True)
+        values = update.call_args.args[1]
+        self.assertEqual(values["status"], "succeeded")
+        self.assertEqual(values["error_code"], "audit_log_pending")
+        event.assert_called_once()
+        self.assertEqual(event.call_args.args[1], "succeeded_audit_pending")
 
     def test_fallback_claim_recovers_rpc_outage_without_changing_payload(self):
         queued = self.job([self.row()], status="queued", attempt_count=0)
