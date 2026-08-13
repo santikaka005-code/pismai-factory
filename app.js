@@ -552,6 +552,10 @@ let issueReportSearch = "";
 let issueReportStatusFilter = "all";
 let issueReportSelectedId = null;
 let issueReportAttachment = null;
+let homeStorageUsage = null;
+let homeStorageUsageLoaded = false;
+let homeStorageUsageLoading = false;
+let homeStorageUsageError = "";
 let wageRateFilter = "all";
 let currentRateDate = new Date().toISOString().slice(0, 10);
 let editingWageRateId = null;
@@ -5249,6 +5253,7 @@ function bindAppEvents(user, moduleItem) {
   if (moduleItem.id === "account-management") bindAccountManagementEvents(user);
   if (moduleItem.id === "backup") bindBackupEvents(user);
   if (moduleItem.id === "record-report") bindIssueReportEvents(user);
+  if (moduleItem.id === "dashboard") bindHomeStorageUsageEvents();
   if (moduleItem.id === "pile-management") bindPileManagementEvents(user);
   if (moduleItem.id === "audit-log") bindAuditLogPasswordEvents();
   if (moduleItem.id === "secret-room") window.SecretRoom?.bind?.();
@@ -13232,6 +13237,85 @@ function renderHomePileRow(pile, maxWeight) {
   `;
 }
 
+function homeStorageUsageView() {
+  const usedBytes = Number(homeStorageUsage?.used_bytes) || 0;
+  const limitBytes = Number(homeStorageUsage?.limit_bytes) || SUPABASE_FREE_DATABASE_BYTES;
+  const remainingBytes = Math.max(0, Number(homeStorageUsage?.remaining_bytes) || limitBytes - usedBytes);
+  const percent = Math.min(100, Math.max(0, Number(homeStorageUsage?.percent) || 0));
+  const warningPercent = Number(homeStorageUsage?.warning_percent) || BACKUP_STORAGE_WARNING_PERCENT;
+  const level = percent >= warningPercent ? "critical" : percent >= 70 ? "watch" : percent >= 45 ? "moderate" : "healthy";
+  return { usedBytes, limitBytes, remainingBytes, percent, warningPercent, level };
+}
+
+function renderHomeStorageUsage() {
+  const usage = homeStorageUsageView();
+  const displayPercent = usage.percent < 0.1 && usage.usedBytes > 0
+    ? "< 0.1"
+    : usage.percent.toLocaleString("th-TH", { maximumFractionDigits: 1 });
+  const fillPercent = Math.max(usage.percent > 0 ? 1 : 0, usage.percent);
+  const statusText = usage.level === "critical"
+    ? "ควรสำรองและจัดการข้อมูล"
+    : usage.level === "watch"
+      ? "ใกล้ระดับแจ้งเตือน"
+      : usage.level === "moderate" ? "ใช้งานปานกลาง" : "พื้นที่พร้อมใช้งาน";
+  const measuredAt = homeStorageUsage?.measured_at ? formatBackupDateTime(homeStorageUsage.measured_at) : "-";
+
+  return `
+    <section class="home-storage-card is-${usage.level}" aria-label="พื้นที่ฐานข้อมูล Supabase">
+      <div class="home-storage-head">
+        <div class="home-storage-title">
+          <span class="home-storage-mark" aria-hidden="true">DB</span>
+          <div><p>SUPABASE DATABASE</p><h3>พื้นที่จัดเก็บข้อมูล</h3><small>ตรวจสอบการใช้งานเทียบกับโควต้า 500 MB</small></div>
+        </div>
+        <div class="home-storage-score"><strong>${homeStorageUsageLoading ? "..." : `${displayPercent}%`}</strong><span>${homeStorageUsageError ? "ยังอ่านข้อมูลไม่ได้" : statusText}</span></div>
+      </div>
+      <div class="home-storage-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(usage.percent)}">
+        <span style="width:${fillPercent}%"></span>
+        <i style="left:${usage.warningPercent}%"><b>${usage.warningPercent}%</b></i>
+      </div>
+      <div class="home-storage-scale"><span>0 MB</span><span>ระดับแจ้งเตือน</span><span>500 MB</span></div>
+      <div class="home-storage-details">
+        <div><span>ใช้ไปแล้ว</span><strong>${homeStorageUsage ? formatBackupFileSize(usage.usedBytes) : "-"}</strong></div>
+        <div><span>พื้นที่คงเหลือ</span><strong>${homeStorageUsage ? formatBackupFileSize(usage.remainingBytes) : "-"}</strong></div>
+        <div><span>ข้อมูลในฐานข้อมูล</span><strong>${homeStorageUsage ? `${Number(homeStorageUsage.total_rows || 0).toLocaleString("th-TH")} รายการ` : "-"}</strong></div>
+        <div><span>อัปเดตล่าสุด</span><strong>${measuredAt}</strong></div>
+        <button class="home-storage-refresh" id="homeStorageRefresh" type="button" title="อ่านข้อมูลล่าสุดจาก Supabase" aria-label="อ่านข้อมูลพื้นที่ล่าสุด" ${homeStorageUsageLoading ? "disabled" : ""}>↻</button>
+      </div>
+      ${homeStorageUsageError ? `<p class="home-storage-error">${escapeHtml(homeStorageUsageError)}</p>` : ""}
+    </section>`;
+}
+
+async function loadHomeStorageUsage(force = false) {
+  if (homeStorageUsageLoading) return;
+  homeStorageUsageLoading = true;
+  homeStorageUsageError = "";
+  try {
+    const response = await cloudApiRequest(`/api/storage-usage${force ? "?refresh=1" : ""}`, { timeoutMs: 12000 });
+    homeStorageUsage = response.data || null;
+    homeStorageUsageLoaded = true;
+  } catch (error) {
+    homeStorageUsageLoaded = true;
+    homeStorageUsageError = error instanceof Error ? error.message : "ไม่สามารถอ่านพื้นที่ฐานข้อมูลได้";
+  } finally {
+    homeStorageUsageLoading = false;
+  }
+}
+
+function bindHomeStorageUsageEvents() {
+  if (!homeStorageUsageLoaded && !homeStorageUsageLoading) {
+    loadHomeStorageUsage().then(() => {
+      if (location.hash.replace("#/", "") === "dashboard") render();
+    });
+  }
+  document.querySelector("#homeStorageRefresh")?.addEventListener("click", async () => {
+    homeStorageUsageLoading = true;
+    render();
+    homeStorageUsageLoading = false;
+    await loadHomeStorageUsage(true);
+    render();
+  });
+}
+
 function renderDashboard(user, moduleItem) {
   const today = new Date().toISOString().slice(0, 10);
   const dateLabel = new Intl.DateTimeFormat("th-TH", {
@@ -13289,6 +13373,8 @@ function renderDashboard(user, moduleItem) {
         <div class="home-kpi home-kpi-people"><span aria-hidden="true">●</span><p>พนักงานที่มีรายการ<strong>${totals.people.size.toLocaleString("th-TH")} <small>คน</small></strong></p></div>
         <div class="home-kpi home-kpi-piles"><span aria-hidden="true">▦</span><p>จำนวนกอง<strong>${pilesByNumber.size.toLocaleString("th-TH")} <small>กอง</small></strong></p></div>
       </section>
+
+      ${renderHomeStorageUsage()}
 
       <section class="home-section home-fruit-section">
         <div class="home-section-heading">

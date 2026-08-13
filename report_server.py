@@ -118,7 +118,9 @@ LIVE_STATE_TABLES = {
     "audit_logs",
 }
 ONLINE_USER_TIMEOUT_SECONDS = 45
+STORAGE_USAGE_CACHE_SECONDS = 60
 online_user_lock = threading.Lock()
+storage_usage_lock = threading.Lock()
 live_state_sync_lock = threading.Lock()
 production_record_insert_lock = threading.Lock()
 backup_clear_lock = threading.Lock()
@@ -131,6 +133,7 @@ time_save_queue_worker_id = f"render-time-{os.getpid()}-{secrets.token_hex(4)}"
 time_queue_recovery_lock = threading.Lock()
 time_queue_last_recovery_at = 0.0
 online_user_sessions: dict[str, dict] = {}
+storage_usage_cache: dict = {"expires_at": 0.0, "data": None}
 production_record_next_id: int | None = None
 deduction_record_next_id: int | None = None
 time_record_next_id: int | None = None
@@ -2290,6 +2293,37 @@ def read_supabase_backup(tables: list[str] | None = None) -> tuple[int, dict]:
             return status, {"error": body, "table": table}
         backup_data[table] = body if isinstance(body, list) else []
     return 200, backup_data
+
+
+def read_database_storage_usage(force: bool = False) -> tuple[int, dict]:
+    now = time.time()
+    with storage_usage_lock:
+        cached = storage_usage_cache.get("data")
+        if not force and cached and now < float(storage_usage_cache.get("expires_at") or 0):
+            return 200, cached
+
+    status, body = supabase_request("POST", "rpc/get_database_storage_usage", {})
+    if status >= 400:
+        return status, {"error": body}
+    raw = body[0] if isinstance(body, list) and body else body
+    if not isinstance(raw, dict):
+        return 502, {"error": "Storage usage response is invalid."}
+    used_bytes = max(0, int(raw.get("used_bytes") or 0))
+    limit_bytes = max(1, int(raw.get("limit_bytes") or SUPABASE_FREE_DATABASE_BYTES))
+    percent = min(100, (used_bytes / limit_bytes) * 100)
+    data = {
+        **raw,
+        "used_bytes": used_bytes,
+        "limit_bytes": limit_bytes,
+        "remaining_bytes": max(0, limit_bytes - used_bytes),
+        "percent": round(percent, 2),
+        "warning_percent": DATABASE_STORAGE_WARNING_PERCENT,
+        "warning": percent >= DATABASE_STORAGE_WARNING_PERCENT,
+    }
+    with storage_usage_lock:
+        storage_usage_cache["data"] = data
+        storage_usage_cache["expires_at"] = now + STORAGE_USAGE_CACHE_SECONDS
+    return 200, data
 
 
 def backup_archive_bytes(payload: dict) -> bytes:
@@ -9167,6 +9201,16 @@ class ReportHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/online-users":
             self.send_json({"data": online_user_snapshot()})
+            return
+
+        if parsed.path == "/api/storage-usage":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            force = query.get("refresh", ["0"])[0] == "1"
+            status, result = read_database_storage_usage(force)
+            self.send_json({"data": result if status < 400 else None, "error": result.get("error") if status >= 400 else None}, status)
             return
 
         if parsed.path == "/api/issue-reports":
