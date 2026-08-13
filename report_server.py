@@ -1280,6 +1280,7 @@ def time_record_identity(row: dict) -> tuple[str, str]:
 
 
 def validate_time_record_conflicts(rows: list[dict]) -> tuple[int, dict | None]:
+    prepared: list[tuple[dict, str, str, tuple[int, int]]] = []
     for index, row in enumerate(rows):
         work_date, emp_code = time_record_identity(row)
         interval = time_record_interval(
@@ -1288,6 +1289,7 @@ def validate_time_record_conflicts(rows: list[dict]) -> tuple[int, dict | None]:
         )
         if not work_date or not emp_code or interval is None:
             return 400, {"error": "ข้อมูลวันที่ รหัสพนักงาน หรือเวลาเข้าออกไม่ถูกต้อง"}
+        prepared.append((row, work_date, emp_code, interval))
 
         for other in rows[:index]:
             if time_record_identity(other) != (work_date, emp_code):
@@ -1297,16 +1299,28 @@ def validate_time_record_conflicts(rows: list[dict]) -> tuple[int, dict | None]:
                     "error": f"เวลาของพนักงานรหัส {emp_code} วันที่ {work_date} ทับกันภายในชุดที่ส่งมา"
                 }
 
+    dates_by_employee: dict[str, set[str]] = {}
+    for _row, work_date, emp_code, _interval in prepared:
+        dates_by_employee.setdefault(emp_code, set()).add(work_date)
+
+    existing_by_identity: dict[tuple[str, str], list[dict]] = {}
+    for emp_code, work_dates in dates_by_employee.items():
+        date_list = ",".join(sorted(work_dates))
         status, existing_rows = supabase_request(
             "GET",
             "time_records?"
-            f"work_date=eq.{quote(work_date)}&emp_code=eq.{quote(emp_code)}&"
+            f"work_date=in.({date_list})&emp_code=eq.{quote(emp_code)}&"
             "select=id,work_date,emp_code,check_in,check_out,raw_payload",
         )
         if status >= 400:
             return status, {"error": existing_rows}
+        for existing in existing_rows if isinstance(existing_rows, list) else []:
+            existing_identity = time_record_identity(existing)
+            existing_by_identity.setdefault(existing_identity, []).append(existing)
+
+    for row, work_date, emp_code, interval in prepared:
         incoming_id = row.get("id")
-        existing_list = existing_rows if isinstance(existing_rows, list) else []
+        existing_list = existing_by_identity.get((work_date, emp_code), [])
         existing_self = next(
             (
                 existing
@@ -1360,6 +1374,27 @@ def insert_time_records_compatible(rows: list[dict]) -> tuple[int, list | dict |
             return status, body
 
     return 409, {"error": "Could not allocate unique time record ids."}
+
+
+def update_time_records_compatible(rows: list[dict]) -> tuple[int, list | dict | str | None]:
+    updated_rows = []
+    for row in rows:
+        row_id = row.get("id")
+        if row_id in (None, ""):
+            return 400, {"error": "time record id is required for update"}
+        update_row = {key: value for key, value in row.items() if key != "id"}
+        status, body = supabase_request(
+            "PATCH",
+            f"time_records?id=eq.{quote(str(row_id))}",
+            update_row,
+            prefer="return=representation",
+        )
+        if status >= 400:
+            return status, body
+        if not isinstance(body, list) or not body:
+            return 404, {"error": f"time record {row_id} was not found"}
+        updated_rows.extend(body)
+    return 200, updated_rows
 
 
 def ensure_row_id(table: str, row: dict) -> dict:
@@ -7165,15 +7200,15 @@ class ReportHandler(BaseHTTPRequestHandler):
                 if status >= 400:
                     self.send_json({"data": None, **(conflict or {"error": "time record conflict"})}, status)
                     return
-                status, body = sync_rows_by_id("time_records", converted)
+                status, body = update_time_records_compatible(converted)
             if status >= 400:
                 self.send_json({"data": None, "error": body}, status)
                 return
             synced_rows = [
                 live_state_to_client("time_records", row)
-                for row in body.get("synced", [])
+                for row in body
                 if isinstance(row, dict)
-            ]
+            ] if isinstance(body, list) else []
             self.send_json({"data": synced_rows, "error": None}, status)
             return
 

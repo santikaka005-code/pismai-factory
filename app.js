@@ -3103,16 +3103,7 @@ function getNextAvailableTimeEntryEmployeeCode(currentCode = "", recordDate = ti
   if (!employees.length) return "";
   const normalizedCurrentCode = normalizeTimeEmployeeCodeInput(currentCode);
   const currentIndex = employees.findIndex((employee) => employee.emp_code === normalizedCurrentCode);
-  const startIndex = currentIndex >= 0 ? currentIndex : -1;
-
-  for (let offset = 1; offset <= employees.length; offset += 1) {
-    const employee = employees[(startIndex + offset + employees.length) % employees.length];
-    if (!findDuplicateTimeRecord(employee.emp_code, recordDate)) {
-      return employee.emp_code;
-    }
-  }
-
-  return "";
+  return employees[(currentIndex >= 0 ? currentIndex + 1 : 0) % employees.length].emp_code;
 }
 
 function renderTimeEmployeeCodeOptions(employees = getOrderedActiveTimeEmployees()) {
@@ -4042,6 +4033,45 @@ async function apiCreateTimeRecord(payload, user) {
     `Added time record ${savedRecord.emp_code} ${savedRecord.clock_in}-${savedRecord.clock_out}`
   );
   return savedRecord;
+}
+
+async function apiCreateTimeRecords(payloads, user) {
+  const records = getTimeRecords();
+  const pendingRecords = payloads.map((payload) => buildTimeRecord(payload, user));
+  pendingRecords.forEach((record, index) => {
+    assertNoConflictingTimeRecord(
+      record.emp_code,
+      record.record_date,
+      record.clock_in,
+      record.clock_out
+    );
+    const batchConflict = pendingRecords.slice(0, index).find((other) => (
+      other.emp_code === record.emp_code &&
+      other.record_date === record.record_date &&
+      timeRecordIntervalsOverlap(record.clock_in, record.clock_out, other.clock_in, other.clock_out)
+    ));
+    if (batchConflict) {
+      throw new Error(
+        `เวลาของพนักงานรหัส ${record.emp_code} วันที่ ${record.record_date} ` +
+        `ทับกันภายในชุด ${batchConflict.clock_in}-${batchConflict.clock_out}`
+      );
+    }
+  });
+
+  const cloudRecords = await saveTimeRowsToCloud(pendingRecords, { mode: "insert" });
+  const cloudIds = new Set(cloudRecords.map((record) => Number(record.id)));
+  saveTimeRecordsLocal([
+    ...records.filter((record) => !cloudIds.has(Number(record.id))),
+    ...cloudRecords
+  ]);
+  cloudRecords.forEach((record) => {
+    addAuditLog(
+      user,
+      "INSERT_TIME_RECORD",
+      `Added time record ${record.emp_code} ${record.clock_in}-${record.clock_out}`
+    );
+  });
+  return cloudRecords;
 }
 
 async function apiUpdateTimeRecord(id, payload, user) {
@@ -10813,11 +10843,11 @@ function renderTimeReport(user, moduleItem) {
             </label>
             <label class="field">
               <span>เวลาเข้า</span>
-              <input name="clock_in" type="time" value="${escapeHtml(editingTimeRecord?.clock_in || "08:00")}" required />
+              <input name="clock_in" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="เช่น 0752" value="${escapeHtml(editingTimeRecord?.clock_in || "")}" required />
             </label>
             <label class="field">
               <span>เวลาออก</span>
-              <input name="clock_out" type="time" value="${escapeHtml(editingTimeRecord?.clock_out || "17:00")}" required />
+              <input name="clock_out" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="เช่น 1630" value="${escapeHtml(editingTimeRecord?.clock_out || "")}" required />
             </label>
             <button class="btn btn-primary form-submit" type="submit" ${timeRecordSaving ? "disabled" : ""}>${timeRecordSaving ? "กำลังบันทึก..." : (editingTimeRecord ? "บันทึกการแก้ไข" : "บันทึกรายการ")}</button>
             ${editingTimeRecord ? `<button class="btn btn-outline" id="cancelTimeRecordEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
@@ -10908,11 +10938,12 @@ function renderTimeRecordRow(record) {
 function renderWeeklyTimeEntry(user) {
   const weekDates = Array.from({ length: 7 }, (_, index) => addDaysToDate(timeRecordDate, index));
   const activeEmployees = getOrderedActiveTimeEmployees();
+  const selectedEmployeeCode = weeklyTimeEmployeeCode || activeEmployees[0]?.emp_code || "";
   const weeklyRecords = getTimeRecords()
     .filter((record) => {
       const recordDate = record.record_date || "";
       const matchDate = recordDate >= weekDates[0] && recordDate <= weekDates[6];
-      const matchEmployee = !weeklyTimeEmployeeCode || record.emp_code === weeklyTimeEmployeeCode;
+      const matchEmployee = !selectedEmployeeCode || record.emp_code === selectedEmployeeCode;
       return matchDate && matchEmployee;
     })
     .sort((a, b) =>
@@ -10936,7 +10967,7 @@ function renderWeeklyTimeEntry(user) {
           <label class="field">
             <span>รหัสพนักงาน / ชื่อพนักงาน</span>
             <select name="emp_code" required>
-              ${renderWeeklyTimeEmployeeOptions(activeEmployees, weeklyTimeEmployeeCode)}
+              ${renderWeeklyTimeEmployeeOptions(activeEmployees, selectedEmployeeCode)}
             </select>
           </label>
           <label class="field">
@@ -11186,7 +11217,7 @@ function bindTimeReportEvents(user) {
     const empCode = String(form.get("emp_code") || "").trim();
     weeklyTimeEmployeeCode = empCode;
     const errors = [];
-    let savedCount = 0;
+    const payloads = [];
 
     if (!empCode) {
       setTimeRecordMessage("กรุณาเลือกพนักงานสำหรับบันทึกรายสัปดาห์", "error");
@@ -11209,38 +11240,40 @@ function bindTimeReportEvents(user) {
         continue;
       }
 
-      try {
-        await apiCreateTimeRecord(
-          {
-            record_date: recordDate,
-            emp_code: empCode,
-            clock_in: clockIn,
-            clock_out: clockOut
-          },
-          user
-        );
-        savedCount += 1;
-      } catch (error) {
-        errors.push(`${recordDate}: ${error instanceof Error ? error.message : "บันทึกไม่สำเร็จ"}`);
-      }
+      payloads.push({ record_date: recordDate, emp_code: empCode, clock_in: clockIn, clock_out: clockOut });
     }
 
-    timeRecordSaving = false;
-
-    if (!savedCount && !errors.length) {
+    if (!payloads.length && !errors.length) {
+      timeRecordSaving = false;
       setTimeRecordMessage("กรุณากรอกเวลาอย่างน้อย 1 วัน", "error");
       render();
       return;
     }
 
     if (errors.length) {
-      setTimeRecordMessage(`บันทึกสำเร็จ ${savedCount} วัน / ต้องแก้ไข ${errors.length} วัน: ${errors.join(" | ")}`, "error");
-    } else {
-      clearWeeklyTimeDraft();
-      setTimeRecordMessage(`บันทึกรายสัปดาห์สำเร็จ ${savedCount} วัน ข้อมูลอยู่ในตารางสัปดาห์นี้และหน้าสรุปข้อมูลเวลาเข้างาน`);
+      timeRecordSaving = false;
+      setTimeRecordMessage(`ยังไม่บันทึก กรุณาแก้ไข ${errors.length} วัน: ${errors.join(" | ")}`, "error");
+      render();
+      return;
     }
-    setTimeSummaryRangeToCurrentWeek();
-    render();
+
+    try {
+      const savedRecords = await apiCreateTimeRecords(payloads, user);
+      const nextEmployeeCode = getNextAvailableTimeEntryEmployeeCode(empCode, timeRecordDate);
+      clearWeeklyTimeDraft();
+      weeklyTimeEmployeeCode = nextEmployeeCode;
+      timeEntryEmployeeCode = nextEmployeeCode;
+      setTimeRecordMessage(
+        `บันทึกรายสัปดาห์สำเร็จ ${savedRecords.length} วัน` +
+        `${nextEmployeeCode ? ` · เลื่อนไปพนักงาน ${nextEmployeeCode} แล้ว` : ""}`
+      );
+      setTimeSummaryRangeToCurrentWeek();
+    } catch (error) {
+      setTimeRecordMessage(error instanceof Error ? error.message : "บันทึกรายสัปดาห์ไม่สำเร็จ", "error");
+    } finally {
+      timeRecordSaving = false;
+      render();
+    }
   });
 
   if (document.querySelector("#weeklyTimeForm")) {
@@ -11314,7 +11347,7 @@ function bindTimeReportEvents(user) {
         ? await apiUpdateTimeRecord(editingTimeRecordId, payload, user)
         : await apiCreateTimeRecord(payload, user);
       const actionText = wasEditing ? "แก้ไข" : "บันทึก";
-      const nextEmployeeCode = wasEditing ? record.emp_code : getNextAvailableTimeEntryEmployeeCode(record.emp_code, timeRecordDate);
+      const nextEmployeeCode = getNextAvailableTimeEntryEmployeeCode(record.emp_code, timeRecordDate);
       editingTimeRecordId = null;
       timeEntryEmployeeCode = nextEmployeeCode;
       setTimeRecordMessage(`${actionText} ${record.emp_code} ${record.clock_in}-${record.clock_out} สุทธิ ${formatMinutesToHourText(record.net_minutes)} ชั่วโมง${nextEmployeeCode ? ` · ถัดไป ${nextEmployeeCode}` : " · ครบทุกคนในวันนี้แล้ว"}`);
@@ -11333,6 +11366,10 @@ function bindTimeReportEvents(user) {
     }
     timeRecordMessage = "";
     render();
+  });
+
+  document.querySelectorAll("#timeRecordForm input[name='clock_in'], #timeRecordForm input[name='clock_out']").forEach((input) => {
+    input.addEventListener("blur", () => normalizeClockInput(input));
   });
 
   const dailyTimeForm = document.querySelector("#timeRecordForm");
