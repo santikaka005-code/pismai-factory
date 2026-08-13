@@ -10,7 +10,7 @@ import report_server
 
 class BackupClearServerTests(unittest.TestCase):
     def test_main_clear_keeps_master_and_audit_tables(self):
-        for table in ["account_users", "employees", "time_employees", "wage_rates", "audit_logs"]:
+        for table in ["account_users", "employees", "time_employees", "wage_rates", "audit_logs", "issue_reports"]:
             self.assertNotIn(table, report_server.MAIN_CLEAR_TABLES)
         for table in ["production_records", "time_records", "deduction_records", "deduction_applications"]:
             self.assertIn(table, report_server.MAIN_CLEAR_TABLES)

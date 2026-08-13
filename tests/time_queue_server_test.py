@@ -5,6 +5,9 @@ import report_server
 
 
 class TimeQueueServerTest(unittest.TestCase):
+    def setUp(self):
+        report_server.time_queue_last_recovery_at = 0.0
+
     def row(self, **overrides):
         row = {
             "work_date": "2026-08-13", "emp_code": "201", "employee_name": "Worker",
@@ -98,6 +101,35 @@ class TimeQueueServerTest(unittest.TestCase):
             report_server.finish_time_queue(job, rows)
         update.assert_not_called()
         fail.assert_called_once_with(job, "audit_log_failed", "offline", retryable=True)
+
+    def test_fallback_claim_recovers_rpc_outage_without_changing_payload(self):
+        queued = self.job([self.row()], status="queued", attempt_count=0)
+        claimed = {**queued, "status": "processing", "attempt_count": 1}
+        responses = [
+            (204, None),
+            (204, None),
+            (200, [queued]),
+            (200, [claimed]),
+        ]
+        with patch.object(report_server, "supabase_request", side_effect=responses) as request:
+            status, result = report_server.claim_time_queue_fallback(queued["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(result["payload"], queued["payload"])
+        self.assertEqual(result["attempt_count"], 1)
+        self.assertIn("status=eq.queued", request.call_args_list[3].args[1])
+
+    def test_fallback_moves_retry_limit_to_review_without_deleting_queue(self):
+        queued = self.job([self.row()], status="queued", attempt_count=3, max_attempts=3)
+        reviewed = {**queued, "status": "needs_review", "error_code": "retry_limit_reached"}
+        responses = [(204, None), (204, None), (200, [queued]), (200, [reviewed])]
+        with (
+            patch.object(report_server, "supabase_request", side_effect=responses),
+            patch.object(report_server, "time_queue_event") as event,
+        ):
+            status, result = report_server.claim_time_queue_fallback(queued["id"])
+        self.assertEqual(status, 200)
+        self.assertIsNone(result)
+        event.assert_called_once()
 
 
 if __name__ == "__main__":

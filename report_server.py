@@ -88,6 +88,7 @@ BACKUP_TABLES = [
     "production_save_queue_events",
     "time_save_queue",
     "time_save_queue_events",
+    "issue_reports",
     "audit_logs",
     "community_posts",
     "secret_messages",
@@ -127,6 +128,8 @@ production_save_queue_wakeup = threading.Event()
 production_save_queue_worker_id = f"render-{os.getpid()}-{secrets.token_hex(4)}"
 time_save_queue_wakeup = threading.Event()
 time_save_queue_worker_id = f"render-time-{os.getpid()}-{secrets.token_hex(4)}"
+time_queue_recovery_lock = threading.Lock()
+time_queue_last_recovery_at = 0.0
 online_user_sessions: dict[str, dict] = {}
 production_record_next_id: int | None = None
 deduction_record_next_id: int | None = None
@@ -222,6 +225,58 @@ def production_record_within_self_edit_window(
 def secret_room_actor(handler: BaseHTTPRequestHandler) -> dict | None:
     """All signed-in website accounts may use the internal collaboration area."""
     return verify_session_token(handler.headers.get("X-Session-Token", ""))
+
+
+ISSUE_REPORT_CATEGORIES = {"system", "data", "display", "performance", "other"}
+ISSUE_REPORT_PRIORITIES = {"normal", "urgent", "blocking"}
+ISSUE_REPORT_STATUSES = {"received", "investigating", "resolved"}
+ISSUE_REPORT_MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
+
+
+def validate_issue_report_payload(payload: dict) -> tuple[dict | None, str | None]:
+    title = str(payload.get("title") or "").strip()
+    category = str(payload.get("category") or "").strip()
+    page_name = str(payload.get("page_name") or "").strip()
+    priority = str(payload.get("priority") or "normal").strip()
+    description = str(payload.get("description") or "").strip()
+    attachment_data = str(payload.get("attachment_data") or "").strip()
+    attachment_name = str(payload.get("attachment_name") or "").strip()
+
+    if not title or len(title) > 160:
+        return None, "Title must contain 1-160 characters."
+    if category not in ISSUE_REPORT_CATEGORIES:
+        return None, "Issue category is invalid."
+    if not page_name or len(page_name) > 120:
+        return None, "Page name must contain 1-120 characters."
+    if priority not in ISSUE_REPORT_PRIORITIES:
+        return None, "Issue priority is invalid."
+    if not description or len(description) > 5000:
+        return None, "Description must contain 1-5,000 characters."
+    if attachment_data:
+        match = re.fullmatch(r"data:(image/(?:png|jpeg));base64,([A-Za-z0-9+/=]+)", attachment_data)
+        if not match:
+            return None, "Attachment must be a PNG or JPG image."
+        try:
+            decoded = base64.b64decode(match.group(2), validate=True)
+        except (ValueError, TypeError):
+            return None, "Attachment data is invalid."
+        if len(decoded) > ISSUE_REPORT_MAX_ATTACHMENT_BYTES:
+            return None, "Attachment must not exceed 2 MB."
+        attachment_type = match.group(1)
+    else:
+        attachment_name = ""
+        attachment_type = ""
+
+    return {
+        "title": title,
+        "category": category,
+        "page_name": page_name,
+        "priority": priority,
+        "description": description,
+        "attachment_name": attachment_name[:255],
+        "attachment_type": attachment_type,
+        "attachment_data": attachment_data,
+    }, None
 
 
 def validate_accounting_workspace(workspace: object) -> str | None:
@@ -1319,7 +1374,8 @@ def process_time_save_queue_job(job: dict) -> None:
         fail_time_queue(job, "conflict_check_failed", supabase_error_text(conflict), retryable=True)
         return
     if conflict_status >= 400:
-        fail_time_queue(job, "time_overlap", str((conflict or {}).get("error") or "Time records overlap."))
+        conflict_code = "time_overlap" if conflict_status == 409 else "invalid_time"
+        fail_time_queue(job, conflict_code, str((conflict or {}).get("error") or "Time record validation failed."))
         return
 
     with time_record_insert_lock:
@@ -1337,6 +1393,131 @@ def process_time_save_queue_job(job: dict) -> None:
     fail_time_queue(job, "save_failed", supabase_error_text(body) or f"Time save failed ({status}).")
 
 
+def recover_stale_time_queues() -> None:
+    global time_queue_last_recovery_at
+    now_monotonic = time.monotonic()
+    with time_queue_recovery_lock:
+        if now_monotonic - time_queue_last_recovery_at < 30:
+            return
+        time_queue_last_recovery_at = now_monotonic
+    now_iso = datetime.now(timezone.utc).isoformat()
+    stale_lock_iso = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    # Recover a worker that disappeared after claiming a job. The payload stays in
+    # the same queue row, so another worker can safely continue it.
+    supabase_request(
+        "PATCH",
+        f"time_save_queue?status=eq.processing&locked_at=lt.{quote(stale_lock_iso)}",
+        {
+            "status": "queued",
+            "next_attempt_at": now_iso,
+            "locked_at": None,
+            "locked_by": None,
+            "error_code": "stale_worker_recovered",
+            "error_message": "The previous worker stopped responding; the queue was recovered automatically.",
+        },
+        prefer="return=minimal",
+        timeout_seconds=6,
+    )
+    supabase_request(
+        "PATCH",
+        "time_save_queue?status=eq.processing&locked_at=is.null",
+        {
+            "status": "queued",
+            "next_attempt_at": now_iso,
+            "error_code": "stale_worker_recovered",
+            "error_message": "A queue without a worker lock was recovered automatically.",
+        },
+        prefer="return=minimal",
+        timeout_seconds=6,
+    )
+
+
+def claim_time_queue_fallback(queue_id: int | None = None) -> tuple[int, dict | None]:
+    recover_stale_time_queues()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    filters = ["status=eq.queued", f"next_attempt_at=lte.{quote(now_iso)}"]
+    if queue_id:
+        filters.append(f"id=eq.{queue_id}")
+    status, body = supabase_request(
+        "GET",
+        f"time_save_queue?{'&'.join(filters)}&select=*&order=id.asc&limit=1",
+        timeout_seconds=6,
+    )
+    if status >= 400 or not isinstance(body, list) or not body:
+        return status, None
+    candidate = body[0]
+    candidate_id = int(candidate.get("id") or 0)
+    attempt_count = int(candidate.get("attempt_count") or 0)
+    max_attempts = int(candidate.get("max_attempts") or 3)
+    if not candidate_id:
+        return 200, None
+    if attempt_count >= max_attempts:
+        review_status, reviewed = supabase_request(
+            "PATCH",
+            f"time_save_queue?id=eq.{candidate_id}&status=eq.queued&attempt_count=eq.{attempt_count}",
+            {
+                "status": "needs_review",
+                "error_code": "retry_limit_reached",
+                "error_message": "Automatic retries reached the safety limit; the queue data is preserved for review.",
+                "finished_at": now_iso,
+                "locked_at": None,
+                "locked_by": None,
+            },
+            prefer="return=representation",
+            timeout_seconds=6,
+        )
+        if review_status < 400 and isinstance(reviewed, list) and reviewed:
+            time_queue_event(
+                candidate_id,
+                "retry_limit_reached",
+                "needs_review",
+                "Automatic retries reached the safety limit.",
+                "system",
+            )
+        return review_status, None
+    claim_status, claimed = supabase_request(
+        "PATCH",
+        f"time_save_queue?id=eq.{candidate_id}&status=eq.queued&attempt_count=eq.{attempt_count}",
+        {
+            "status": "processing",
+            "attempt_count": attempt_count + 1,
+            "locked_at": now_iso,
+            "locked_by": time_save_queue_worker_id,
+            "started_at": candidate.get("started_at") or now_iso,
+            "error_code": None,
+            "error_message": None,
+        },
+        prefer="return=representation",
+        timeout_seconds=6,
+    )
+    row = claimed[0] if claim_status < 400 and isinstance(claimed, list) and claimed else None
+    return claim_status, row
+
+
+def process_time_queue_by_id(queue_id: int) -> None:
+    status, job = claim_time_queue_fallback(queue_id)
+    if status >= 400 or not job:
+        time_save_queue_wakeup.set()
+        return
+    try:
+        with backup_clear_lock:
+            process_time_save_queue_job(job)
+    except Exception as error:
+        fail_time_queue(job, "worker_exception", str(error))
+
+
+def schedule_time_queue_job(queue_id: int) -> None:
+    time_save_queue_wakeup.set()
+    if queue_id <= 0:
+        return
+    threading.Thread(
+        target=process_time_queue_by_id,
+        args=(queue_id,),
+        name=f"time-save-queue-{queue_id}",
+        daemon=True,
+    ).start()
+
+
 def time_save_queue_worker() -> None:
     while True:
         time_save_queue_wakeup.wait(timeout=2)
@@ -1348,7 +1529,12 @@ def time_save_queue_worker() -> None:
                 "POST", "rpc/claim_next_time_save_queue",
                 {"p_worker_id": time_save_queue_worker_id}, timeout_seconds=6,
             )
-            if status >= 400 or not isinstance(body, list) or not body:
+            if status >= 400:
+                fallback_status, fallback_job = claim_time_queue_fallback()
+                if fallback_status >= 400 or not fallback_job:
+                    break
+                body = [fallback_job]
+            if not isinstance(body, list) or not body:
                 break
             try:
                 with backup_clear_lock:
@@ -6757,6 +6943,61 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": register_online_user(payload)})
             return
 
+        if parsed.path == "/api/issue-reports":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            report, validation_error = validate_issue_report_payload(payload)
+            if validation_error:
+                self.send_json({"error": validation_error}, 400)
+                return
+            actor_username = str(actor.get("username") or "").strip()
+            account_status, accounts = supabase_request(
+                "GET",
+                f"account_users?username=eq.{quote(actor_username)}&select=fullname,role,user_level&limit=1",
+            )
+            account = accounts[0] if account_status < 400 and isinstance(accounts, list) and accounts else {}
+            row = {
+                **report,
+                "status": "received",
+                "reporter_username": actor_username,
+                "reporter_fullname": str(account.get("fullname") or actor_username),
+                "reporter_role": str(account.get("role") or actor.get("role") or ""),
+            }
+            status, body = supabase_request("POST", "issue_reports", row, prefer="return=representation")
+            self.send_json({"data": body[0] if status < 400 and isinstance(body, list) and body else body}, status)
+            return
+
+        if parsed.path == "/api/issue-reports/status":
+            actor = secret_room_actor(self)
+            if not actor or account_level_number(actor.get("level")) < 5:
+                self.send_json({"error": "Administrator access is required."}, 403)
+                return
+            try:
+                report_id = int(payload.get("id") or 0)
+            except (TypeError, ValueError):
+                report_id = 0
+            next_status = str(payload.get("status") or "").strip()
+            if report_id < 1 or next_status not in ISSUE_REPORT_STATUSES:
+                self.send_json({"error": "Report id or status is invalid."}, 400)
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            update = {
+                "status": next_status,
+                "updated_at": now,
+                "resolved_at": now if next_status == "resolved" else None,
+                "assigned_to": str(actor.get("username") or ""),
+            }
+            status, body = supabase_request(
+                "PATCH",
+                f"issue_reports?id=eq.{report_id}",
+                update,
+                prefer="return=representation",
+            )
+            self.send_json({"data": body[0] if status < 400 and isinstance(body, list) and body else body}, status)
+            return
+
         if parsed.path.startswith("/api/secret-room/"):
             actor = secret_room_actor(self)
             if not actor:
@@ -7476,7 +7717,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 )
                 if lookup_status < 400 and isinstance(existing, list) and existing:
                     if hmac.compare_digest(str(existing[0].get("payload_hash") or ""), payload_hash):
-                        time_save_queue_wakeup.set()
+                        schedule_time_queue_job(int(existing[0].get("id") or 0))
                         self.send_json({"data": time_queue_to_client(existing[0]), "idempotent": True})
                         return
                     self.send_json({"error": "queue_uid already exists with different data."}, 409)
@@ -7487,8 +7728,134 @@ class ReportHandler(BaseHTTPRequestHandler):
             if not isinstance(saved, dict):
                 self.send_json({"error": "Queue insert returned no row."}, 500)
                 return
-            time_save_queue_wakeup.set()
+            schedule_time_queue_job(int(saved.get("id") or 0))
             self.send_json({"data": time_queue_to_client(saved), "accepted": True}, 202)
+            return
+
+        time_queue_action_match = re.fullmatch(r"/api/time-save-queue/(\d+)/(verify|retry|edit-retry)", parsed.path)
+        if time_queue_action_match:
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            queue_id = int(time_queue_action_match.group(1))
+            action = time_queue_action_match.group(2)
+            status, queue_rows = supabase_request(
+                "GET", f"time_save_queue?id=eq.{queue_id}&select=*&limit=1", timeout_seconds=6,
+            )
+            if status >= 400:
+                self.send_json({"error": queue_rows}, status)
+                return
+            if not isinstance(queue_rows, list) or not queue_rows:
+                self.send_json({"error": "Time queue item was not found."}, 404)
+                return
+            job = queue_rows[0]
+            if str(job.get("status") or "") == "succeeded":
+                self.send_json({"data": time_queue_to_client(job, include_payload=True), "already_succeeded": True})
+                return
+            actor_name = str(actor.get("username") or actor.get("fullname") or "unknown")
+
+            if action == "edit-retry":
+                records = payload.get("records")
+                if not isinstance(records, list) or not records or len(records) > 31:
+                    self.send_json({"error": "records must contain 1-31 items."}, 400)
+                    return
+                operation = str(job.get("operation") or "insert")
+                converted = [live_state_row("time_records", row) for row in records if isinstance(row, dict)]
+                if len(converted) != len(records):
+                    self.send_json({"error": "all records must be objects"}, 400)
+                    return
+                if operation == "update" and any(row.get("id") in (None, "") for row in converted):
+                    self.send_json({"error": "record id is required for queued updates."}, 400)
+                    return
+                if operation == "insert":
+                    for index, row in enumerate(converted):
+                        row.pop("id", None)
+                        row["queue_dedupe_key"] = time_queue_row_key(str(job.get("queue_uid") or ""), index)
+                        raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+                        row["raw_payload"] = {key: value for key, value in raw.items() if key != "id"}
+                identities = [time_record_identity(row) for row in converted]
+                employee_codes = {emp_code for _date, emp_code in identities}
+                dates = sorted({work_date for work_date, _emp_code in identities})
+                if len(employee_codes) != 1 or not dates or any(not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) for value in dates):
+                    self.send_json({"error": "one queue must contain one employee and valid work dates."}, 400)
+                    return
+                previous_payload = job.get("payload") if isinstance(job.get("payload"), list) else []
+                values = {
+                    "payload": converted,
+                    "payload_hash": production_queue_payload_hash(converted),
+                    "record_count": len(converted),
+                    "emp_code": next(iter(employee_codes)),
+                    "employee_name": str(converted[0].get("employee_name") or ""),
+                    "first_work_date": dates[0], "last_work_date": dates[-1],
+                    "status": "queued", "attempt_count": 0,
+                    "next_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    "error_code": None, "error_message": None, "finished_at": None,
+                    "locked_at": None, "locked_by": None,
+                }
+                update_status, updated = update_time_queue(queue_id, values, expected_status=str(job.get("status") or "needs_review"))
+                if update_status >= 400 or not updated:
+                    self.send_json({"error": "Could not update the time queue for retry."}, update_status if update_status >= 400 else 409)
+                    return
+                time_queue_event(queue_id, "edited_retry", "queued", "Queue data was edited and submitted again.", actor_name,
+                                 {"previous_payload": previous_payload})
+                schedule_time_queue_job(queue_id)
+                self.send_json({"data": time_queue_to_client(updated, include_payload=True)})
+                return
+
+            if action == "verify":
+                rows = job.get("payload") if isinstance(job.get("payload"), list) else []
+                existing_status, existing = time_queue_existing_rows(rows)
+                if existing_status >= 400:
+                    self.send_json({"error": existing}, existing_status)
+                    return
+                if str(job.get("operation") or "insert") == "insert" and isinstance(existing, list) and len(existing) == len(rows):
+                    update_status, processing = update_time_queue(
+                        queue_id,
+                        {"status": "processing", "locked_at": datetime.now(timezone.utc).isoformat(),
+                         "locked_by": time_save_queue_worker_id},
+                        expected_status=str(job.get("status") or "needs_review"),
+                    )
+                    if update_status < 400 and processing:
+                        finish_time_queue({**processing, "payload": rows}, existing, "manual_verified")
+                        refreshed_status, refreshed = supabase_request("GET", f"time_save_queue?id=eq.{queue_id}&select=*&limit=1")
+                        result = refreshed[0] if refreshed_status < 400 and isinstance(refreshed, list) and refreshed else processing
+                        self.send_json({"data": time_queue_to_client(result, include_payload=True), "match": "saved"})
+                        return
+                rows_to_check = rows
+                if str(job.get("operation") or "insert") == "insert" and isinstance(existing, list):
+                    existing_keys = {str(row.get("queue_dedupe_key") or "") for row in existing}
+                    rows_to_check = [
+                        row for row in rows
+                        if str(row.get("queue_dedupe_key") or "") not in existing_keys
+                    ]
+                conflict_status, conflict = validate_time_record_conflicts(rows_to_check) if rows_to_check else (200, None)
+                if conflict_status >= 400:
+                    reason = str((conflict or {}).get("error") or "Time queue verification failed.")
+                    update_status, updated = update_time_queue(
+                        queue_id,
+                        {"status": "needs_review", "error_code": "time_overlap" if conflict_status == 409 else "invalid_time",
+                         "error_message": reason, "finished_at": datetime.now(timezone.utc).isoformat(),
+                         "locked_at": None, "locked_by": None},
+                    )
+                    time_queue_event(queue_id, "manual_verify_failed", "needs_review", reason, actor_name)
+                    self.send_json({"data": time_queue_to_client(updated or job, include_payload=True), "match": "conflict"})
+                    return
+
+            update_status, updated = update_time_queue(
+                queue_id,
+                {"status": "queued", "attempt_count": 0, "next_attempt_at": datetime.now(timezone.utc).isoformat(),
+                 "error_code": None, "error_message": None, "finished_at": None,
+                 "locked_at": None, "locked_by": None},
+                expected_status=str(job.get("status") or "needs_review"),
+            )
+            if update_status >= 400 or not updated:
+                self.send_json({"error": "Could not submit the time queue again."}, update_status if update_status >= 400 else 409)
+                return
+            time_queue_event(queue_id, "manual_verify_retry" if action == "verify" else "manual_retry", "queued",
+                             "Queue was checked and submitted again." if action == "verify" else "Queue was submitted again with the original data.", actor_name)
+            schedule_time_queue_job(queue_id)
+            self.send_json({"data": time_queue_to_client(updated, include_payload=True)})
             return
 
         if parsed.path == "/api/production-records/verify":
@@ -8756,6 +9123,23 @@ class ReportHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/online-users":
             self.send_json({"data": online_user_snapshot()})
+            return
+
+        if parsed.path == "/api/issue-reports":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            actor_username = str(actor.get("username") or "").strip()
+            filters = ["select=*"]
+            if account_level_number(actor.get("level")) < 5:
+                filters.append(f"reporter_username=eq.{quote(actor_username)}")
+            requested_status = query.get("status", [""])[0].strip()
+            if requested_status in ISSUE_REPORT_STATUSES:
+                filters.append(f"status=eq.{quote(requested_status)}")
+            filters.extend(["order=created_at.desc", "limit=200"])
+            status, body = supabase_request("GET", f"issue_reports?{'&'.join(filters)}")
+            self.send_json({"data": body if status < 400 and isinstance(body, list) else [], "error": body if status >= 400 else None}, status)
             return
 
         if parsed.path.startswith("/api/secret-room/"):

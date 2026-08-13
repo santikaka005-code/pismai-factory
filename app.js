@@ -330,9 +330,9 @@ modules.splice(
   },
   {
     id: "record-report",
-    label: "รายงานบันทึก",
-    roles: ["admin"],
-    description: "พื้นที่สำหรับรายงานบันทึกของระบบ",
+    label: "แจ้งปัญหาของเว็บ",
+    roles: ["admin", "hr", "operator", "supervisor", "developer"],
+    description: "แจ้งข้อผิดพลาดและติดตามสถานะการแก้ไข",
     icon: "▧"
   },
   {
@@ -401,7 +401,6 @@ modules.forEach((moduleItem) => {
 });
 
 const adminSettingsModuleIds = new Set([
-  "record-report",
   "settings",
   "employees",
   "production-employees",
@@ -421,9 +420,9 @@ modules.forEach((moduleItem) => {
 });
 
 const levelRouteAccess = {
-  C1: ["dashboard", "production", "secret-room"],
-  C2: ["dashboard", "production", "summary-person", "secret-room"],
-  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report", "secret-room"],
+  C1: ["dashboard", "production", "secret-room", "record-report"],
+  C2: ["dashboard", "production", "summary-person", "secret-room", "record-report"],
+  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report", "secret-room", "record-report"],
   C4: [
     "dashboard",
     "production",
@@ -443,7 +442,8 @@ const levelRouteAccess = {
     "wage-rates",
     "settings-pile-summary",
     "accounting-control",
-    "secret-room"
+    "secret-room",
+    "record-report"
   ],
   C5: modules.map((item) => item.id).filter((id) => id !== "audit-log"),
   C6: modules.map((item) => item.id),
@@ -543,6 +543,15 @@ let backupRestoreConfirmOpen = false;
 let backupClearConfirmOpen = false;
 let backupClearScope = "main";
 let backupBusy = false;
+let issueReports = [];
+let issueReportsLoaded = false;
+let issueReportsLoading = false;
+let issueReportMessage = "";
+let issueReportMessageType = "success";
+let issueReportSearch = "";
+let issueReportStatusFilter = "all";
+let issueReportSelectedId = null;
+let issueReportAttachment = null;
 let wageRateFilter = "all";
 let currentRateDate = new Date().toISOString().slice(0, 10);
 let editingWageRateId = null;
@@ -637,6 +646,7 @@ let timeSummaryMessage = "";
 let timeSummaryMessageType = "success";
 let timeSummaryExportMenuOpen = false;
 let timeEntryMode = "daily";
+let timeView = "entry";
 let timeRecordMessage = "";
 let timeRecordMessageType = "success";
 let timeEntryEmployeeCode = "";
@@ -648,6 +658,9 @@ let timeQueueItems = [];
 let timeQueueLoading = false;
 let timeQueueLoadedOnce = false;
 let timeQueueLoadError = "";
+let timeQueueFilter = "all";
+let timeQueueActionId = null;
+let editingTimeQueueItem = null;
 const timeQueueTrackers = new Map();
 let deductionActiveTab = "production";
 let deductionBonusEmployeeKind = "time";
@@ -1869,6 +1882,29 @@ async function refreshTimeQueue({ renderAfter = false } = {}) {
     timeQueueLoadedOnce = true;
     if (renderAfter && location.hash === "#/time-records") render();
   }
+}
+
+async function runTimeQueueAction(queueId, action, records = null) {
+  if (timeQueueActionId) return null;
+  timeQueueActionId = Number(queueId);
+  try {
+    const response = await cloudApiRequest(`/api/time-save-queue/${queueId}/${action}`, {
+      method: "POST",
+      body: JSON.stringify(records ? { records } : {}),
+      timeoutMs: 12000
+    });
+    const item = mergeTimeQueueItem(response.data);
+    if (["queued", "processing"].includes(item?.status)) trackTimeQueueItem(item.id);
+    return item;
+  } finally {
+    timeQueueActionId = null;
+  }
+}
+
+async function loadTimeQueueForEdit(queueId) {
+  const response = await cloudApiRequest(`/api/time-save-queue/${queueId}`, { timeoutMs: 8000 });
+  editingTimeQueueItem = mergeTimeQueueItem(response.data);
+  return editingTimeQueueItem;
 }
 
 function scheduleProductionQueueRefresh() {
@@ -5150,7 +5186,7 @@ function renderModuleContent(user, moduleItem) {
     return renderPileManagement(moduleItem);
   }
   if (moduleItem.id === "record-report") {
-    return renderRecordReportPlaceholder(moduleItem);
+    return renderIssueReportPage(user, moduleItem);
   }
   if (moduleItem.id === "settings") {
     return renderFullSettingsModule(user);
@@ -5186,6 +5222,10 @@ function bindAppEvents(user, moduleItem) {
     auditLogUnlocked = false;
     auditLogMessage = "";
     resetBackupSecurityState();
+    issueReports = [];
+    issueReportsLoaded = false;
+    issueReportSelectedId = null;
+    issueReportAttachment = null;
     window.SecretRoom?.stopNotifications?.();
     clearSession();
     onlineUserCount = 0;
@@ -5208,6 +5248,7 @@ function bindAppEvents(user, moduleItem) {
   if (moduleItem.id === "settings-pile-summary") bindSettingsPileSummaryEvents(user);
   if (moduleItem.id === "account-management") bindAccountManagementEvents(user);
   if (moduleItem.id === "backup") bindBackupEvents(user);
+  if (moduleItem.id === "record-report") bindIssueReportEvents(user);
   if (moduleItem.id === "pile-management") bindPileManagementEvents(user);
   if (moduleItem.id === "audit-log") bindAuditLogPasswordEvents();
   if (moduleItem.id === "secret-room") window.SecretRoom?.bind?.();
@@ -6370,24 +6411,273 @@ function renderSimpleModule(moduleItem) {
   `;
 }
 
-function renderRecordReportPlaceholder(moduleItem) {
+const issueReportStatusMeta = {
+  received: { label: "รับเรื่องแล้ว", className: "is-received" },
+  investigating: { label: "กำลังตรวจสอบ", className: "is-investigating" },
+  resolved: { label: "แก้ไขแล้ว", className: "is-resolved" }
+};
+
+const issueReportPriorityLabels = {
+  normal: "ทั่วไป",
+  urgent: "เร่งด่วน",
+  blocking: "กระทบการทำงาน"
+};
+
+function canManageIssueReports(user) {
+  return Number(String(getUserLevel(user)).replace(/\D/g, "") || 1) >= 5;
+}
+
+function issueTicketNumber(report) {
+  return `WEB-${String(Number(report?.id) || 0).padStart(4, "0")}`;
+}
+
+function formatIssueReportDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString("th-TH", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+}
+
+function filteredIssueReports() {
+  const search = issueReportSearch.trim().toLocaleLowerCase("th-TH");
+  return issueReports.filter((report) => {
+    if (issueReportStatusFilter !== "all" && report.status !== issueReportStatusFilter) return false;
+    if (!search) return true;
+    return [issueTicketNumber(report), report.title, report.description, report.page_name, report.reporter_fullname, report.reporter_username]
+      .some((value) => String(value || "").toLocaleLowerCase("th-TH").includes(search));
+  });
+}
+
+function renderIssueReportSummary() {
+  const counts = issueReports.reduce((result, report) => {
+    result.total += 1;
+    if (result[report.status] !== undefined) result[report.status] += 1;
+    return result;
+  }, { total: 0, received: 0, investigating: 0, resolved: 0 });
   return `
-    <section class="panel record-report-placeholder">
-      <div class="panel-head">
+    <div class="issue-summary-strip" aria-label="สรุปรายงานปัญหา">
+      <div><span>ทั้งหมด</span><strong>${counts.total.toLocaleString("th-TH")}</strong></div>
+      <div><span>รับเรื่องแล้ว</span><strong>${counts.received.toLocaleString("th-TH")}</strong></div>
+      <div><span>กำลังตรวจสอบ</span><strong>${counts.investigating.toLocaleString("th-TH")}</strong></div>
+      <div><span>แก้ไขแล้ว</span><strong>${counts.resolved.toLocaleString("th-TH")}</strong></div>
+    </div>`;
+}
+
+function renderIssueReportCard(report, user) {
+  const status = issueReportStatusMeta[report.status] || issueReportStatusMeta.received;
+  const selected = Number(issueReportSelectedId) === Number(report.id);
+  return `
+    <article class="issue-report-card ${selected ? "is-open" : ""}">
+      <div class="issue-report-card-head">
         <div>
-          <p class="eyebrow">Pitsamai Factory Wage</p>
+          <span class="issue-ticket">#${issueTicketNumber(report)}</span>
+          <h3>${escapeHtml(report.title)}</h3>
+        </div>
+        <span class="issue-status ${status.className}">${status.label}</span>
+      </div>
+      <div class="issue-report-meta">
+        <span>${escapeHtml(report.reporter_fullname || report.reporter_username || "-")}</span>
+        <span>${formatIssueReportDate(report.created_at)}</span>
+        <span>${escapeHtml(report.page_name || "-")}</span>
+        <span>${escapeHtml(issueReportPriorityLabels[report.priority] || "ทั่วไป")}</span>
+      </div>
+      ${selected ? `
+        <div class="issue-report-detail">
+          <p>${escapeHtml(report.description).replaceAll("\n", "<br>")}</p>
+          ${report.attachment_data ? `<a href="${report.attachment_data}" download="${escapeHtml(report.attachment_name || `${issueTicketNumber(report)}.png`)}">ดูหรือดาวน์โหลดภาพหน้าจอ</a>` : ""}
+          ${canManageIssueReports(user) ? `
+            <label class="field issue-status-field">
+              <span>อัปเดตสถานะ</span>
+              <select data-issue-status-id="${Number(report.id)}">
+                ${Object.entries(issueReportStatusMeta).map(([key, item]) => `<option value="${key}" ${report.status === key ? "selected" : ""}>${item.label}</option>`).join("")}
+              </select>
+            </label>` : ""}
+        </div>` : ""}
+      <button class="issue-detail-button" type="button" data-issue-detail="${Number(report.id)}">${selected ? "ซ่อนรายละเอียด" : "ดูรายละเอียด"}</button>
+    </article>`;
+}
+
+function renderIssueReportPage(user, moduleItem) {
+  const reports = filteredIssueReports();
+  return `
+    <section class="issue-report-page">
+      <header class="issue-page-head">
+        <div>
+          <p class="eyebrow">WEBSITE SUPPORT</p>
           <h2>${escapeHtml(moduleItem.label)}</h2>
           <p>${escapeHtml(moduleItem.description)}</p>
         </div>
-        <span class="badge badge-warning">เตรียมไว้ก่อน</span>
+        <span class="issue-access-note">${canManageIssueReports(user) ? "มุมมองผู้ดูแลระบบ" : "รายงานของฉัน"}</span>
+      </header>
+      ${renderIssueReportSummary()}
+      ${issueReportMessage ? `<div class="issue-message ${issueReportMessageType === "error" ? "is-error" : "is-success"}" role="alert">${escapeHtml(issueReportMessage)}</div>` : ""}
+      <div class="issue-workspace">
+        <section class="issue-form-panel" aria-labelledby="issueFormTitle">
+          <div class="issue-section-head"><h3 id="issueFormTitle">แจ้งปัญหาใหม่</h3><p>กรอกรายละเอียดเพื่อให้ตรวจสอบได้รวดเร็ว</p></div>
+          <form id="issueReportForm" class="issue-report-form">
+            <label class="field"><span>หัวข้อปัญหา</span><input name="title" maxlength="160" required placeholder="สรุปปัญหาที่พบ" /></label>
+            <div class="issue-form-row">
+              <label class="field"><span>ประเภทปัญหา</span><select name="category" required><option value="system">การใช้งานระบบ</option><option value="data">ข้อมูลไม่ถูกต้อง</option><option value="display">การแสดงผล</option><option value="performance">ความเร็วของระบบ</option><option value="other">อื่นๆ</option></select></label>
+              <label class="field"><span>หน้าที่พบปัญหา</span><input name="page_name" maxlength="120" required placeholder="เช่น บันทึกผลผลิต" /></label>
+            </div>
+            <fieldset class="issue-priority"><legend>ความเร่งด่วน</legend><div>
+              <label><input type="radio" name="priority" value="normal" checked /><span>ทั่วไป</span></label>
+              <label><input type="radio" name="priority" value="urgent" /><span>เร่งด่วน</span></label>
+              <label><input type="radio" name="priority" value="blocking" /><span>กระทบการทำงาน</span></label>
+            </div></fieldset>
+            <label class="field"><span>รายละเอียดปัญหา</span><textarea name="description" maxlength="5000" required placeholder="อธิบายสิ่งที่เกิดขึ้น ขั้นตอนก่อนพบปัญหา และผลที่คาดหวัง"></textarea></label>
+            <label class="issue-attachment">
+              <input id="issueAttachmentInput" type="file" accept="image/png,image/jpeg" />
+              <span><strong id="issueAttachmentLabel">${issueReportAttachment ? escapeHtml(issueReportAttachment.name) : "แนบภาพหน้าจอ"}</strong><small>PNG หรือ JPG ขนาดไม่เกิน 2 MB</small></span>
+            </label>
+            <div class="issue-form-actions"><button class="btn btn-primary" type="submit" ${issueReportsLoading ? "disabled" : ""}>ส่งรายงานปัญหา</button><button class="btn btn-outline" id="issueReportReset" type="reset">ล้างข้อมูล</button></div>
+          </form>
+        </section>
+        <section class="issue-list-panel" aria-labelledby="issueListTitle">
+          <div class="issue-section-head"><h3 id="issueListTitle">รายงานล่าสุด</h3><p>${canManageIssueReports(user) ? "รายการจากผู้ใช้งานทั้งหมด" : "ติดตามเรื่องที่คุณแจ้งไว้"}</p></div>
+          <form id="issueReportFilter" class="issue-report-filter">
+            <input name="search" value="${escapeHtml(issueReportSearch)}" placeholder="ค้นหาเลขที่ หัวข้อ หรือหน้า" aria-label="ค้นหารายงาน" />
+            <select name="status" aria-label="กรองตามสถานะ"><option value="all">ทุกสถานะ</option>${Object.entries(issueReportStatusMeta).map(([key, item]) => `<option value="${key}" ${issueReportStatusFilter === key ? "selected" : ""}>${item.label}</option>`).join("")}</select>
+          </form>
+          <div class="issue-report-list">
+            ${issueReportsLoading && !issueReportsLoaded ? `<div class="issue-empty">กำลังโหลดรายงาน...</div>` : reports.length ? reports.map((report) => renderIssueReportCard(report, user)).join("") : `<div class="issue-empty">ยังไม่พบรายงานปัญหา</div>`}
+          </div>
+        </section>
       </div>
-      <div class="record-report-empty">
-        <span class="record-report-empty-icon" aria-hidden="true">▧</span>
-        <strong>หน้ารายงานบันทึก</strong>
-        <p>พื้นที่นี้เตรียมไว้สำหรับเพิ่มรูปแบบรายงานในขั้นตอนถัดไป</p>
-      </div>
-    </section>
-  `;
+    </section>`;
+}
+
+async function loadIssueReports() {
+  if (issueReportsLoading) return;
+  issueReportsLoading = true;
+  try {
+    const response = await cloudApiRequest("/api/issue-reports", { timeoutMs: 12000 });
+    issueReports = Array.isArray(response.data) ? response.data : [];
+    issueReportsLoaded = true;
+  } catch (error) {
+    issueReportsLoaded = true;
+    issueReportMessage = error?.status === 401
+      ? "เซสชันหมดอายุ กรุณาออกจากระบบแล้วเข้าสู่ระบบอีกครั้ง"
+      : error instanceof Error ? error.message : "โหลดรายงานไม่สำเร็จ";
+    issueReportMessageType = "error";
+  } finally {
+    issueReportsLoading = false;
+  }
+}
+
+function readIssueAttachment(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) return resolve(null);
+    if (!["image/png", "image/jpeg"].includes(file.type)) return reject(new Error("รองรับเฉพาะภาพ PNG หรือ JPG"));
+    if (file.size > 2 * 1024 * 1024) return reject(new Error("ภาพหน้าจอต้องมีขนาดไม่เกิน 2 MB"));
+    const reader = new FileReader();
+    reader.onload = () => resolve({ name: file.name, type: file.type, data: String(reader.result || "") });
+    reader.onerror = () => reject(new Error("ไม่สามารถอ่านไฟล์ภาพได้"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function bindIssueReportEvents(user) {
+  if (!issueReportsLoaded && !issueReportsLoading) {
+    loadIssueReports().then(render);
+  }
+  document.querySelector("#issueAttachmentInput")?.addEventListener("change", async (event) => {
+    try {
+      issueReportAttachment = await readIssueAttachment(event.currentTarget.files?.[0]);
+      issueReportMessage = "";
+      event.currentTarget.setCustomValidity("");
+      const label = document.querySelector("#issueAttachmentLabel");
+      if (label) label.textContent = issueReportAttachment?.name || "แนบภาพหน้าจอ";
+    } catch (error) {
+      issueReportAttachment = null;
+      event.currentTarget.value = "";
+      event.currentTarget.setCustomValidity(error instanceof Error ? error.message : "แนบภาพไม่สำเร็จ");
+      event.currentTarget.reportValidity();
+    }
+  });
+  document.querySelector("#issueReportReset")?.addEventListener("click", () => {
+    issueReportAttachment = null;
+    issueReportMessage = "";
+    const label = document.querySelector("#issueAttachmentLabel");
+    if (label) label.textContent = "แนบภาพหน้าจอ";
+  });
+  document.querySelector("#issueReportForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    issueReportsLoading = true;
+    issueReportMessage = "";
+    render();
+    try {
+      await cloudApiRequest("/api/issue-reports", {
+        method: "POST",
+        body: JSON.stringify({
+          title: String(form.get("title") || ""),
+          category: String(form.get("category") || "system"),
+          page_name: String(form.get("page_name") || ""),
+          priority: String(form.get("priority") || "normal"),
+          description: String(form.get("description") || ""),
+          attachment_name: issueReportAttachment?.name || "",
+          attachment_data: issueReportAttachment?.data || ""
+        }),
+        timeoutMs: 20000
+      });
+      issueReportAttachment = null;
+      issueReportMessage = "ส่งรายงานเรียบร้อยแล้ว ระบบได้รับเรื่องของคุณแล้ว";
+      issueReportMessageType = "success";
+      issueReportsLoaded = false;
+    } catch (error) {
+      issueReportMessage = error instanceof Error ? error.message : "ส่งรายงานไม่สำเร็จ";
+      issueReportMessageType = "error";
+    } finally {
+      issueReportsLoading = false;
+      await loadIssueReports();
+      render();
+    }
+  });
+  document.querySelector("#issueReportFilter")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    issueReportSearch = String(form.get("search") || "");
+    render();
+  });
+  document.querySelector("#issueReportFilter select")?.addEventListener("change", (event) => {
+    issueReportStatusFilter = event.currentTarget.value;
+    issueReportSearch = document.querySelector("#issueReportFilter input")?.value || "";
+    render();
+  });
+  document.querySelectorAll("[data-issue-detail]").forEach((button) => button.addEventListener("click", () => {
+    const id = Number(button.dataset.issueDetail);
+    issueReportSelectedId = Number(issueReportSelectedId) === id ? null : id;
+    render();
+  }));
+  if (canManageIssueReports(user)) {
+    document.querySelectorAll("[data-issue-status-id]").forEach((select) => select.addEventListener("change", async () => {
+      issueReportsLoading = true;
+      try {
+        await cloudApiRequest("/api/issue-reports/status", {
+          method: "POST",
+          body: JSON.stringify({ id: Number(select.dataset.issueStatusId), status: select.value }),
+          timeoutMs: 12000
+        });
+        issueReportsLoaded = false;
+        issueReportMessage = "อัปเดตสถานะรายงานแล้ว";
+        issueReportMessageType = "success";
+      } catch (error) {
+        issueReportMessage = error instanceof Error ? error.message : "อัปเดตสถานะไม่สำเร็จ";
+        issueReportMessageType = "error";
+      } finally {
+        issueReportsLoading = false;
+        await loadIssueReports();
+        render();
+      }
+    }));
+  }
 }
 
 function renderSettingsBackBar() {
@@ -7311,6 +7601,7 @@ const BACKUP_DATA_KEYS = [
   "production_save_queue_events",
   "time_save_queue",
   "time_save_queue_events",
+  "issue_reports",
   "audit_logs",
   "community_posts",
   "secret_messages"
@@ -7373,6 +7664,12 @@ function backupGroupSummaries(data = backupPayloadData()) {
         backupRows(data, "time_save_queue").length +
         backupRows(data, "time_save_queue_events").length,
       icon: "คิว"
+    },
+    {
+      label: "รายงานปัญหาของเว็บ",
+      detail: "รายละเอียด สถานะ และภาพหน้าจอที่แนบมากับรายงาน",
+      count: backupRows(data, "issue_reports").length,
+      icon: "เว็บ"
     },
     {
       label: "อัตราค่าจ้างและประวัติระบบ",
@@ -10851,10 +11148,68 @@ function reportExportError(error) {
   render();
 }
 
-function renderTimeQueuePanel() {
+function getTimeQueueReason(item) {
+  const reasonByCode = {
+    time_overlap: ["ช่วงเวลาทับกับข้อมูลเดิม", "เวลาเข้า-ออกชนกับรายการของพนักงานคนเดียวกันในวันเดียวกัน"],
+    invalid_time: ["วันที่หรือเวลาไม่เข้าเงื่อนไข", "วันที่ รหัสพนักงาน หรือรูปแบบเวลาเข้า-ออกไม่ถูกต้อง กรุณากดแก้ไขก่อนส่งใหม่"],
+    employee_invalid: ["ข้อมูลพนักงานไม่พร้อมใช้งาน", "ไม่พบพนักงานตามเวลาหรือพนักงานถูกปิดใช้งานในฐานกลาง"],
+    invalid_payload: ["ข้อมูลคิวไม่ครบ", "จำนวนรายการไม่ตรงกับข้อมูลที่ฐานกลางรับไว้"],
+    payload_hash_mismatch: ["ข้อมูลคิวไม่ผ่านการตรวจความถูกต้อง", "ข้อมูลเปลี่ยนไประหว่างทาง ระบบจึงหยุดเพื่อป้องกันข้อมูลเสียหาย"],
+    audit_log_failed: ["บันทึกประวัติไม่สำเร็จ", "ข้อมูลเวลาถูกเก็บไว้แล้ว แต่ระบบยังปิดคิวไม่ได้จนกว่า Audit Log จะครบ"],
+    lookup_failed: ["ตรวจข้อมูลเดิมไม่ได้", "ฐานข้อมูลตอบกลับผิดปกติระหว่างตรวจการบันทึกซ้ำ"],
+    conflict_check_failed: ["ตรวจเงื่อนไขเวลาไม่ได้", "ฐานข้อมูลขัดข้องระหว่างตรวจช่วงเวลาทับกัน"],
+    employee_lookup_failed: ["ตรวจพนักงานไม่ได้", "ฐานข้อมูลพนักงานตอบกลับชั่วคราวผิดปกติ"],
+    temporary_cloud_error: ["Cloud ขัดข้องชั่วคราว", "ระบบจะลองบันทึกใหม่โดยใช้ข้อมูลคิวเดิม"],
+    save_failed: ["บันทึกข้อมูลเวลาไม่สำเร็จ", "ฐานข้อมูลปฏิเสธรายการ กรุณาตรวจรายละเอียดก่อนส่งใหม่"],
+    worker_exception: ["Worker ทำงานผิดพลาด", "ระบบหยุดคิวไว้โดยไม่ลบข้อมูลเพื่อรอการตรวจสอบ"],
+    verification_failed: ["ตรวจสอบคิวไม่สำเร็จ", "ยังยืนยันไม่ได้ว่ารายการนี้ผ่านเงื่อนไขการบันทึก"],
+    retry_limit_reached: ["ลองอัตโนมัติครบจำนวนแล้ว", "ระบบหยุดไว้เพื่อป้องกันการบันทึกซ้ำ ข้อมูลคิวยังอยู่ครบ"],
+    stale_worker_recovered: ["กู้คิวจาก Worker ที่หยุดตอบสนอง", "ระบบนำคิวเดิมกลับมาทำงานต่อโดยไม่สร้างข้อมูลชุดใหม่"]
+  };
+  if (item.status === "queued") {
+    const ageMs = Date.now() - new Date(item.created_at || Date.now()).getTime();
+    return ageMs > 15000
+      ? ["Worker ยังไม่รับคิว", "คิวรอนานกว่าปกติ ข้อมูลยังอยู่ในฐานกลางและสามารถกดตรวจสอบหรือบันทึกซ้ำได้"]
+      : ["รอ Worker รับคิว", "ข้อมูลถูกเก็บในฐานกลางแล้ว กำลังรอประมวลผล"];
+  }
+  if (item.status === "processing") return ["กำลังตรวจและบันทึก", "Worker กำลังตรวจพนักงาน เวลาทับ และความถูกต้องของข้อมูล"];
+  if (item.status === "succeeded") return ["บันทึกสำเร็จ", "ตรวจพบข้อมูลครบใน time_records แล้ว"];
+  return reasonByCode[item.error_code] || ["ต้องตรวจสอบ", item.error_message || "ระบบหยุดคิวไว้เพื่อป้องกันข้อมูลผิดพลาด"];
+}
+
+function renderTimeQueueEditor() {
+  if (!editingTimeQueueItem) return "";
+  const rows = Array.isArray(editingTimeQueueItem.payload) ? editingTimeQueueItem.payload : [];
+  return `
+    <section class="panel time-queue-editor">
+      <div class="time-queue-head"><div><span>แก้ไขคิวเดิม</span><h3>${escapeHtml(timeQueueNumber(editingTimeQueueItem))}</h3><p>แก้วันที่หรือเวลาแล้วส่งคิวเดิมอีกครั้ง ประวัติก่อนแก้ยังถูกเก็บใน Log</p></div><button class="btn btn-outline" data-close-time-queue-editor type="button">ยกเลิก</button></div>
+      <form id="timeQueueEditForm">
+        <div class="time-queue-edit-grid">
+          ${rows.map((row, index) => {
+            const raw = row.raw_payload && typeof row.raw_payload === "object" ? row.raw_payload : row;
+            return `<section class="time-queue-edit-row">
+              <input type="hidden" name="id_${index}" value="${escapeHtml(row.id || raw.id || "")}" />
+              <label class="field"><span>วันที่</span><input name="date_${index}" type="date" value="${escapeHtml(row.work_date || raw.record_date || "")}" required /></label>
+              <label class="field"><span>รหัสพนักงาน</span><input value="${escapeHtml(row.emp_code || raw.emp_code || "")}" disabled /></label>
+              <label class="field"><span>เวลาเข้า</span><input name="in_${index}" type="text" inputmode="numeric" maxlength="5" value="${escapeHtml(row.check_in || raw.clock_in || "")}" required /></label>
+              <label class="field"><span>เวลาออก</span><input name="out_${index}" type="text" inputmode="numeric" maxlength="5" value="${escapeHtml(row.check_out || raw.clock_out || "")}" required /></label>
+            </section>`;
+          }).join("")}
+        </div>
+        <div class="time-queue-editor-actions"><button class="btn btn-primary" type="submit">บันทึกการแก้ไขและส่งคิวเดิม</button></div>
+      </form>
+    </section>`;
+}
+
+function renderTimeQueuePage() {
   const active = timeQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length;
   const review = timeQueueItems.filter((item) => ["needs_review", "failed"].includes(item.status)).length;
-  const rows = timeQueueItems.slice(0, 8);
+  const filtered = timeQueueItems.filter((item) => {
+    if (timeQueueFilter === "active") return ["queued", "processing"].includes(item.status);
+    if (timeQueueFilter === "review") return ["needs_review", "failed"].includes(item.status);
+    if (timeQueueFilter === "done") return item.status === "succeeded";
+    return true;
+  });
   const statusMeta = (status) => ({
     queued: ["รอคิว", "queued"],
     processing: ["กำลังบันทึก", "processing"],
@@ -10863,21 +11218,28 @@ function renderTimeQueuePanel() {
     failed: ["ไม่สำเร็จ", "review"]
   }[status] || [status || "-", "queued"]);
   return `
-    <section class="panel time-queue-panel">
+    ${renderTimeQueueEditor()}
+    ${timeRecordMessage ? `<div class="alert ${timeRecordMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(timeRecordMessage)}</div>` : ""}
+    <section class="panel time-queue-panel time-queue-page">
       <div class="time-queue-head">
-        <div><span>Save Queue</span><h3>คิวบันทึกเวลา</h3><p>รับข้อมูลเข้าฐานกลางก่อน แล้วตรวจสอบและบันทึกต่ออัตโนมัติ</p></div>
+        <div><span>Save Queue</span><h3>คิวบันทึกเวลา</h3><p>รายการทุกชิ้นถูกเก็บไว้ในฐานกลางและไม่ถูกลบหลังประมวลผล</p></div>
         <div class="time-queue-metrics"><span><b>${active}</b> กำลังทำงาน</span><span class="${review ? "has-review" : ""}"><b>${review}</b> ต้องตรวจ</span><button class="btn btn-small btn-outline" data-refresh-time-queue type="button">รีเฟรช</button></div>
       </div>
+      <div class="time-queue-filters">${[["all", "ทั้งหมด"], ["active", "กำลังทำงาน"], ["review", "ต้องตรวจสอบ"], ["done", "สำเร็จ"]].map(([id, label]) => `<button class="module-tab ${timeQueueFilter === id ? "active" : ""}" data-time-queue-filter="${id}" type="button">${label}</button>`).join("")}</div>
       <div class="time-queue-list">
         ${timeQueueLoadError ? `<div class="alert alert-error">${escapeHtml(timeQueueLoadError)} · กรุณารันไฟล์ supabase_time_save_queue_migration.sql ใน Supabase</div>` : ""}
-        ${timeQueueLoading && !rows.length ? `<div class="empty-cell">กำลังโหลดคิว...</div>` : rows.length ? rows.map((item) => {
+        ${timeQueueLoading && !filtered.length ? `<div class="empty-cell">กำลังโหลดคิว...</div>` : filtered.length ? filtered.map((item) => {
           const [label, className] = statusMeta(item.status);
+          const [reasonTitle, reasonDetail] = getTimeQueueReason(item);
+          const busy = Number(timeQueueActionId) === Number(item.id);
+          const canReview = item.status !== "succeeded";
           return `<article class="time-queue-row ${className}">
             <div><small>เลขคิว</small><strong>${escapeHtml(timeQueueNumber(item))}</strong></div>
             <div><small>พนักงาน</small><strong>${escapeHtml(item.emp_code || "-")} · ${escapeHtml(item.employee_name || "-")}</strong></div>
             <div><small>วันที่ / จำนวน</small><strong>${escapeHtml(item.first_work_date || "-")}${item.last_work_date && item.last_work_date !== item.first_work_date ? ` ถึง ${escapeHtml(item.last_work_date)}` : ""} · ${item.record_count || 1} รายการ</strong></div>
             <div><small>ผู้บันทึก</small><strong>${escapeHtml(item.created_by || "-")}</strong></div>
-            <div class="time-queue-status"><span>${escapeHtml(label)}</span>${item.error_message ? `<small title="${escapeHtml(item.error_message)}">${escapeHtml(item.error_message)}</small>` : ""}</div>
+            <div class="time-queue-status"><span>${escapeHtml(label)}</span><strong>${escapeHtml(reasonTitle)}</strong><small>${escapeHtml(reasonDetail)}</small>${item.error_message ? `<small class="time-queue-technical">${escapeHtml(item.error_message)}</small>` : ""}</div>
+            <div class="time-queue-actions">${canReview ? `<button class="btn btn-small btn-outline" data-time-queue-verify="${item.id}" type="button" ${busy ? "disabled" : ""}>ตรวจสอบอีกครั้ง</button><button class="btn btn-small btn-primary" data-time-queue-retry="${item.id}" type="button" ${busy ? "disabled" : ""}>บันทึกซ้ำ</button><button class="btn btn-small btn-outline" data-time-queue-edit="${item.id}" type="button" ${busy ? "disabled" : ""}>แก้ไข</button>` : ""}</div>
           </article>`;
         }).join("") : `<div class="empty-cell">ยังไม่มีประวัติคิวบันทึกเวลา</div>`}
       </div>
@@ -10967,15 +11329,19 @@ function renderTimeReport(user, moduleItem) {
           <h2>${escapeHtml(moduleItem.label)}</h2>
           <p>บันทึกเวลาเข้า-ออก ปัดเวลาตามช่วงครึ่งชั่วโมง และคำนวณค่าแรงตามกติกาของโรงงาน</p>
         </div>
-        <div class="time-hero-status">
-          <span>วันที่ปฏิบัติงาน</span>
-          <strong>${escapeHtml(timeRecordDate)}</strong>
+        <div class="time-hero-actions">
+          <div class="time-hero-status">
+            <span>วันที่ปฏิบัติงาน</span>
+            <strong>${escapeHtml(timeRecordDate)}</strong>
+          </div>
+          <button class="btn ${timeView === "queue" ? "btn-outline" : "btn-primary"}" ${timeView === "queue" ? "data-close-time-queue" : "data-open-time-queue"} type="button">
+            ${timeView === "queue" ? "กลับหน้าบันทึกเวลา" : `เปิดคิวบันทึก${timeQueueItems.filter((item) => ["queued", "processing", "needs_review", "failed"].includes(item.status)).length ? ` (${timeQueueItems.filter((item) => ["queued", "processing", "needs_review", "failed"].includes(item.status)).length})` : ""}`}
+          </button>
         </div>
       </section>
 
+      ${timeView === "queue" ? renderTimeQueuePage() : `
       ${renderTimeModeSelector()}
-
-      ${renderTimeQueuePanel()}
 
       ${
         timeRecordMessage
@@ -11041,6 +11407,7 @@ function renderTimeReport(user, moduleItem) {
       </section>
       ${renderDailyTimeRecordTable(dailyTimeRecords)}
       ` : renderWeeklyTimeEntry(user)}
+      `}
     </section>
   `;
 }
@@ -11322,7 +11689,97 @@ function handleWeeklyTimeEnter(event) {
 
 function bindTimeReportEvents(user) {
   if (!timeQueueLoadedOnce && !timeQueueLoading) refreshTimeQueue({ renderAfter: true });
+  document.querySelector("[data-open-time-queue]")?.addEventListener("click", () => {
+    timeView = "queue";
+    editingTimeQueueItem = null;
+    render();
+    refreshTimeQueue({ renderAfter: true });
+  });
+  document.querySelector("[data-close-time-queue]")?.addEventListener("click", () => {
+    timeView = "entry";
+    editingTimeQueueItem = null;
+    render();
+  });
   document.querySelector("[data-refresh-time-queue]")?.addEventListener("click", () => refreshTimeQueue({ renderAfter: true }));
+  document.querySelectorAll("[data-time-queue-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      timeQueueFilter = button.dataset.timeQueueFilter || "all";
+      render();
+    });
+  });
+  document.querySelectorAll("[data-time-queue-verify]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await runTimeQueueAction(Number(button.dataset.timeQueueVerify), "verify");
+        setTimeRecordMessage("ตรวจสอบคิวและส่งดำเนินการต่อแล้ว");
+        await refreshTimeQueue();
+      } catch (error) {
+        setTimeRecordMessage(error instanceof Error ? error.message : "ตรวจสอบคิวไม่สำเร็จ", "error");
+      } finally {
+        render();
+      }
+    });
+  });
+  document.querySelectorAll("[data-time-queue-retry]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!window.confirm("ยืนยันส่งข้อมูลคิวเดิมให้ระบบบันทึกอีกครั้ง? ระบบจะตรวจข้อมูลซ้ำก่อนเสมอ")) return;
+      try {
+        await runTimeQueueAction(Number(button.dataset.timeQueueRetry), "retry");
+        setTimeRecordMessage("ส่งคิวเดิมให้บันทึกใหม่แล้ว");
+        await refreshTimeQueue();
+      } catch (error) {
+        setTimeRecordMessage(error instanceof Error ? error.message : "ส่งคิวใหม่ไม่สำเร็จ", "error");
+      } finally {
+        render();
+      }
+    });
+  });
+  document.querySelectorAll("[data-time-queue-edit]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await loadTimeQueueForEdit(Number(button.dataset.timeQueueEdit));
+      } catch (error) {
+        setTimeRecordMessage(error instanceof Error ? error.message : "โหลดข้อมูลคิวไม่สำเร็จ", "error");
+      }
+      render();
+    });
+  });
+  document.querySelector("[data-close-time-queue-editor]")?.addEventListener("click", () => {
+    editingTimeQueueItem = null;
+    render();
+  });
+  document.querySelector("#timeQueueEditForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!editingTimeQueueItem || timeQueueActionId) return;
+    const form = new FormData(event.currentTarget);
+    const sourceRows = Array.isArray(editingTimeQueueItem.payload) ? editingTimeQueueItem.payload : [];
+    try {
+      const records = sourceRows.map((row, index) => {
+        const raw = row.raw_payload && typeof row.raw_payload === "object" ? row.raw_payload : row;
+        const clockIn = normalizeClockText(form.get(`in_${index}`));
+        const clockOut = normalizeClockText(form.get(`out_${index}`));
+        if (!clockIn || !clockOut) throw new Error(`รายการที่ ${index + 1} ต้องมีเวลาเข้าและออกครบ`);
+        return {
+          ...raw,
+          ...(row.id || raw.id ? { id: row.id || raw.id } : {}),
+          record_date: String(form.get(`date_${index}`) || ""),
+          emp_code: row.emp_code || raw.emp_code,
+          clock_in: clockIn,
+          clock_out: clockOut
+        };
+      });
+      await runTimeQueueAction(Number(editingTimeQueueItem.id), "edit-retry", records);
+      editingTimeQueueItem = null;
+      setTimeRecordMessage("แก้ไขข้อมูลและส่งคิวเดิมให้ตรวจบันทึกแล้ว");
+      await refreshTimeQueue();
+    } catch (error) {
+      setTimeRecordMessage(error instanceof Error ? error.message : "แก้ไขคิวไม่สำเร็จ", "error");
+    } finally {
+      render();
+    }
+  });
+
+  if (timeView === "queue") return;
   document.querySelectorAll("[data-time-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       timeEntryMode = button.dataset.timeMode || "daily";
