@@ -86,11 +86,16 @@ BACKUP_TABLES = [
     "deduction_applications",
     "production_save_queue",
     "production_save_queue_events",
+    "time_save_queue",
+    "time_save_queue_events",
     "audit_logs",
     "community_posts",
     "secret_messages",
 ]
-QUEUE_BACKUP_TABLES = ["production_save_queue", "production_save_queue_events"]
+QUEUE_BACKUP_TABLES = [
+    "production_save_queue", "production_save_queue_events",
+    "time_save_queue", "time_save_queue_events",
+]
 MAIN_CLEAR_TABLES = [
     "deduction_applications",
     "deduction_records",
@@ -99,6 +104,8 @@ MAIN_CLEAR_TABLES = [
     "production_sessions",
     "production_save_queue_events",
     "production_save_queue",
+    "time_save_queue_events",
+    "time_save_queue",
 ]
 BACKUP_ARCHIVE_BUCKET = "pismai-backup-archives"
 SUPABASE_FREE_DATABASE_BYTES = 500 * 1024 * 1024
@@ -118,6 +125,8 @@ deduction_record_insert_lock = threading.Lock()
 time_record_insert_lock = threading.Lock()
 production_save_queue_wakeup = threading.Event()
 production_save_queue_worker_id = f"render-{os.getpid()}-{secrets.token_hex(4)}"
+time_save_queue_wakeup = threading.Event()
+time_save_queue_worker_id = f"render-time-{os.getpid()}-{secrets.token_hex(4)}"
 online_user_sessions: dict[str, dict] = {}
 production_record_next_id: int | None = None
 deduction_record_next_id: int | None = None
@@ -1150,6 +1159,204 @@ def production_save_queue_worker() -> None:
                 production_queue_event(queue_id, "worker_exception", "needs_review", str(error), production_save_queue_worker_id)
 
 
+def time_queue_to_client(row: dict, include_payload: bool = False) -> dict:
+    result = {key: value for key, value in row.items() if key not in {"payload", "payload_hash", "locked_by"}}
+    result["queue_no"] = f"TQ-{int(row.get('id') or 0):06d}"
+    if include_payload:
+        result["payload"] = row.get("payload") if isinstance(row.get("payload"), list) else []
+    return result
+
+
+def time_queue_event(queue_id: int, event_type: str, status: str, message: str, actor: str, metadata: dict | None = None) -> None:
+    supabase_request(
+        "POST",
+        "time_save_queue_events",
+        {"queue_id": queue_id, "event_type": event_type, "status": status, "message": message,
+         "actor": actor, "metadata": metadata or {}},
+        prefer="return=minimal",
+        timeout_seconds=5,
+    )
+
+
+def update_time_queue(queue_id: int, values: dict, expected_status: str | None = None) -> tuple[int, dict | None]:
+    filters = [f"id=eq.{queue_id}"]
+    if expected_status:
+        filters.append(f"status=eq.{quote(expected_status)}")
+    status, body = supabase_request(
+        "PATCH", f"time_save_queue?{'&'.join(filters)}", values,
+        prefer="return=representation", timeout_seconds=6,
+    )
+    return status, body[0] if status < 400 and isinstance(body, list) and body else None
+
+
+def time_queue_row_key(queue_uid: str, index: int) -> str:
+    return hashlib.sha256(f"{queue_uid}:{index}".encode("utf-8")).hexdigest()
+
+
+def time_queue_existing_rows(rows: list[dict]) -> tuple[int, list[dict] | dict]:
+    keys = [str(row.get("queue_dedupe_key") or "") for row in rows if row.get("queue_dedupe_key")]
+    if not keys:
+        return 200, []
+    status, body = supabase_request(
+        "GET",
+        f"time_records?queue_dedupe_key=in.({','.join(quote(key) for key in keys)})&select=*",
+        timeout_seconds=6,
+    )
+    return status, body if isinstance(body, list) else body
+
+
+def finish_time_queue(job: dict, rows: list[dict], event_type: str = "succeeded") -> None:
+    client_rows = [live_state_to_client("time_records", row) for row in rows if isinstance(row, dict)]
+    record_ids = [int(row["id"]) for row in rows if str(row.get("id") or "").isdigit()]
+    operation = str(job.get("operation") or "insert")
+    queue_uid = str(job.get("queue_uid") or "")
+    audit_failure: tuple[int, str] | None = None
+    for row in rows:
+        raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+        if operation == "update" and not raw.get("audit_required"):
+            continue
+        audit_filter = quote("metadata->>time_queue_uid", safe="")
+        audit_record_filter = quote("metadata->>record_id", safe="")
+        audit_status, existing_audit = supabase_request(
+            "GET", f"audit_logs?{audit_filter}=eq.{quote(queue_uid)}&{audit_record_filter}=eq.{quote(str(row.get('id') or ''))}&select=id&limit=1",
+            timeout_seconds=5,
+        )
+        if audit_status >= 400:
+            audit_failure = (audit_status, supabase_error_text(existing_audit) or "Audit lookup failed.")
+            break
+        if audit_status < 400 and isinstance(existing_audit, list) and existing_audit:
+            continue
+        before = raw.get("audit_before") if isinstance(raw.get("audit_before"), dict) else {}
+        detail = (
+            f"Edited queued time record #{row.get('id')}: "
+            f"{before.get('record_date', '')} {before.get('clock_in', '')}-{before.get('clock_out', '')} -> "
+            f"{row.get('work_date', '')} {row.get('check_in', '')}-{row.get('check_out', '')}"
+            if operation == "update"
+            else f"Added queued time record {row.get('emp_code', '')} {row.get('check_in', '')}-{row.get('check_out', '')}"
+        )
+        audit_status, audit_body = supabase_request(
+            "POST", "audit_logs",
+            {"action": "UPDATE_TIME_RECORD" if operation == "update" else "INSERT_TIME_RECORD",
+             "module": "time_records", "description": detail, "created_by": job.get("created_by"),
+             "user_fullname": job.get("created_by"),
+             "metadata": {"time_queue_uid": queue_uid, "queue_id": job.get("id"), "record_id": row.get("id")}},
+            prefer="return=minimal", timeout_seconds=5,
+        )
+        if audit_status >= 400:
+            audit_failure = (audit_status, supabase_error_text(audit_body) or "Audit insert failed.")
+            break
+    if audit_failure:
+        fail_time_queue(job, "audit_log_failed", audit_failure[1], retryable=audit_failure[0] >= 500)
+        return
+    values = {
+        "status": "succeeded", "result_record_ids": record_ids, "result_payload": client_rows,
+        "error_code": None, "error_message": None, "finished_at": datetime.now(timezone.utc).isoformat(),
+        "locked_at": None, "locked_by": None,
+    }
+    status, updated = update_time_queue(int(job.get("id") or 0), values, expected_status="processing")
+    if status < 400 and updated:
+        time_queue_event(int(job["id"]), event_type, "succeeded", f"Saved {len(rows)} time record(s).", time_save_queue_worker_id,
+                         {"record_ids": record_ids})
+
+
+def fail_time_queue(job: dict, code: str, message: str, retryable: bool = False) -> None:
+    attempt = int(job.get("attempt_count") or 1)
+    can_retry = retryable and attempt < int(job.get("max_attempts") or 3)
+    values = {
+        "status": "queued" if can_retry else "needs_review",
+        "error_code": code, "error_message": message,
+        "next_attempt_at": (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat(),
+        "locked_at": None, "locked_by": None,
+    }
+    if not can_retry:
+        values["finished_at"] = datetime.now(timezone.utc).isoformat()
+    update_time_queue(int(job.get("id") or 0), values, expected_status="processing")
+    time_queue_event(int(job.get("id") or 0), "retry_scheduled" if can_retry else "needs_review",
+                     values["status"], message, time_save_queue_worker_id, {"attempt": attempt})
+    if can_retry:
+        time_save_queue_wakeup.set()
+
+
+def process_time_save_queue_job(job: dict) -> None:
+    rows = job.get("payload") if isinstance(job.get("payload"), list) else []
+    if not rows or len(rows) != int(job.get("record_count") or 0):
+        fail_time_queue(job, "invalid_payload", "Queue payload is missing or record count does not match.")
+        return
+    if not hmac.compare_digest(str(job.get("payload_hash") or ""), production_queue_payload_hash(rows)):
+        fail_time_queue(job, "payload_hash_mismatch", "Queue payload hash does not match the accepted data.")
+        return
+
+    operation = str(job.get("operation") or "insert")
+    existing_status, already_saved = time_queue_existing_rows(rows)
+    if existing_status >= 500:
+        fail_time_queue(job, "lookup_failed", supabase_error_text(already_saved), retryable=True)
+        return
+    if operation == "insert" and isinstance(already_saved, list) and len(already_saved) == len(rows):
+        finish_time_queue(job, already_saved, "idempotent_recovery")
+        return
+
+    pending_rows = rows
+    recovered_rows = []
+    if operation == "insert" and isinstance(already_saved, list):
+        recovered_by_key = {str(row.get("queue_dedupe_key") or ""): row for row in already_saved}
+        recovered_rows = list(recovered_by_key.values())
+        pending_rows = [row for row in rows if str(row.get("queue_dedupe_key") or "") not in recovered_by_key]
+
+    employee_code = str(rows[0].get("emp_code") or "").strip()
+    employee_status, employees = supabase_request(
+        "GET", f"time_employees?emp_code=eq.{quote(employee_code)}&status=eq.Active&select=id&limit=1",
+        timeout_seconds=5,
+    )
+    if employee_status >= 500:
+        fail_time_queue(job, "employee_lookup_failed", supabase_error_text(employees), retryable=True)
+        return
+    if employee_status >= 400 or not isinstance(employees, list) or not employees:
+        fail_time_queue(job, "employee_invalid", "The time employee is missing or inactive.")
+        return
+
+    conflict_status, conflict = validate_time_record_conflicts(pending_rows)
+    if conflict_status >= 500:
+        fail_time_queue(job, "conflict_check_failed", supabase_error_text(conflict), retryable=True)
+        return
+    if conflict_status >= 400:
+        fail_time_queue(job, "time_overlap", str((conflict or {}).get("error") or "Time records overlap."))
+        return
+
+    with time_record_insert_lock:
+        if operation == "update":
+            status, body = update_time_records_compatible(rows)
+        else:
+            status, body = insert_time_records_compatible(pending_rows)
+    expected_saved_count = len(pending_rows)
+    if status < 400 and isinstance(body, list) and len(body) == expected_saved_count:
+        finish_time_queue(job, [*recovered_rows, *body], "partial_recovery" if recovered_rows else "succeeded")
+        return
+    if status >= 500:
+        fail_time_queue(job, "temporary_cloud_error", supabase_error_text(body), retryable=True)
+        return
+    fail_time_queue(job, "save_failed", supabase_error_text(body) or f"Time save failed ({status}).")
+
+
+def time_save_queue_worker() -> None:
+    while True:
+        time_save_queue_wakeup.wait(timeout=2)
+        time_save_queue_wakeup.clear()
+        if not supabase_configured():
+            continue
+        while True:
+            status, body = supabase_request(
+                "POST", "rpc/claim_next_time_save_queue",
+                {"p_worker_id": time_save_queue_worker_id}, timeout_seconds=6,
+            )
+            if status >= 400 or not isinstance(body, list) or not body:
+                break
+            try:
+                with backup_clear_lock:
+                    process_time_save_queue_job(body[0])
+            except Exception as error:
+                fail_time_queue(body[0], "worker_exception", str(error))
+
+
 def reserve_deduction_record_id(refresh: bool = False) -> int:
     global deduction_record_next_id
     if refresh or deduction_record_next_id is None:
@@ -1382,7 +1589,10 @@ def update_time_records_compatible(rows: list[dict]) -> tuple[int, list | dict |
         row_id = row.get("id")
         if row_id in (None, ""):
             return 400, {"error": "time record id is required for update"}
-        update_row = {key: value for key, value in row.items() if key != "id"}
+        update_row = {
+            key: value for key, value in row.items()
+            if key != "id" and not (key == "queue_dedupe_key" and value in (None, ""))
+        }
         status, body = supabase_request(
             "PATCH",
             f"time_records?id=eq.{quote(str(row_id))}",
@@ -1589,6 +1799,7 @@ def live_state_row(table: str, payload: dict) -> dict:
             "updated_by": payload.get("updated_by"),
             "created_at": payload.get("created_at") or datetime.utcnow().isoformat() + "Z",
             "updated_at": payload.get("updated_at") or payload.get("created_at") or datetime.utcnow().isoformat() + "Z",
+            "queue_dedupe_key": payload.get("queue_dedupe_key"),
             "raw_payload": payload,
         }
     else:
@@ -7212,6 +7423,74 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": synced_rows, "error": None}, status)
             return
 
+        if parsed.path == "/api/time-save-queue/enqueue":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            queue_uid = str(payload.get("queue_uid") or "").strip()
+            operation = str(payload.get("operation") or "insert").strip().lower()
+            records = payload.get("records")
+            if not queue_uid or operation not in {"insert", "update"}:
+                self.send_json({"error": "queue_uid and a valid operation are required."}, 400)
+                return
+            if not isinstance(records, list) or not records or len(records) > 31:
+                self.send_json({"error": "records must contain 1-31 items."}, 400)
+                return
+            converted = [live_state_row("time_records", row) for row in records if isinstance(row, dict)]
+            if len(converted) != len(records):
+                self.send_json({"error": "all records must be objects"}, 400)
+                return
+            if operation == "update" and any(row.get("id") in (None, "") for row in converted):
+                self.send_json({"error": "record id is required for queued updates."}, 400)
+                return
+            if operation == "insert":
+                for index, row in enumerate(converted):
+                    row.pop("id", None)
+                    row["queue_dedupe_key"] = time_queue_row_key(queue_uid, index)
+                    raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+                    row["raw_payload"] = {key: value for key, value in raw.items() if key != "id"}
+
+            identities = [time_record_identity(row) for row in converted]
+            employee_codes = {emp_code for _date, emp_code in identities}
+            work_dates = sorted({work_date for work_date, _emp_code in identities})
+            if len(employee_codes) != 1 or not work_dates or any(not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) for value in work_dates):
+                self.send_json({"error": "one queue must contain one employee and valid work dates."}, 400)
+                return
+            payload_hash = production_queue_payload_hash(converted)
+            emp_code = next(iter(employee_codes))
+            first_raw = converted[0].get("raw_payload") if isinstance(converted[0].get("raw_payload"), dict) else {}
+            queue_row = {
+                "queue_uid": queue_uid, "operation": operation, "payload": converted,
+                "payload_hash": payload_hash, "record_count": len(converted), "emp_code": emp_code,
+                "employee_name": str(converted[0].get("employee_name") or first_raw.get("fullname") or ""),
+                "first_work_date": work_dates[0], "last_work_date": work_dates[-1],
+                "status": "queued", "created_by": str(actor.get("username") or actor.get("fullname") or "unknown"),
+            }
+            status, body = supabase_request(
+                "POST", "time_save_queue", queue_row, prefer="return=representation", timeout_seconds=5,
+            )
+            if status >= 400:
+                lookup_status, existing = supabase_request(
+                    "GET", f"time_save_queue?queue_uid=eq.{quote(queue_uid)}&select=*&limit=1", timeout_seconds=5,
+                )
+                if lookup_status < 400 and isinstance(existing, list) and existing:
+                    if hmac.compare_digest(str(existing[0].get("payload_hash") or ""), payload_hash):
+                        time_save_queue_wakeup.set()
+                        self.send_json({"data": time_queue_to_client(existing[0]), "idempotent": True})
+                        return
+                    self.send_json({"error": "queue_uid already exists with different data."}, 409)
+                    return
+                self.send_json({"error": body, "migration": "supabase_time_save_queue_migration.sql"}, status)
+                return
+            saved = body[0] if isinstance(body, list) and body else None
+            if not isinstance(saved, dict):
+                self.send_json({"error": "Queue insert returned no row."}, 500)
+                return
+            time_save_queue_wakeup.set()
+            self.send_json({"data": time_queue_to_client(saved), "accepted": True}, 202)
+            return
+
         if parsed.path == "/api/production-records/verify":
             client_uids = payload.get("client_uids", [])
             if not isinstance(client_uids, list) or not client_uids:
@@ -8712,6 +8991,64 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": production_queue_to_client(row, include_payload=True) if isinstance(row, dict) else None})
             return
 
+        if parsed.path == "/api/time-save-queue/lookup":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            queue_uid = query.get("queue_uid", [""])[0].strip()
+            status, body = supabase_request(
+                "GET", f"time_save_queue?queue_uid=eq.{quote(queue_uid)}&select=*&limit=1", timeout_seconds=6,
+            )
+            if status >= 400:
+                self.send_json({"error": body}, status)
+                return
+            row = body[0] if isinstance(body, list) and body else None
+            self.send_json({"data": time_queue_to_client(row, include_payload=True) if isinstance(row, dict) else None})
+            return
+
+        if parsed.path == "/api/time-save-queue":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            try:
+                limit = min(max(int(query.get("limit", ["60"])[0]), 1), 150)
+            except (TypeError, ValueError):
+                limit = 60
+            fields = (
+                "id,queue_uid,operation,record_count,emp_code,employee_name,first_work_date,last_work_date,"
+                "status,attempt_count,max_attempts,started_at,finished_at,result_record_ids,result_payload,"
+                "error_code,error_message,created_by,created_at,updated_at"
+            )
+            status, body = supabase_request(
+                "GET", f"time_save_queue?select={fields}&order=created_at.desc,id.desc&limit={limit}", timeout_seconds=6,
+            )
+            if status >= 400:
+                self.send_json({"error": body, "migration": "supabase_time_save_queue_migration.sql"}, status)
+                return
+            self.send_json({"data": [time_queue_to_client(row) for row in body if isinstance(row, dict)]})
+            return
+
+        time_queue_item_match = re.fullmatch(r"/api/time-save-queue/(\d+)", parsed.path)
+        if time_queue_item_match:
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            queue_id = int(time_queue_item_match.group(1))
+            status, body = supabase_request(
+                "GET", f"time_save_queue?id=eq.{queue_id}&select=*&limit=1", timeout_seconds=6,
+            )
+            if status >= 400:
+                self.send_json({"error": body}, status)
+                return
+            if not isinstance(body, list) or not body:
+                self.send_json({"error": "Time queue item was not found."}, 404)
+                return
+            self.send_json({"data": time_queue_to_client(body[0], include_payload=True)})
+            return
+
         if parsed.path == "/api/production-save-queue":
             actor = secret_room_actor(self)
             if not actor:
@@ -8996,6 +9333,13 @@ def main() -> None:
     )
     queue_worker.start()
     production_save_queue_wakeup.set()
+    time_queue_worker = threading.Thread(
+        target=time_save_queue_worker,
+        name="time-save-queue-worker",
+        daemon=True,
+    )
+    time_queue_worker.start()
+    time_save_queue_wakeup.set()
     server = ThreadingHTTPServer((HOST, PORT), ReportHandler)
     try:
         print(f"Report server running at http://{HOST}:{PORT}", flush=True)

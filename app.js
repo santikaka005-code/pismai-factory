@@ -19,6 +19,9 @@ const CLOUD_SAVE_RETRY_DELAY_MS = 600;
 const PRODUCTION_QUEUE_ACCEPT_TIMEOUT_MS = 5000;
 const PRODUCTION_QUEUE_PRIMARY_TIMEOUT_MS = 3500;
 const PRODUCTION_QUEUE_POLL_INTERVAL_MS = 1200;
+const TIME_QUEUE_ACCEPT_TIMEOUT_MS = 5000;
+const TIME_QUEUE_PRIMARY_TIMEOUT_MS = 3500;
+const TIME_QUEUE_POLL_INTERVAL_MS = 1000;
 const REPORT_API_BASE =
   // The desktop launcher opens index.html directly. It must use the same
   // cloud API as the hosted app, otherwise its browser-only data can never
@@ -326,6 +329,13 @@ modules.splice(
     hidden: true
   },
   {
+    id: "record-report",
+    label: "รายงานบันทึก",
+    roles: ["admin"],
+    description: "พื้นที่สำหรับรายงานบันทึกของระบบ",
+    icon: "▧"
+  },
+  {
     id: "settings",
     label: "ตั้งค่า",
     roles: ["admin"],
@@ -391,6 +401,7 @@ modules.forEach((moduleItem) => {
 });
 
 const adminSettingsModuleIds = new Set([
+  "record-report",
   "settings",
   "employees",
   "production-employees",
@@ -633,6 +644,11 @@ let weeklyTimeEmployeeCode = "";
 let weeklyTimeDraft = Array.from({ length: 7 }, () => ({ clock_in: "", clock_out: "" }));
 let editingTimeRecordId = null;
 let timeRecordSaving = false;
+let timeQueueItems = [];
+let timeQueueLoading = false;
+let timeQueueLoadedOnce = false;
+let timeQueueLoadError = "";
+const timeQueueTrackers = new Map();
 let deductionActiveTab = "production";
 let deductionBonusEmployeeKind = "time";
 let deductionApprovalEmployeeKind = "production";
@@ -1107,7 +1123,7 @@ function getDefaultRouteForUser(user) {
 }
 
 function visibleNavModulesForUser(user) {
-  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "settings"];
+  const navRouteIds = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "record-report", "settings"];
   return navRouteIds
     .map((routeId) => modules.find((item) => item.id === routeId))
     .filter((item) => item && !item.hidden)
@@ -1744,6 +1760,114 @@ async function refreshProductionQueue({ renderAfter = true } = {}) {
   } finally {
     productionQueueLoading = false;
     if (renderAfter && productionView === "queue") render();
+  }
+}
+
+function createTimeQueueUid(operation, records) {
+  const seed = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const recordId = operation === "update" ? `:${records[0]?.id || ""}` : "";
+  return `time-queue:${operation}${recordId}:${seed}`;
+}
+
+function timeQueueNumber(item) {
+  if (item?.queue_no) return item.queue_no;
+  return Number(item?.id) ? `TQ-${String(item.id).padStart(6, "0")}` : "TQ------";
+}
+
+function mergeTimeQueueItem(item) {
+  if (!item || !Number(item.id)) return item;
+  const index = timeQueueItems.findIndex((row) => Number(row.id) === Number(item.id));
+  if (index >= 0) timeQueueItems[index] = { ...timeQueueItems[index], ...item };
+  else timeQueueItems.unshift(item);
+  timeQueueItems.sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+  if (item.status === "succeeded" && Array.isArray(item.result_payload)) {
+    mergeTimeCloudRows(item.result_payload);
+  }
+  return item;
+}
+
+async function enqueueTimeRows(records, operation = "insert") {
+  const rows = (Array.isArray(records) ? records : [records]).filter(Boolean);
+  if (!rows.length) throw new Error("ไม่มีข้อมูลเวลาสำหรับเข้าคิว");
+  const queueUid = createTimeQueueUid(operation, rows);
+  const startedAt = Date.now();
+  try {
+    const response = await cloudApiRequest("/api/time-save-queue/enqueue", {
+      method: "POST",
+      body: JSON.stringify({ queue_uid: queueUid, operation, records: rows }),
+      timeoutMs: TIME_QUEUE_PRIMARY_TIMEOUT_MS
+    });
+    const item = mergeTimeQueueItem(response.data);
+    if (!item?.id) throw new Error("ฐานข้อมูลไม่ได้ส่งเลขคิวเวลา กรุณาลองอีกครั้ง");
+    trackTimeQueueItem(item.id);
+    return item;
+  } catch (error) {
+    if (!isTransientCloudError(error)) throw error;
+    const remainingMs = TIME_QUEUE_ACCEPT_TIMEOUT_MS - (Date.now() - startedAt);
+    if (remainingMs > 300) {
+      try {
+        const lookup = await cloudApiRequest(
+          `/api/time-save-queue/lookup?queue_uid=${encodeURIComponent(queueUid)}`,
+          { timeoutMs: remainingMs }
+        );
+        const item = mergeTimeQueueItem(lookup.data);
+        if (item?.id) {
+          trackTimeQueueItem(item.id);
+          return item;
+        }
+      } catch (lookupError) {
+        console.warn("Time queue lookup failed.", lookupError);
+      }
+    }
+    throw new Error("ยังยืนยันไม่ได้ว่าฐานรับคิวเวลาแล้ว ข้อมูลในช่องกรอกยังอยู่ กรุณาตรวจอินเทอร์เน็ตแล้วกดอีกครั้ง");
+  }
+}
+
+function trackTimeQueueItem(queueId, attempt = 0) {
+  const id = Number(queueId);
+  if (!id || timeQueueTrackers.has(id)) return;
+  const poll = async () => {
+    timeQueueTrackers.delete(id);
+    try {
+      const response = await cloudApiRequest(`/api/time-save-queue/${id}`, { timeoutMs: TIME_QUEUE_ACCEPT_TIMEOUT_MS });
+      const item = mergeTimeQueueItem(response.data);
+      if (["succeeded", "needs_review", "failed"].includes(item?.status)) {
+        if (location.hash === "#/time-records") render();
+        return;
+      }
+    } catch (error) {
+      console.warn(`Time queue ${id} refresh failed.`, error);
+    }
+    if (attempt < 30) {
+      const timer = window.setTimeout(() => {
+        timeQueueTrackers.delete(id);
+        trackTimeQueueItem(id, attempt + 1);
+      }, TIME_QUEUE_POLL_INTERVAL_MS);
+      timeQueueTrackers.set(id, timer);
+    }
+  };
+  const timer = window.setTimeout(poll, attempt === 0 ? 250 : TIME_QUEUE_POLL_INTERVAL_MS);
+  timeQueueTrackers.set(id, timer);
+}
+
+async function refreshTimeQueue({ renderAfter = false } = {}) {
+  if (timeQueueLoading) return;
+  timeQueueLoading = true;
+  try {
+    const response = await cloudApiRequest("/api/time-save-queue?limit=60", { timeoutMs: 7000 });
+    timeQueueItems = Array.isArray(response.data) ? response.data : [];
+    timeQueueLoadError = "";
+    timeQueueItems.forEach((item) => {
+      mergeTimeQueueItem(item);
+      if (["queued", "processing"].includes(item.status)) trackTimeQueueItem(item.id);
+    });
+  } catch (error) {
+    console.warn("Time queue refresh failed.", error);
+    timeQueueLoadError = error instanceof Error ? error.message : "โหลดคิวบันทึกเวลาไม่สำเร็จ";
+  } finally {
+    timeQueueLoading = false;
+    timeQueueLoadedOnce = true;
+    if (renderAfter && location.hash === "#/time-records") render();
   }
 }
 
@@ -4018,25 +4142,15 @@ function shouldAuditTimeRecordEdit(record, now = new Date()) {
 }
 
 async function apiCreateTimeRecord(payload, user) {
-  const records = getTimeRecords();
   const recordDate = String(payload.record_date || "").trim();
   const empCode = normalizeTimeEmployeeCodeInput(payload.emp_code);
   const record = buildTimeRecord(payload, user);
   assertNoConflictingTimeRecord(empCode, recordDate, record.clock_in, record.clock_out);
-
-  const [cloudRecord] = await saveTimeRowsToCloud(record, { mode: "insert" });
-  const savedRecord = cloudRecord || record;
-  saveTimeRecordsLocal([...records.filter((item) => Number(item.id) !== Number(savedRecord.id)), savedRecord]);
-  addAuditLog(
-    user,
-    "INSERT_TIME_RECORD",
-    `Added time record ${savedRecord.emp_code} ${savedRecord.clock_in}-${savedRecord.clock_out}`
-  );
-  return savedRecord;
+  const queueItem = await enqueueTimeRows([record], "insert");
+  return { ...record, queue_item: queueItem };
 }
 
 async function apiCreateTimeRecords(payloads, user) {
-  const records = getTimeRecords();
   const pendingRecords = payloads.map((payload) => buildTimeRecord(payload, user));
   pendingRecords.forEach((record, index) => {
     assertNoConflictingTimeRecord(
@@ -4058,20 +4172,8 @@ async function apiCreateTimeRecords(payloads, user) {
     }
   });
 
-  const cloudRecords = await saveTimeRowsToCloud(pendingRecords, { mode: "insert" });
-  const cloudIds = new Set(cloudRecords.map((record) => Number(record.id)));
-  saveTimeRecordsLocal([
-    ...records.filter((record) => !cloudIds.has(Number(record.id))),
-    ...cloudRecords
-  ]);
-  cloudRecords.forEach((record) => {
-    addAuditLog(
-      user,
-      "INSERT_TIME_RECORD",
-      `Added time record ${record.emp_code} ${record.clock_in}-${record.clock_out}`
-    );
-  });
-  return cloudRecords;
+  const queueItem = await enqueueTimeRows(pendingRecords, "insert");
+  return { records: pendingRecords, queue_item: queueItem };
 }
 
 async function apiUpdateTimeRecord(id, payload, user) {
@@ -4097,17 +4199,15 @@ async function apiUpdateTimeRecord(id, payload, user) {
     id
   );
 
-  const [cloudRecord] = await saveTimeRowsToCloud(nextRecord, { mode: "upsert" });
-  const savedRecord = cloudRecord || nextRecord;
-  saveTimeRecordsLocal(records.map((record) => (record.id === id ? savedRecord : record)));
-  if (shouldAuditTimeRecordEdit(existingRecord)) {
-    addAuditLog(
-      user,
-      "UPDATE_TIME_RECORD",
-      `Edited time record ${existingRecord.emp_code} #${id}: ${existingRecord.record_date} ${existingRecord.clock_in}-${existingRecord.clock_out} -> ${savedRecord.record_date} ${savedRecord.clock_in}-${savedRecord.clock_out}`
-    );
-  }
-  return savedRecord;
+  nextRecord.audit_required = shouldAuditTimeRecordEdit(existingRecord);
+  nextRecord.audit_before = {
+    record_date: existingRecord.record_date,
+    emp_code: existingRecord.emp_code,
+    clock_in: existingRecord.clock_in,
+    clock_out: existingRecord.clock_out
+  };
+  const queueItem = await enqueueTimeRows([nextRecord], "update");
+  return { ...nextRecord, queue_item: queueItem };
 }
 
 async function apiDeleteTimeRecord(id, user) {
@@ -4896,7 +4996,7 @@ function renderApp(user, route) {
 
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
   const visibleModules = visibleNavModulesForUser(user);
-  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "settings"];
+  const navOrder = ["dashboard", "production", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "record-report", "settings"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
   const secretUnreadCount = Number(window.SecretRoom?.getUnreadCount?.() || 0);
@@ -5048,6 +5148,9 @@ function renderModuleContent(user, moduleItem) {
   }
   if (moduleItem.id === "pile-management") {
     return renderPileManagement(moduleItem);
+  }
+  if (moduleItem.id === "record-report") {
+    return renderRecordReportPlaceholder(moduleItem);
   }
   if (moduleItem.id === "settings") {
     return renderFullSettingsModule(user);
@@ -6267,6 +6370,26 @@ function renderSimpleModule(moduleItem) {
   `;
 }
 
+function renderRecordReportPlaceholder(moduleItem) {
+  return `
+    <section class="panel record-report-placeholder">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Pitsamai Factory Wage</p>
+          <h2>${escapeHtml(moduleItem.label)}</h2>
+          <p>${escapeHtml(moduleItem.description)}</p>
+        </div>
+        <span class="badge badge-warning">เตรียมไว้ก่อน</span>
+      </div>
+      <div class="record-report-empty">
+        <span class="record-report-empty-icon" aria-hidden="true">▧</span>
+        <strong>หน้ารายงานบันทึก</strong>
+        <p>พื้นที่นี้เตรียมไว้สำหรับเพิ่มรูปแบบรายงานในขั้นตอนถัดไป</p>
+      </div>
+    </section>
+  `;
+}
+
 function renderSettingsBackBar() {
   return `
     <section class="settings-back-bar">
@@ -7186,6 +7309,8 @@ const BACKUP_DATA_KEYS = [
   "deduction_applications",
   "production_save_queue",
   "production_save_queue_events",
+  "time_save_queue",
+  "time_save_queue_events",
   "audit_logs",
   "community_posts",
   "secret_messages"
@@ -7240,11 +7365,13 @@ function backupGroupSummaries(data = backupPayloadData()) {
       icon: "ข้อมูล"
     },
     {
-      label: "คิวการบันทึกผลผลิต",
-      detail: "รายการคิว สถานะ และเหตุการณ์ตรวจสอบย้อนหลัง",
+      label: "คิวการบันทึก",
+      detail: "คิวผลผลิต คิวเวลา สถานะ และเหตุการณ์ตรวจสอบย้อนหลัง",
       count:
         backupRows(data, "production_save_queue").length +
-        backupRows(data, "production_save_queue_events").length,
+        backupRows(data, "production_save_queue_events").length +
+        backupRows(data, "time_save_queue").length +
+        backupRows(data, "time_save_queue_events").length,
       icon: "คิว"
     },
     {
@@ -10724,6 +10851,40 @@ function reportExportError(error) {
   render();
 }
 
+function renderTimeQueuePanel() {
+  const active = timeQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length;
+  const review = timeQueueItems.filter((item) => ["needs_review", "failed"].includes(item.status)).length;
+  const rows = timeQueueItems.slice(0, 8);
+  const statusMeta = (status) => ({
+    queued: ["รอคิว", "queued"],
+    processing: ["กำลังบันทึก", "processing"],
+    succeeded: ["บันทึกสำเร็จ", "succeeded"],
+    needs_review: ["ต้องตรวจสอบ", "review"],
+    failed: ["ไม่สำเร็จ", "review"]
+  }[status] || [status || "-", "queued"]);
+  return `
+    <section class="panel time-queue-panel">
+      <div class="time-queue-head">
+        <div><span>Save Queue</span><h3>คิวบันทึกเวลา</h3><p>รับข้อมูลเข้าฐานกลางก่อน แล้วตรวจสอบและบันทึกต่ออัตโนมัติ</p></div>
+        <div class="time-queue-metrics"><span><b>${active}</b> กำลังทำงาน</span><span class="${review ? "has-review" : ""}"><b>${review}</b> ต้องตรวจ</span><button class="btn btn-small btn-outline" data-refresh-time-queue type="button">รีเฟรช</button></div>
+      </div>
+      <div class="time-queue-list">
+        ${timeQueueLoadError ? `<div class="alert alert-error">${escapeHtml(timeQueueLoadError)} · กรุณารันไฟล์ supabase_time_save_queue_migration.sql ใน Supabase</div>` : ""}
+        ${timeQueueLoading && !rows.length ? `<div class="empty-cell">กำลังโหลดคิว...</div>` : rows.length ? rows.map((item) => {
+          const [label, className] = statusMeta(item.status);
+          return `<article class="time-queue-row ${className}">
+            <div><small>เลขคิว</small><strong>${escapeHtml(timeQueueNumber(item))}</strong></div>
+            <div><small>พนักงาน</small><strong>${escapeHtml(item.emp_code || "-")} · ${escapeHtml(item.employee_name || "-")}</strong></div>
+            <div><small>วันที่ / จำนวน</small><strong>${escapeHtml(item.first_work_date || "-")}${item.last_work_date && item.last_work_date !== item.first_work_date ? ` ถึง ${escapeHtml(item.last_work_date)}` : ""} · ${item.record_count || 1} รายการ</strong></div>
+            <div><small>ผู้บันทึก</small><strong>${escapeHtml(item.created_by || "-")}</strong></div>
+            <div class="time-queue-status"><span>${escapeHtml(label)}</span>${item.error_message ? `<small title="${escapeHtml(item.error_message)}">${escapeHtml(item.error_message)}</small>` : ""}</div>
+          </article>`;
+        }).join("") : `<div class="empty-cell">ยังไม่มีประวัติคิวบันทึกเวลา</div>`}
+      </div>
+    </section>
+  `;
+}
+
 function bindReportEvents() {
   document.querySelector("#reportDate")?.addEventListener("change", (event) => {
     reportDate = event.target.value || new Date().toISOString().slice(0, 10);
@@ -10813,6 +10974,8 @@ function renderTimeReport(user, moduleItem) {
       </section>
 
       ${renderTimeModeSelector()}
+
+      ${renderTimeQueuePanel()}
 
       ${
         timeRecordMessage
@@ -11158,6 +11321,8 @@ function handleWeeklyTimeEnter(event) {
 }
 
 function bindTimeReportEvents(user) {
+  if (!timeQueueLoadedOnce && !timeQueueLoading) refreshTimeQueue({ renderAfter: true });
+  document.querySelector("[data-refresh-time-queue]")?.addEventListener("click", () => refreshTimeQueue({ renderAfter: true }));
   document.querySelectorAll("[data-time-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       timeEntryMode = button.dataset.timeMode || "daily";
@@ -11258,13 +11423,13 @@ function bindTimeReportEvents(user) {
     }
 
     try {
-      const savedRecords = await apiCreateTimeRecords(payloads, user);
+      const queuedBatch = await apiCreateTimeRecords(payloads, user);
       const nextEmployeeCode = getNextAvailableTimeEntryEmployeeCode(empCode, timeRecordDate);
       clearWeeklyTimeDraft();
       weeklyTimeEmployeeCode = nextEmployeeCode;
       timeEntryEmployeeCode = nextEmployeeCode;
       setTimeRecordMessage(
-        `บันทึกรายสัปดาห์สำเร็จ ${savedRecords.length} วัน` +
+        `รับเข้าคิว ${timeQueueNumber(queuedBatch.queue_item)} แล้ว ${queuedBatch.records.length} วัน` +
         `${nextEmployeeCode ? ` · เลื่อนไปพนักงาน ${nextEmployeeCode} แล้ว` : ""}`
       );
       setTimeSummaryRangeToCurrentWeek();
@@ -11346,11 +11511,11 @@ function bindTimeReportEvents(user) {
       const record = editingTimeRecordId
         ? await apiUpdateTimeRecord(editingTimeRecordId, payload, user)
         : await apiCreateTimeRecord(payload, user);
-      const actionText = wasEditing ? "แก้ไข" : "บันทึก";
+      const actionText = wasEditing ? "รับการแก้ไขเข้าคิว" : "รับเข้าคิว";
       const nextEmployeeCode = getNextAvailableTimeEntryEmployeeCode(record.emp_code, timeRecordDate);
       editingTimeRecordId = null;
       timeEntryEmployeeCode = nextEmployeeCode;
-      setTimeRecordMessage(`${actionText} ${record.emp_code} ${record.clock_in}-${record.clock_out} สุทธิ ${formatMinutesToHourText(record.net_minutes)} ชั่วโมง${nextEmployeeCode ? ` · ถัดไป ${nextEmployeeCode}` : " · ครบทุกคนในวันนี้แล้ว"}`);
+      setTimeRecordMessage(`${actionText} ${timeQueueNumber(record.queue_item)} · ${record.emp_code} ${record.clock_in}-${record.clock_out} สุทธิ ${formatMinutesToHourText(record.net_minutes)} ชั่วโมง${nextEmployeeCode ? ` · ถัดไป ${nextEmployeeCode}` : ""}`);
     } catch (error) {
       setTimeRecordMessage(error instanceof Error ? error.message : "บันทึกเวลาไม่สำเร็จ", "error");
     } finally {
