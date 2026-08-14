@@ -15133,16 +15133,18 @@ function getSummaryExportPayload(user, format) {
 
 function renderSummaryAll(moduleItem) {
   const user = getSession()?.user;
-  const selectedDate = getSelectedSummaryDate();
-  summaryDate = selectedDate;
+  const exportRange = getSummaryExportRange();
+  const rangeLabel =
+    exportRange.startDate === exportRange.endDate
+      ? exportRange.startDate
+      : `${exportRange.startDate} ถึง ${exportRange.endDate}`;
 
   const records = filterProductionRecordsByFruit(
-    getDashboardRecordsForDate(selectedDate),
+    getDashboardRecordsForRange(exportRange.startDate, exportRange.endDate),
     summaryFruitFilter
   );
   const totals = getProductionTotals(records);
   const pileSummaries = getPileSummaries(records);
-  const exportRange = getSummaryExportRange();
   const showGrades = summaryFruitFilter === "all" || summaryFruitFilter === "durian";
   const showStandardWeights = summaryFruitFilter !== "durian";
   const showFruitColumn = summaryFruitFilter === "all";
@@ -15157,24 +15159,7 @@ function renderSummaryAll(moduleItem) {
       <div class="summary-header">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>เลือกวันที่เพื่อดูข้อมูล และเลือกเฉพาะส่วน/ฟิลด์ที่ต้องการ Export ได้</p>
-        </div>
-        <div class="summary-filters">
-          <label class="summary-date-field">
-            <span>วันที่</span>
-            <input id="summaryDate" type="date" value="${escapeHtml(selectedDate)}" />
-          </label>
-          <label class="summary-date-field">
-            <span>ผลไม้</span>
-            <select id="summaryFruitFilter">
-              <option value="all" ${summaryFruitFilter === "all" ? "selected" : ""}>ทุกผลไม้</option>
-              ${productionFruitOptions
-                .filter((fruit) => productionFruitFieldLabels[fruit.id])
-                .map((fruit) => `<option value="${escapeHtml(fruit.id)}" ${summaryFruitFilter === fruit.id ? "selected" : ""}>${escapeHtml(fruit.label)}</option>`)
-                .join("")}
-            </select>
-          </label>
-          <span class="summary-mode-pill">${records.length.toLocaleString("th-TH")} รายการ</span>
+          <p>เลือกช่วงวันที่และผลไม้เพื่อดูข้อมูล กราฟ ตาราง และ Export ตามช่วงที่เลือก</p>
         </div>
       </div>
 
@@ -15186,8 +15171,8 @@ function renderSummaryAll(moduleItem) {
 
       <section class="summary-export-panel summary-main-export-workspace">
         <div>
-          <strong>Export ข้อมูลสรุป</strong>
-          <span>เลือกช่วงวันที่ ส่วนรายงาน และฟิลด์ที่ต้องการส่งออก</span>
+          <strong>ตัวกรองและ Export ข้อมูลสรุป</strong>
+          <span>ข้อมูลบนหน้านี้จะแสดงตามช่วงวันที่และผลไม้ที่เลือก</span>
         </div>
         <div class="summary-export-range">
           <label>
@@ -15198,6 +15183,17 @@ function renderSummaryAll(moduleItem) {
             <span>ถึงวันที่</span>
             <input id="summaryExportEnd" type="date" value="${escapeHtml(exportRange.endDate)}" />
           </label>
+          <label>
+            <span>ผลไม้</span>
+            <select id="summaryFruitFilter">
+              <option value="all" ${summaryFruitFilter === "all" ? "selected" : ""}>ทุกผลไม้</option>
+              ${productionFruitOptions
+                .filter((fruit) => productionFruitFieldLabels[fruit.id])
+                .map((fruit) => `<option value="${escapeHtml(fruit.id)}" ${summaryFruitFilter === fruit.id ? "selected" : ""}>${escapeHtml(fruit.label)}</option>`)
+                .join("")}
+            </select>
+          </label>
+          <span class="summary-mode-pill">${records.length.toLocaleString("th-TH")} รายการ</span>
         </div>
         <div class="summary-export-options">
           <label><input type="checkbox" data-summary-export-option="overview" ${summaryExportOptions.overview ? "checked" : ""} /> ภาพรวม</label>
@@ -15243,7 +15239,7 @@ function renderSummaryAll(moduleItem) {
         <div class="metric-card metric-blue">
           <span>ยอดเงินรวม</span>
           <strong>${money(totals.amount)}</strong>
-          <small>จากรายการวันที่เลือก</small>
+          <small>จากช่วงวันที่เลือก</small>
         </div>
         <div class="metric-card metric-purple">
           <span>พนักงานทั้งหมด</span>
@@ -15253,7 +15249,7 @@ function renderSummaryAll(moduleItem) {
         <div class="metric-card metric-orange">
           <span>จำนวนกอง</span>
           <strong>${pileSummaries.length.toLocaleString("th-TH")}</strong>
-          <small>${escapeHtml(selectedDate)}</small>
+          <small>${escapeHtml(rangeLabel)}</small>
         </div>
       </div>
 
@@ -15267,7 +15263,7 @@ function renderSummaryAll(moduleItem) {
             </div>
           </div>
           <div class="summary-chart">
-            ${pileSummaries.length ? renderDashboardBars(pileSummaries, summaryFruitFilter) : `<div class="empty-state">ยังไม่มีข้อมูลสำหรับวันที่เลือก</div>`}
+            ${pileSummaries.length ? renderDashboardBars(pileSummaries, summaryFruitFilter) : `<div class="empty-state">ยังไม่มีข้อมูลสำหรับช่วงวันที่เลือก</div>`}
           </div>
         </section>
 
@@ -15288,7 +15284,7 @@ function renderSummaryAll(moduleItem) {
                 ${
                   pileSummaries.length
                     ? pileSummaries.map((item) => renderPileSummaryRow(item, summaryFruitFilter)).join("")
-                    : `<tr><td colspan="${pileColumnCount}" class="empty-cell">ยังไม่มีข้อมูลสำหรับวันที่เลือก</td></tr>`
+                    : `<tr><td colspan="${pileColumnCount}" class="empty-cell">ยังไม่มีข้อมูลสำหรับช่วงวันที่เลือก</td></tr>`
                 }
               </tbody>
             </table>
@@ -15318,7 +15314,7 @@ function renderSummaryAll(moduleItem) {
               ${
                 records.length
                   ? records.map((record) => renderDashboardDetailRow(record, summaryFruitFilter)).join("")
-                  : `<tr><td colspan="${detailColumnCount}" class="empty-cell">ยังไม่มีข้อมูลสำหรับวันที่เลือก</td></tr>`
+                  : `<tr><td colspan="${detailColumnCount}" class="empty-cell">ยังไม่มีข้อมูลสำหรับช่วงวันที่เลือก</td></tr>`
               }
             </tbody>
           </table>
@@ -15352,6 +15348,9 @@ function exportSummaryData() {
 
   const totals = getProductionTotals(records);
   const pileSummaries = getPileSummaries(records);
+  const fruitLabels = summaryFruitFilter === "all"
+    ? { water: "น้ำหนักช่อง 1", flower: "น้ำหนักช่อง 2" }
+    : getProductionFieldLabels(summaryFruitFilter);
   const rangeLabel =
     exportRange.startDate === exportRange.endDate
       ? exportRange.startDate
@@ -15474,15 +15473,6 @@ async function exportProductionSummaryReport(user, format) {
 
 function bindSummaryAllEvents() {
   const user = getSession()?.user;
-  document.querySelector("#summaryDate")?.addEventListener("change", (event) => {
-    summaryDate = event.target.value || new Date().toISOString().slice(0, 10);
-    summaryExportStartDate = summaryDate;
-    summaryExportEndDate = summaryDate;
-    summaryMainExportMenuOpen = false;
-    summaryExportMessage = "";
-    render();
-  });
-
   document.querySelector("#summaryFruitFilter")?.addEventListener("change", (event) => {
     summaryFruitFilter = event.target.value || "mangosteen";
     summaryMainExportMenuOpen = false;
@@ -15492,12 +15482,14 @@ function bindSummaryAllEvents() {
 
   document.querySelector("#summaryExportStart")?.addEventListener("change", (event) => {
     summaryExportStartDate = event.target.value || getSelectedSummaryDate();
+    summaryDate = summaryExportStartDate;
     summaryExportMessage = "";
     render();
   });
 
   document.querySelector("#summaryExportEnd")?.addEventListener("change", (event) => {
     summaryExportEndDate = event.target.value || summaryExportStartDate || getSelectedSummaryDate();
+    summaryDate = summaryExportStartDate || summaryExportEndDate;
     summaryExportMessage = "";
     render();
   });

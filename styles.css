@@ -1843,7 +1843,8 @@ input:disabled {
   font-weight: 700;
 }
 
-.summary-export-range input {
+.summary-export-range input,
+.summary-export-range select {
   height: 38px;
   min-width: 150px;
   border: 1px solid #cbd5e1;
@@ -1851,6 +1852,11 @@ input:disabled {
   padding: 0 10px;
   color: #111827;
   background: #ffffff;
+}
+
+.summary-main-export-workspace .summary-export-range .summary-mode-pill {
+  align-self: end;
+  min-height: 38px;
 }
 
 .summary-export-options {
