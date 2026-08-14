@@ -92,12 +92,16 @@ BACKUP_TABLES = [
     "audit_logs",
     "community_posts",
     "secret_messages",
+    "inbound_fruits",
+    "inbound_fruit_prices",
+    "inbound_receipts",
 ]
 QUEUE_BACKUP_TABLES = [
     "production_save_queue", "production_save_queue_events",
     "time_save_queue", "time_save_queue_events",
 ]
 MAIN_CLEAR_TABLES = [
+    "inbound_receipts",
     "deduction_applications",
     "deduction_records",
     "time_records",
@@ -228,6 +232,27 @@ def production_record_within_self_edit_window(
 def secret_room_actor(handler: BaseHTTPRequestHandler) -> dict | None:
     """All signed-in website accounts may use the internal collaboration area."""
     return verify_session_token(handler.headers.get("X-Session-Token", ""))
+
+
+def inbound_clean_text(value: object, maximum: int) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())[:maximum]
+
+
+def inbound_actor_name(actor: dict) -> str:
+    return inbound_clean_text(actor.get("username"), 120) or "unknown"
+
+
+def inbound_audit(handler: BaseHTTPRequestHandler, actor: dict, action: str, detail: str, metadata: dict) -> tuple[int, object]:
+    username = inbound_actor_name(actor)
+    return insert_audit_log_compatible({
+        "action": action,
+        "module": "inbound",
+        "description": detail,
+        "created_by": username,
+        "user_fullname": username,
+        "ip_address": handler.client_address[0] if handler.client_address else None,
+        "metadata": {"action": action, "module": "inbound", "detail": detail, "username": username, **metadata},
+    })
 
 
 ISSUE_REPORT_CATEGORIES = {"system", "data", "display", "performance", "other"}
@@ -7017,6 +7042,110 @@ class ReportHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         payload = self.read_json()
 
+        if parsed.path == "/api/inbound/fruits":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            if account_level_number(actor.get("level")) < 4:
+                self.send_json({"error": "C4 or higher is required to manage inbound fruit."}, 403)
+                return
+            name = inbound_clean_text(payload.get("name"), 100)
+            if not name:
+                self.send_json({"error": "กรุณากรอกชื่อผลไม้"}, 400)
+                return
+            row = {"name": name, "normalized_name": name.casefold(), "status": "Active", "created_by": inbound_actor_name(actor)}
+            status, body = supabase_request("POST", "inbound_fruits", row, prefer="return=representation")
+            if status >= 400:
+                self.send_json({"error": "ชื่อผลไม้นี้มีอยู่แล้ว" if status == 409 else body, "migration": "supabase_inbound_receiving_migration.sql"}, status)
+                return
+            saved = body[0] if isinstance(body, list) and body else body
+            inbound_audit(self, actor, "CREATE_INBOUND_FRUIT", f"เพิ่มผลไม้รับเข้า: {name}", {"fruit_id": saved.get("id") if isinstance(saved, dict) else None})
+            self.send_json({"data": saved}, 201)
+            return
+
+        if parsed.path == "/api/inbound/prices":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            if account_level_number(actor.get("level")) < 4:
+                self.send_json({"error": "C4 or higher is required to set recommended prices."}, 403)
+                return
+            try:
+                fruit_id = int(payload.get("fruit_id") or 0)
+                price = round(float(payload.get("price_per_kg") or 0), 2)
+                effective_date = str(payload.get("effective_date") or "")
+                datetime.strptime(effective_date, "%Y-%m-%d")
+            except (TypeError, ValueError):
+                self.send_json({"error": "ข้อมูลผลไม้ ราคา หรือวันที่เริ่มใช้ไม่ถูกต้อง"}, 400)
+                return
+            if fruit_id <= 0 or price <= 0 or price > 1000000:
+                self.send_json({"error": "ราคาต่อกิโลต้องมากกว่า 0"}, 400)
+                return
+            fruit_status, fruits = supabase_request("GET", f"inbound_fruits?id=eq.{fruit_id}&status=eq.Active&select=id,name&limit=1")
+            if fruit_status >= 400 or not isinstance(fruits, list) or not fruits:
+                self.send_json({"error": "ไม่พบผลไม้ที่เปิดใช้งาน"}, 404)
+                return
+            row = {"fruit_id": fruit_id, "price_per_kg": price, "effective_date": effective_date, "note": inbound_clean_text(payload.get("note"), 500), "created_by": inbound_actor_name(actor)}
+            status, body = supabase_request("POST", "inbound_fruit_prices", row, prefer="return=representation")
+            if status >= 400:
+                self.send_json({"error": body, "migration": "supabase_inbound_receiving_migration.sql"}, status)
+                return
+            saved = body[0] if isinstance(body, list) and body else body
+            inbound_audit(self, actor, "SET_INBOUND_PRICE", f"ตั้งราคาแนะนำ {fruits[0]['name']} {price:.2f} บาท/กก.", {"fruit_id": fruit_id, "price_per_kg": price, "effective_date": effective_date})
+            self.send_json({"data": saved}, 201)
+            return
+
+        if parsed.path == "/api/inbound/receipts":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            try:
+                fruit_id = int(payload.get("fruit_id") or 0)
+                weight = round(float(payload.get("weight_kg") or 0), 2)
+                price = round(float(payload.get("price_per_kg") or 0), 2)
+                received_at = datetime.fromisoformat(str(payload.get("received_at") or "").replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                self.send_json({"error": "ข้อมูลวันที่ ผลไม้ น้ำหนัก หรือราคาไม่ถูกต้อง"}, 400)
+                return
+            supplier = inbound_clean_text(payload.get("supplier_name"), 160)
+            client_uid = inbound_clean_text(payload.get("client_uid"), 160)
+            if not supplier or not re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", client_uid) or fruit_id <= 0 or weight <= 0 or price <= 0:
+                self.send_json({"error": "กรุณากรอกผู้ส่ง ผลไม้ น้ำหนัก และราคาให้ครบ"}, 400)
+                return
+            if weight > 100000000 or price > 1000000:
+                self.send_json({"error": "น้ำหนักหรือราคาเกินขอบเขตที่รองรับ"}, 400)
+                return
+            fruit_status, fruits = supabase_request("GET", f"inbound_fruits?id=eq.{fruit_id}&status=eq.Active&select=id,name&limit=1")
+            if fruit_status >= 400 or not isinstance(fruits, list) or not fruits:
+                self.send_json({"error": "ไม่พบผลไม้ที่เปิดใช้งาน"}, 404)
+                return
+            total = round(weight * price + 1e-9, 2)
+            row = {
+                "client_uid": client_uid, "received_at": received_at.astimezone(timezone.utc).isoformat(),
+                "supplier_name": supplier, "fruit_id": fruit_id, "fruit_name": fruits[0]["name"],
+                "weight_kg": weight, "price_per_kg": price, "total_amount": total,
+                "note": inbound_clean_text(payload.get("note"), 1000), "created_by": inbound_actor_name(actor),
+            }
+            status, body = supabase_request("POST", "inbound_receipts", row, prefer="return=representation")
+            if status >= 400:
+                existing_status, existing = supabase_request("GET", f"inbound_receipts?client_uid=eq.{quote(client_uid)}&select=*&limit=1")
+                if existing_status < 400 and isinstance(existing, list) and existing:
+                    self.send_json({"data": existing[0], "idempotent": True})
+                    return
+                self.send_json({"error": body, "migration": "supabase_inbound_receiving_migration.sql"}, status)
+                return
+            saved = body[0] if isinstance(body, list) and body else body
+            audit_status, audit_body = inbound_audit(self, actor, "CREATE_INBOUND_RECEIPT", f"รับเข้า {fruits[0]['name']} จาก {supplier} {weight:.2f} กก. @ {price:.2f} = {total:.2f} บาท", {"receipt_id": saved.get("id") if isinstance(saved, dict) else None, "client_uid": client_uid})
+            if audit_status >= 400 and isinstance(saved, dict) and saved.get("id"):
+                supabase_request("DELETE", f"inbound_receipts?id=eq.{saved['id']}", prefer="return=minimal")
+                self.send_json({"error": "บันทึก Audit Log ไม่สำเร็จ รายการจึงถูกย้อนกลับ", "audit_error": audit_body}, 500)
+                return
+            self.send_json({"data": saved}, 201)
+            return
+
         if parsed.path == "/api/online-users":
             self.send_json({"data": register_online_user(payload)})
             return
@@ -9198,6 +9327,25 @@ class ReportHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+
+        if parsed.path == "/api/inbound/bootstrap":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            results = {}
+            for key, request_path in {
+                "fruits": "inbound_fruits?select=*&order=name.asc",
+                "prices": "inbound_fruit_prices?select=*&order=effective_date.desc,created_at.desc&limit=1000",
+                "receipts": "inbound_receipts?select=*&order=received_at.desc&limit=5000",
+            }.items():
+                status, body = supabase_get_all(request_path) if key == "receipts" else supabase_request("GET", request_path)
+                if status >= 400:
+                    self.send_json({"error": body, "migration": "supabase_inbound_receiving_migration.sql"}, status)
+                    return
+                results[key] = body if isinstance(body, list) else []
+            self.send_json({"data": results})
+            return
 
         if parsed.path == "/api/online-users":
             self.send_json({"data": online_user_snapshot()})

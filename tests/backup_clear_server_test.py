@@ -14,6 +14,9 @@ class BackupClearServerTests(unittest.TestCase):
             self.assertNotIn(table, report_server.MAIN_CLEAR_TABLES)
         for table in ["production_records", "time_records", "deduction_records", "deduction_applications"]:
             self.assertIn(table, report_server.MAIN_CLEAR_TABLES)
+        self.assertIn("inbound_receipts", report_server.MAIN_CLEAR_TABLES)
+        self.assertNotIn("inbound_fruits", report_server.MAIN_CLEAR_TABLES)
+        self.assertNotIn("inbound_fruit_prices", report_server.MAIN_CLEAR_TABLES)
         self.assertLess(
             report_server.BACKUP_TABLES.index("production_save_queue"),
             report_server.BACKUP_TABLES.index("production_save_queue_events"),
