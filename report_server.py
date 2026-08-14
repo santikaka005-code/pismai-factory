@@ -242,6 +242,11 @@ def inbound_actor_name(actor: dict) -> str:
     return inbound_clean_text(actor.get("username"), 120) or "unknown"
 
 
+def inbound_authorized_actor(handler: BaseHTTPRequestHandler) -> dict | None:
+    actor = secret_room_actor(handler)
+    return actor if actor and account_level_number(actor.get("level")) >= 5 else None
+
+
 def inbound_audit(handler: BaseHTTPRequestHandler, actor: dict, action: str, detail: str, metadata: dict) -> tuple[int, object]:
     username = inbound_actor_name(actor)
     return insert_audit_log_compatible({
@@ -7043,12 +7048,9 @@ class ReportHandler(BaseHTTPRequestHandler):
         payload = self.read_json()
 
         if parsed.path == "/api/inbound/fruits":
-            actor = secret_room_actor(self)
+            actor = inbound_authorized_actor(self)
             if not actor:
-                self.send_json({"error": "A signed-in session is required."}, 401)
-                return
-            if account_level_number(actor.get("level")) < 4:
-                self.send_json({"error": "C4 or higher is required to manage inbound fruit."}, 403)
+                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
                 return
             name = inbound_clean_text(payload.get("name"), 100)
             if not name:
@@ -7065,12 +7067,9 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/inbound/prices":
-            actor = secret_room_actor(self)
+            actor = inbound_authorized_actor(self)
             if not actor:
-                self.send_json({"error": "A signed-in session is required."}, 401)
-                return
-            if account_level_number(actor.get("level")) < 4:
-                self.send_json({"error": "C4 or higher is required to set recommended prices."}, 403)
+                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
                 return
             try:
                 fruit_id = int(payload.get("fruit_id") or 0)
@@ -7098,9 +7097,9 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/inbound/receipts":
-            actor = secret_room_actor(self)
+            actor = inbound_authorized_actor(self)
             if not actor:
-                self.send_json({"error": "A signed-in session is required."}, 401)
+                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
                 return
             try:
                 fruit_id = int(payload.get("fruit_id") or 0)
@@ -9329,9 +9328,9 @@ class ReportHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if parsed.path == "/api/inbound/bootstrap":
-            actor = secret_room_actor(self)
+            actor = inbound_authorized_actor(self)
             if not actor:
-                self.send_json({"error": "A signed-in session is required."}, 401)
+                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
                 return
             results = {}
             for key, request_path in {

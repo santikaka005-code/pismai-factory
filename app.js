@@ -441,15 +441,12 @@ modules.forEach((moduleItem) => {
 });
 
 const levelRouteAccess = {
-  C1: ["dashboard", "production", "inbound", "inbound-history", "secret-room", "record-report"],
-  C2: ["dashboard", "production", "inbound", "inbound-history", "summary-person", "secret-room", "record-report"],
-  C3: ["dashboard", "production", "inbound", "inbound-history", "summary-all", "summary-main", "compare-data", "time-report", "secret-room", "record-report"],
+  C1: ["dashboard", "production", "secret-room", "record-report"],
+  C2: ["dashboard", "production", "summary-person", "secret-room", "record-report"],
+  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report", "secret-room", "record-report"],
   C4: [
     "dashboard",
     "production",
-    "inbound",
-    "inbound-history",
-    "inbound-fruits",
     "summary-all",
     "summary-main",
     "summary-export",
@@ -1168,6 +1165,7 @@ function visibleNavModulesForUser(user) {
   return navRouteIds
     .map((routeId) => modules.find((item) => item.id === routeId))
     .filter((item) => item && !item.hidden)
+    .filter((item) => item.id !== "inbound" || canOpen(user, "inbound"))
     .map((item) => ({ ...item, locked: !canOpen(user, item.id) }));
 }
 
@@ -16516,7 +16514,7 @@ async function loadInboundData(force = false) {
 }
 
 function renderInboundHeader(title, subtitle, user, active = "entry") {
-  const canManage = Number(String(getUserLevel(user)).replace(/\D/g, "")) >= 4;
+  const canManage = Number(String(getUserLevel(user)).replace(/\D/g, "")) >= 5;
   return `<header class="inbound-page-head"><div><p class="eyebrow">INBOUND COST</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(subtitle)}</p></div><div class="inbound-head-actions">
     <button class="btn btn-outline ${active === "manage" ? "is-active" : ""}" data-route="inbound-fruits" type="button" ${canManage ? "" : "disabled"}>จัดการผลไม้ / ราคาแนะนำ</button>
     <button class="btn btn-outline ${active === "history" ? "is-active" : ""}" data-route="inbound-history" type="button">รายการรับเข้า</button>
@@ -16548,7 +16546,7 @@ function renderInboundEntry(user) {
         <label class="field inbound-note"><span>หมายเหตุ</span><textarea name="note" maxlength="1000" rows="3" placeholder="รายละเอียดที่ต้องการจดจำ (ไม่บังคับ)"></textarea></label>
         <div class="inbound-entry-actions"><button class="btn btn-outline" type="reset">ล้างข้อมูล</button><button class="btn btn-primary" type="submit" ${fruits.length ? "" : "disabled"}>ตรวจสอบก่อนบันทึก</button></div>
       </form>
-      ${fruits.length ? "" : `<div class="inbound-empty-callout">ยังไม่มีผลไม้ที่เปิดใช้งาน ผู้มีสิทธิ์ C4 ขึ้นไปต้องเพิ่มผลไม้และตั้งราคาแนะนำก่อน</div>`}
+      ${fruits.length ? "" : `<div class="inbound-empty-callout">ยังไม่มีผลไม้ที่เปิดใช้งาน ผู้มีสิทธิ์ C5 ขึ้นไปต้องเพิ่มผลไม้และตั้งราคาแนะนำก่อน</div>`}
     </section>
     ${inboundConfirmPayload ? renderInboundConfirmation() : ""}`;
 }

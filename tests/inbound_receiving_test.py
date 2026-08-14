@@ -29,6 +29,18 @@ class InboundReceivingTests(unittest.TestCase):
         self.assertIn("ราคานี้จะถูกเก็บถาวรกับรายการ", source)
         self.assertIn("inboundLatestSupplierReceipt", source)
 
+    def test_inbound_is_hidden_below_c5_and_server_enforces_the_same_level(self):
+        app_source = (ROOT / "app.js").read_text(encoding="utf-8")
+        server_source = (ROOT / "report_server.py").read_text(encoding="utf-8")
+        for level in ["C1", "C2", "C3"]:
+            access_line = next(line for line in app_source.splitlines() if line.strip().startswith(f"{level}:"))
+            self.assertNotIn('"inbound"', access_line)
+        c4_block = app_source[app_source.index("  C4: ["):app_source.index("  C5:")]
+        self.assertNotIn('"inbound"', c4_block)
+        self.assertIn('item.id !== "inbound" || canOpen(user, "inbound")', app_source)
+        self.assertIn('account_level_number(actor.get("level")) >= 5', server_source)
+        self.assertEqual(server_source.count("actor = inbound_authorized_actor(self)"), 4)
+
     def test_migration_has_snapshot_fields_and_positive_constraints(self):
         sql = (ROOT / "supabase_inbound_receiving_migration.sql").read_text(encoding="utf-8")
         for field in ["supplier_name", "fruit_name", "weight_kg", "price_per_kg", "total_amount", "client_uid"]:
