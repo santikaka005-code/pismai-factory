@@ -12,6 +12,7 @@ const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
 const AUDIT_LOG_PASSWORD = "1150";
 const ONLINE_CLIENT_KEY = "pismai_online_client_id";
 const ONLINE_HEARTBEAT_INTERVAL_MS = 15000;
+const HOME_STORAGE_REFRESH_INTERVAL_MS = 30000;
 const LIVE_STATE_REFRESH_INTERVAL_MS = 60000;
 const AUDIT_LOG_SYNC_DELAY_MS = 8000;
 const CLOUD_SAVE_TIMEOUT_MS = 15000;
@@ -577,6 +578,8 @@ let homeStorageUsage = null;
 let homeStorageUsageLoaded = false;
 let homeStorageUsageLoading = false;
 let homeStorageUsageError = "";
+let homeStorageUsageTimer = null;
+let homeStorageUsageSetupMissing = false;
 let wageRateFilter = "all";
 let currentRateDate = new Date().toISOString().slice(0, 10);
 let editingWageRateId = null;
@@ -4798,6 +4801,9 @@ function setReportMessage(message, type = "success") {
 function render() {
   const session = getSession();
   const route = location.hash.replace("#/", "") || "login";
+  const routeChanged = Boolean(lastRenderedRoute && lastRenderedRoute !== route);
+
+  if (route !== "dashboard") stopHomeStorageUsageRefresh();
 
   if (lastRenderedRoute === "audit-log" && route !== "audit-log") {
     auditLogUnlocked = false;
@@ -4839,6 +4845,7 @@ function render() {
   lastRenderedRoute = route;
 
   renderApp(session.user, route);
+  if (routeChanged) window.scrollTo({ top: 0, left: 0, behavior: "auto" });
 }
 
 function formatLiveClock(now = new Date()) {
@@ -5260,6 +5267,7 @@ function bindAppEvents(user, moduleItem) {
     issueReportsLoaded = false;
     issueReportSelectedId = null;
     issueReportAttachment = null;
+    stopHomeStorageUsageRefresh();
     window.SecretRoom?.stopNotifications?.();
     clearSession();
     onlineUserCount = 0;
@@ -13308,7 +13316,7 @@ function renderHomeStorageUsage() {
       <div class="home-storage-head">
         <div class="home-storage-title">
           <span class="home-storage-mark" aria-hidden="true">DB</span>
-          <div><p>SUPABASE DATABASE</p><h3>พื้นที่จัดเก็บข้อมูล</h3><small>ตรวจสอบการใช้งานเทียบกับโควต้า 500 MB</small></div>
+          <div><p>SUPABASE DATABASE</p><h3>พื้นที่จัดเก็บข้อมูล</h3><small>เทียบโควต้า 500 MB • อัปเดตอัตโนมัติทุก 30 วินาที</small></div>
         </div>
         <div class="home-storage-score"><strong>${homeStorageUsageLoading ? "..." : `${displayPercent}%`}</strong><span>${homeStorageUsageError ? "ยังอ่านข้อมูลไม่ได้" : statusText}</span></div>
       </div>
@@ -13336,27 +13344,63 @@ async function loadHomeStorageUsage(force = false) {
     const response = await cloudApiRequest(`/api/storage-usage${force ? "?refresh=1" : ""}`, { timeoutMs: 12000 });
     homeStorageUsage = response.data || null;
     homeStorageUsageLoaded = true;
+    homeStorageUsageSetupMissing = false;
   } catch (error) {
     homeStorageUsageLoaded = true;
-    homeStorageUsageError = error instanceof Error ? error.message : "ไม่สามารถอ่านพื้นที่ฐานข้อมูลได้";
+    const message = error instanceof Error ? error.message : "";
+    homeStorageUsageSetupMissing = /get_database_storage_usage|schema cache/i.test(message);
+    homeStorageUsageError = homeStorageUsageSetupMissing
+      ? "ยังไม่ได้ติดตั้งตัวอ่านพื้นที่ฐานข้อมูล กรุณารันไฟล์ supabase_storage_usage_migration.sql ใน Supabase SQL Editor"
+      : message || "ไม่สามารถอ่านพื้นที่ฐานข้อมูลได้";
   } finally {
     homeStorageUsageLoading = false;
   }
 }
 
+function updateHomeStorageCard() {
+  const card = document.querySelector(".home-storage-card");
+  if (!card || location.hash.replace("#/", "") !== "dashboard") return;
+  card.outerHTML = renderHomeStorageUsage();
+  bindHomeStorageRefreshButton();
+}
+
+function bindHomeStorageRefreshButton() {
+  document.querySelector("#homeStorageRefresh")?.addEventListener("click", async () => {
+    homeStorageUsageLoading = true;
+    updateHomeStorageCard();
+    await loadHomeStorageUsage(true);
+    updateHomeStorageCard();
+    startHomeStorageUsageRefresh();
+  });
+}
+
+function startHomeStorageUsageRefresh() {
+  if (homeStorageUsageTimer || homeStorageUsageSetupMissing || location.hash.replace("#/", "") !== "dashboard") return;
+  homeStorageUsageTimer = window.setInterval(async () => {
+    if (location.hash.replace("#/", "") !== "dashboard") {
+      stopHomeStorageUsageRefresh();
+      return;
+    }
+    await loadHomeStorageUsage();
+    updateHomeStorageCard();
+  }, HOME_STORAGE_REFRESH_INTERVAL_MS);
+}
+
+function stopHomeStorageUsageRefresh() {
+  if (!homeStorageUsageTimer) return;
+  window.clearInterval(homeStorageUsageTimer);
+  homeStorageUsageTimer = null;
+}
+
 function bindHomeStorageUsageEvents() {
   if (!homeStorageUsageLoaded && !homeStorageUsageLoading) {
     loadHomeStorageUsage().then(() => {
-      if (location.hash.replace("#/", "") === "dashboard") render();
+      updateHomeStorageCard();
+      startHomeStorageUsageRefresh();
     });
   }
-  document.querySelector("#homeStorageRefresh")?.addEventListener("click", async () => {
-    homeStorageUsageLoading = true;
-    render();
-    homeStorageUsageLoading = false;
-    await loadHomeStorageUsage(true);
-    render();
-  });
+  bindHomeStorageRefreshButton();
+  startHomeStorageUsageRefresh();
 }
 
 function renderDashboard(user, moduleItem) {

@@ -8002,6 +8002,42 @@ tr:last-child td {
   }
 }
 
+@media (max-width: 920px) {
+  .topbar {
+    margin-left: 0;
+  }
+
+  .topbar-inner {
+    padding-inline: 16px;
+  }
+
+  .mobile-menu-button {
+    display: grid;
+    border-color: #cbd8d3;
+    background: #f2f7f5;
+  }
+
+  .mobile-menu-button span {
+    background: #174d3d;
+  }
+
+  .content {
+    width: 100%;
+    padding: 18px 16px 28px;
+  }
+
+  .sidebar {
+    position: fixed;
+    z-index: 100;
+    width: min(300px, 86vw);
+    transform: translateX(-105%);
+  }
+
+  .drawer-open .sidebar {
+    transform: translateX(0);
+  }
+}
+
 @media (max-width: 760px) {
   .topbar {
     margin-left: 0;

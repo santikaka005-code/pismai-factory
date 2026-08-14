@@ -9,6 +9,7 @@ import report_server
 
 class HomeStorageUsageTests(unittest.TestCase):
     def setUp(self):
+        self.assertEqual(report_server.STORAGE_USAGE_CACHE_SECONDS, 15)
         report_server.storage_usage_cache["expires_at"] = 0
         report_server.storage_usage_cache["data"] = None
 

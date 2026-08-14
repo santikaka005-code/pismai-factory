@@ -122,7 +122,7 @@ LIVE_STATE_TABLES = {
     "audit_logs",
 }
 ONLINE_USER_TIMEOUT_SECONDS = 45
-STORAGE_USAGE_CACHE_SECONDS = 60
+STORAGE_USAGE_CACHE_SECONDS = 15
 online_user_lock = threading.Lock()
 storage_usage_lock = threading.Lock()
 live_state_sync_lock = threading.Lock()
