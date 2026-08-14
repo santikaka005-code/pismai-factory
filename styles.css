@@ -5677,6 +5677,74 @@ tr:last-child td {
   gap: 0 16px;
 }
 
+.account-role-overview {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.75fr) minmax(0, 1.25fr);
+  gap: 18px;
+  align-items: start;
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 18px;
+}
+
+.account-role-overview-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.account-role-overview-copy strong {
+  color: #172033;
+}
+
+.account-role-overview-copy span,
+.account-form .field small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.account-role-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.account-role-chip {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  padding: 4px 9px 4px 11px;
+  color: #344054;
+  background: #f8fafc;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.account-role-chip.is-custom {
+  border-color: #99d5ca;
+  color: #0f5f50;
+  background: #effaf7;
+}
+
+.account-role-chip b {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  padding: 0 5px;
+  color: #ffffff;
+  background: #475467;
+  font-size: 10px;
+}
+
+.account-custom-role-field[hidden] {
+  display: none;
+}
+
 .account-form .form-submit {
   align-self: end;
   margin-bottom: 18px;
@@ -5812,6 +5880,7 @@ tr:last-child td {
   .summary-export-preview,
   .employee-form,
   .account-form,
+  .account-role-overview,
   .rate-form,
   .fast-input-form,
   .batch-employee-row,

@@ -119,6 +119,8 @@ const accountRoleOptions = [
 ];
 
 const developerRoleOption = { key: "developer", role: "developer", label: "ผู้พัฒนา" };
+const CUSTOM_ACCOUNT_ROLE_PREFIX = "custom:";
+const NEW_ACCOUNT_ROLE_KEY = "__new_custom_role__";
 const accountLevelOptions = ["C1", "C2", "C3", "C4", "C5", "C6"];
 const supportedAccountLevels = [...accountLevelOptions, "C7"];
 const systemDeveloperAccount = {
@@ -1244,8 +1246,26 @@ function canExportFullDetails(user) {
 }
 
 function accountRoleOptionByKey(roleKey) {
-  if (roleKey === developerRoleOption.key) return developerRoleOption;
-  return accountRoleOptions.find((option) => option.key === roleKey) || accountRoleOptions[0];
+  const normalizedKey = String(roleKey || "").trim();
+  if (normalizedKey === developerRoleOption.key) return developerRoleOption;
+  const builtIn = accountRoleOptions.find((option) => option.key === normalizedKey);
+  if (builtIn) return builtIn;
+
+  if (normalizedKey) {
+    const customLabel = normalizedKey.startsWith(CUSTOM_ACCOUNT_ROLE_PREFIX)
+      ? normalizedKey.slice(CUSTOM_ACCOUNT_ROLE_PREFIX.length).trim()
+      : normalizedKey;
+    if (customLabel) {
+      return {
+        key: normalizedKey,
+        role: "operator",
+        label: customLabel,
+        isCustom: true
+      };
+    }
+  }
+
+  return accountRoleOptions.find((option) => option.key === "general_staff");
 }
 
 function accountRoleOptionForUser(user) {
@@ -1253,10 +1273,33 @@ function accountRoleOptionForUser(user) {
     return developerRoleOption;
   }
   if (user.role_key) return accountRoleOptionByKey(user.role_key);
-  return (
-    accountRoleOptions.find((option) => option.role === user.role) ||
-    accountRoleOptions[0]
-  );
+  const legacyRole = accountRoleOptions.find((option) => option.role === user.role);
+  if (legacyRole) return legacyRole;
+  if (user.role) return accountRoleOptionByKey(user.role);
+  return accountRoleOptionByKey("general_staff");
+}
+
+function normalizeCustomAccountRoleLabel(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function createCustomAccountRoleOption(label) {
+  const normalizedLabel = normalizeCustomAccountRoleLabel(label);
+  return {
+    key: `${CUSTOM_ACCOUNT_ROLE_PREFIX}${normalizedLabel}`,
+    role: "operator",
+    label: normalizedLabel,
+    isCustom: true
+  };
+}
+
+function accountRoleOptionsForForm(accountUser = null) {
+  const roleMap = new Map(accountRoleOptions.map((option) => [option.key, option]));
+  [...getAccountUsers(), ...(accountUser ? [accountUser] : [])].forEach((item) => {
+    const option = accountRoleOptionForUser(item);
+    if (option?.isCustom && option.label) roleMap.set(option.key, option);
+  });
+  return [...roleMap.values()];
 }
 
 function normalizeAccountUser(user) {
@@ -2880,8 +2923,9 @@ function validateAccountPayload(payload, existingId = null) {
   const username = String(payload.username || "").trim();
   const password = String(payload.password || "");
   const confirmPassword = String(payload.confirm_password || "");
-  const roleKey = String(payload.role_key || "");
-  const roleOption = accountRoleOptionByKey(roleKey);
+  const roleKey = String(payload.role_key || "").trim();
+  const customRoleLabel = normalizeCustomAccountRoleLabel(payload.custom_role_label);
+  let roleOption = accountRoleOptionByKey(roleKey);
   const level = String(payload.level || "C1").toUpperCase();
 
   if (!fullname || !username || (!existingId && !phone)) {
@@ -2892,7 +2936,27 @@ function validateAccountPayload(payload, existingId = null) {
     throw new Error("บัญชีนี้ยังไม่มีเบอร์โทรเดิม กรุณากรอกเบอร์โทรก่อนบันทึก");
   }
 
-  if (roleOption.role === developerRoleOption.role) {
+  if (roleKey === NEW_ACCOUNT_ROLE_KEY) {
+    if (customRoleLabel.length < 2 || customRoleLabel.length > 60) {
+      throw new Error("ชื่อตำแหน่งใหม่ต้องมีความยาว 2-60 ตัวอักษร");
+    }
+    const duplicateRole = [...accountRoleOptions, developerRoleOption].some((option) =>
+      option.label.toLocaleLowerCase("th-TH") === customRoleLabel.toLocaleLowerCase("th-TH")
+    );
+    if (duplicateRole) {
+      throw new Error("ตำแหน่งนี้มีอยู่แล้ว กรุณาเลือกจากรายการ Role");
+    }
+    const existingCustomRole = accountRoleOptionsForForm(existingAccount).find((option) =>
+      option.isCustom &&
+      option.label.toLocaleLowerCase("th-TH") === customRoleLabel.toLocaleLowerCase("th-TH")
+    );
+    if (existingCustomRole) {
+      throw new Error("ตำแหน่งนี้เคยเพิ่มแล้ว กรุณาเลือกจากรายการ Role");
+    }
+    roleOption = createCustomAccountRoleOption(customRoleLabel);
+  }
+
+  if (!roleOption || roleOption.role === developerRoleOption.role) {
     throw new Error("ไม่สามารถเลือกโรลผู้พัฒนาให้บัญชีทั่วไปได้");
   }
 
@@ -7141,6 +7205,11 @@ function renderAccountManagement(user, moduleItem) {
   const editingAccount = editingAccountUserId
     ? getAccountUsers().find((accountUser) => accountUser.id === editingAccountUserId)
     : null;
+  const allAccounts = getAccountUsers();
+  const roleUsage = accountRoleOptionsForForm(editingAccount).map((option) => ({
+    ...option,
+    count: allAccounts.filter((account) => account.role_key === option.key).length
+  }));
 
   return `
     <section class="panel">
@@ -7160,6 +7229,19 @@ function renderAccountManagement(user, moduleItem) {
           <button class="btn btn-outline" type="submit">Search</button>
           <button class="btn btn-outline" id="clearAccountSearch" type="button">Clear</button>
         </form>
+      </div>
+      <div class="account-role-overview">
+        <div class="account-role-overview-copy">
+          <strong>ตำแหน่งที่ใช้งานในระบบ</strong>
+          <span>Role ใช้ระบุชื่อตำแหน่ง ส่วนสิทธิ์เข้าเมนูควบคุมด้วย Level C1-C6</span>
+        </div>
+        <div class="account-role-chips">
+          ${roleUsage.map((option) => `
+            <span class="account-role-chip ${option.isCustom ? "is-custom" : ""}">
+              ${escapeHtml(option.label)} <b>${option.count.toLocaleString("th-TH")}</b>
+            </span>
+          `).join("")}
+        </div>
       </div>
     </section>
     ${
@@ -7199,6 +7281,8 @@ function renderAccountManagement(user, moduleItem) {
 
 function renderAccountForm(accountUser) {
   const isEditing = Boolean(accountUser);
+  const roleOptions = accountRoleOptionsForForm(accountUser);
+  const selectedRoleKey = accountUser?.role_key || "general_staff";
   return `
     <section class="panel">
       <div class="section-title-row">
@@ -7228,18 +7312,25 @@ function renderAccountForm(accountUser) {
           <input name="confirm_password" type="password" autocomplete="new-password" ${isEditing ? "" : "required"} />
         </label>
         <label class="field">
-          <span>Role</span>
-          <select name="role_key" required>
-            ${accountRoleOptions
+          <span>Role / ตำแหน่ง</span>
+          <select name="role_key" id="accountRoleSelect" required>
+            ${roleOptions
               .map(
                 (option) =>
-                  `<option value="${option.key}" ${accountUser?.role_key === option.key ? "selected" : ""}>${escapeHtml(option.label)}</option>`
+                  `<option value="${escapeHtml(option.key)}" ${selectedRoleKey === option.key ? "selected" : ""}>${escapeHtml(option.label)}${option.isCustom ? " · เพิ่มเอง" : ""}</option>`
               )
               .join("")}
+            <option value="${NEW_ACCOUNT_ROLE_KEY}">+ เพิ่มตำแหน่งใหม่...</option>
           </select>
+          <small>การเปลี่ยนตำแหน่งจะไม่เปลี่ยนสิทธิ์ Level</small>
+        </label>
+        <label class="field account-custom-role-field" id="accountCustomRoleField" hidden>
+          <span>ชื่อตำแหน่งใหม่</span>
+          <input name="custom_role_label" id="accountCustomRoleInput" maxlength="60" placeholder="เช่น หัวหน้าคลังสินค้า" />
+          <small>ตำแหน่งนี้จะปรากฏในรายการสำหรับบัญชีถัดไปโดยอัตโนมัติ</small>
         </label>
         <label class="field">
-          <span>Level</span>
+          <span>Level / ระดับสิทธิ์</span>
           <select name="level" required>
             ${accountLevelOptions
               .map((level) => `<option value="${level}" ${accountUser?.level === level ? "selected" : ""}>${level}</option>`)
@@ -7296,6 +7387,20 @@ function setAccountMessage(message, type = "success") {
 }
 
 function bindAccountManagementEvents(user) {
+  const roleSelect = document.querySelector("#accountRoleSelect");
+  const customRoleField = document.querySelector("#accountCustomRoleField");
+  const customRoleInput = document.querySelector("#accountCustomRoleInput");
+  const syncCustomRoleField = () => {
+    const isAddingRole = roleSelect?.value === NEW_ACCOUNT_ROLE_KEY;
+    if (customRoleField) customRoleField.hidden = !isAddingRole;
+    if (customRoleInput) {
+      customRoleInput.required = isAddingRole;
+      if (!isAddingRole) customRoleInput.value = "";
+    }
+  };
+  roleSelect?.addEventListener("change", syncCustomRoleField);
+  syncCustomRoleField();
+
   document.querySelector("#accountSearchForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -7325,6 +7430,7 @@ function bindAccountManagementEvents(user) {
       password: String(form.get("password") || ""),
       confirm_password: String(form.get("confirm_password") || ""),
       role_key: String(form.get("role_key") || ""),
+      custom_role_label: String(form.get("custom_role_label") || ""),
       level: String(form.get("level") || ""),
       isActive: String(form.get("isActive")) === "true"
     };
