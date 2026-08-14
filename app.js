@@ -4272,6 +4272,11 @@ function addDaysToDate(dateValue, days) {
   return date.toISOString().slice(0, 10);
 }
 
+function addDaysToDateSafe(dateValue, days) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateValue || ""))) return "";
+  return addDaysToDate(dateValue, days);
+}
+
 function formatWeeklyDateLabel(dateValue) {
   const [year, month, dateNumber] = String(dateValue).split("-").map(Number);
   const date = new Date(Date.UTC(year, month - 1, dateNumber));
@@ -15482,6 +15487,7 @@ function bindSummaryAllEvents() {
 
   document.querySelector("#summaryExportStart")?.addEventListener("change", (event) => {
     summaryExportStartDate = event.target.value || getSelectedSummaryDate();
+    summaryExportEndDate = addDaysToDateSafe(summaryExportStartDate, 6) || summaryExportStartDate;
     summaryDate = summaryExportStartDate;
     summaryExportMessage = "";
     render();
