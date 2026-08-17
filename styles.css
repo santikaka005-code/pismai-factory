@@ -6725,6 +6725,41 @@ tr:last-child td {
   font-size: 13px;
 }
 
+.withholding-tax-panel {
+  border-left: 4px solid #0f766e;
+}
+
+.withholding-tax-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.withholding-tax-option {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #0f172a;
+  background: #ffffff;
+  font-weight: 800;
+}
+
+.withholding-tax-option input {
+  width: 18px;
+  height: 18px;
+  accent-color: #0f766e;
+}
+
+.withholding-tax-note {
+  margin: 10px 0 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
 .deduction-metrics {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }

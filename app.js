@@ -9,6 +9,7 @@ const DEDUCTION_RECORDS_KEY = "pismai_factory_deduction_records";
 const AUDIT_LOG_KEY = "pismai_factory_audit_log";
 const CLOUD_MIGRATION_KEY = "pismai_factory_cloud_migration_v2";
 const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
+const WITHHOLDING_TAX_GROUPS_KEY = "pismai_factory_withholding_tax_groups";
 const AUDIT_LOG_PASSWORD = "1150";
 const ONLINE_CLIENT_KEY = "pismai_online_client_id";
 const ONLINE_HEARTBEAT_INTERVAL_MS = 15000;
@@ -500,7 +501,7 @@ const defaultEmployees = [];
 
 const primaryPayGroups = ["เหมาโรงงาน", "เหมา(นนท์)", "เหมาปุ้ย"];
 const PRODUCTION_WITHHOLDING_TAX_RATE = 0.03;
-const productionWithholdingTaxGroups = new Set(["เหมา(นนท์)", "เหมาปุ้ย"]);
+const defaultProductionWithholdingTaxGroups = ["เหมา(นนท์)", "เหมาปุ้ย"];
 const legacyPayGroupMap = {
   "กลุ่ม A": "เหมาโรงงาน",
   "กลุ่ม B": "เหมา(นนท์)",
@@ -3128,9 +3129,27 @@ function getEmployeePayGroup(employee) {
   return normalizeEmployeePayGroupValue(employee?.pay_group || "");
 }
 
+function getProductionWithholdingTaxGroups() {
+  const raw = localStorage.getItem(WITHHOLDING_TAX_GROUPS_KEY);
+  if (!raw) return [...defaultProductionWithholdingTaxGroups];
+  try {
+    const groups = JSON.parse(raw);
+    if (!Array.isArray(groups)) return [...defaultProductionWithholdingTaxGroups];
+    return [...new Set(groups.map(normalizeEmployeePayGroupValue).filter(Boolean))];
+  } catch {
+    localStorage.removeItem(WITHHOLDING_TAX_GROUPS_KEY);
+    return [...defaultProductionWithholdingTaxGroups];
+  }
+}
+
+function saveProductionWithholdingTaxGroups(groups) {
+  const normalizedGroups = [...new Set((groups || []).map(normalizeEmployeePayGroupValue).filter(Boolean))];
+  localStorage.setItem(WITHHOLDING_TAX_GROUPS_KEY, JSON.stringify(normalizedGroups));
+}
+
 function getProductionWithholdingTax(payGroup, amount) {
   const normalizedGroup = normalizeEmployeePayGroupValue(payGroup);
-  if (!productionWithholdingTaxGroups.has(normalizedGroup)) return 0;
+  if (!getProductionWithholdingTaxGroups().includes(normalizedGroup)) return 0;
   return Math.round((Math.max(0, Number(amount) || 0) * PRODUCTION_WITHHOLDING_TAX_RATE + Number.EPSILON) * 100) / 100;
 }
 
@@ -6155,6 +6174,8 @@ function renderDeductionEntry(user, moduleItem) {
   const employeeCount = new Set(context.records.map((record) => record.employee_id || record.emp_code)).size;
   const actionLabel = context.bonusMode ? "เบี้ยขยัน" : "รายการหัก";
   const employeeKindLabel = context.employeeKind === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก";
+  const withholdingTaxGroups = getProductionWithholdingTaxGroups();
+  const withholdingTaxGroupOptions = getGroupReportPayGroups();
 
   return `
     <section class="summary-page deduction-page">
@@ -6209,13 +6230,24 @@ function renderDeductionEntry(user, moduleItem) {
         </div>
       </div>
       ${!context.bonusMode && context.employeeKind === "production" ? `
-        <div class="deduction-export-note">
-          <span class="deduction-export-note-mark">3%</span>
-          <div>
-            <strong>หัก ณ ที่จ่ายอัตโนมัติสำหรับเหมา(นนท์) และเหมาปุ้ย</strong>
-            <span>ระบบคำนวณ 3% จากยอดค่าแรงก่อนหักเมื่อแสดงรายงานและ Export โดยไม่ต้องสร้างรายการหักหรือรออนุมัติซ้ำ</span>
+        <section class="panel withholding-tax-panel">
+          <div class="section-title-row">
+            <div>
+              <h3>ตั้งค่าหัก ณ ที่จ่าย 3%</h3>
+              <p class="muted-text">เลือกกลุ่มที่ต้องการให้ระบบหัก 3% อัตโนมัติในรายงานแบบกลุ่มและไฟล์ Export</p>
+            </div>
+            <span class="summary-mode-pill">${withholdingTaxGroups.length.toLocaleString("th-TH")} กลุ่มที่เปิดหัก</span>
           </div>
-        </div>
+          <div class="withholding-tax-options">
+            ${withholdingTaxGroupOptions.map((group) => `
+              <label class="withholding-tax-option">
+                <input type="checkbox" data-withholding-tax-group="${escapeHtml(group)}" ${withholdingTaxGroups.includes(group) ? "checked" : ""} />
+                <span>${escapeHtml(group)}</span>
+              </label>
+            `).join("")}
+          </div>
+          <p class="withholding-tax-note">ถ้าไม่ติ๊กกลุ่มไหน กลุ่มนั้นจะไม่ถูกหัก 3% และในอนาคตถ้าเพิ่มกลุ่มพนักงานใหม่ กลุ่มนั้นจะขึ้นให้เลือกตรงนี้ด้วย</p>
+        </section>
       ` : ""}
 
       <div class="summary-metrics deduction-metrics">
@@ -6377,6 +6409,17 @@ function bindDeductionEvents(user) {
       setDeductionMessage(`${error instanceof Error ? error.message : "โหลดรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
     }
     render();
+  });
+
+  document.querySelectorAll("[data-withholding-tax-group]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const selectedGroups = [...document.querySelectorAll("[data-withholding-tax-group]:checked")]
+        .map((checkbox) => checkbox.dataset.withholdingTaxGroup || "")
+        .filter(Boolean);
+      saveProductionWithholdingTaxGroups(selectedGroups);
+      setDeductionMessage("บันทึกการตั้งค่าหัก ณ ที่จ่าย 3% แล้ว");
+      render();
+    });
   });
 
   document.querySelector("#deductionForm")?.addEventListener("submit", async (event) => {
@@ -16470,6 +16513,7 @@ function getGroupReportPayload(user, format) {
     fruit_label: getProductionFruitLabel(groupReportFruit),
     view_mode: groupReportView,
     export_options: { ...groupReportExportOptions },
+    withholding_tax_groups: getProductionWithholdingTaxGroups(),
     printed_by: user?.fullname || "System Admin",
     printed_by_position: getExportPositionLabel(user),
     employees,

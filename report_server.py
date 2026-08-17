@@ -5699,7 +5699,7 @@ def employee_lookup_maps(payload: dict) -> tuple[dict[str, dict], dict[str, dict
 
 GROUP_REPORT_PAY_GROUPS = ["เหมาโรงงาน", "เหมา(นนท์)", "เหมาปุ้ย"]
 PRODUCTION_WITHHOLDING_TAX_RATE = 0.03
-PRODUCTION_WITHHOLDING_TAX_GROUPS = {"เหมา(นนท์)", "เหมาปุ้ย"}
+DEFAULT_PRODUCTION_WITHHOLDING_TAX_GROUPS = {"เหมา(นนท์)", "เหมาปุ้ย"}
 GROUP_REPORT_LEGACY_MAP = {
     "กลุ่ม A": "เหมาโรงงาน",
     "กลุ่ม B": "เหมา(นนท์)",
@@ -5715,8 +5715,16 @@ def normalize_group_report_pay_group(value: str) -> str:
     return pay_group
 
 
-def production_withholding_tax(pay_group: str, amount: float | int | str | None) -> float:
-    if normalize_group_report_pay_group(pay_group) not in PRODUCTION_WITHHOLDING_TAX_GROUPS:
+def production_withholding_tax_groups(payload: dict | None = None) -> set[str]:
+    groups = (payload or {}).get("withholding_tax_groups")
+    if not isinstance(groups, list):
+        return set(DEFAULT_PRODUCTION_WITHHOLDING_TAX_GROUPS)
+    return {normalize_group_report_pay_group(group) for group in groups if normalize_group_report_pay_group(group)}
+
+
+def production_withholding_tax(pay_group: str, amount: float | int | str | None, withholding_groups: set[str] | None = None) -> float:
+    groups = withholding_groups if withholding_groups is not None else DEFAULT_PRODUCTION_WITHHOLDING_TAX_GROUPS
+    if normalize_group_report_pay_group(pay_group) not in groups:
         return 0.0
     return round(max(0.0, safe_float(amount)) * PRODUCTION_WITHHOLDING_TAX_RATE + 1e-9, 2)
 
@@ -5797,7 +5805,7 @@ def group_report_records(payload: dict) -> list[dict]:
     return sorted(rows, key=lambda item: (item["pay_group"], item["fruit_label"], item["record_date"], str(item.get("emp_code", ""))))
 
 
-def summarize_group_report(records: list[dict], mode: str = "group") -> list[dict]:
+def summarize_group_report(records: list[dict], mode: str = "group", withholding_groups: set[str] | None = None) -> list[dict]:
     summaries: dict[str, dict] = {}
     for record in records:
         key = record["pay_group"] if mode == "group" else f"{record['pay_group']}__{record['fruit_type']}"
@@ -5832,7 +5840,7 @@ def summarize_group_report(records: list[dict], mode: str = "group") -> list[dic
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
         row["bonus_amount"] += safe_float(record.get("bonus_amount"))
-        row["withholding_tax_amount"] = production_withholding_tax(row["pay_group"], row["amount"])
+        row["withholding_tax_amount"] = production_withholding_tax(row["pay_group"], row["amount"], withholding_groups)
         row["net_amount"] = max(
             0,
             row["amount"] + row["bonus_amount"] - row["deduction_amount"] - row["withholding_tax_amount"],
@@ -5840,7 +5848,7 @@ def summarize_group_report(records: list[dict], mode: str = "group") -> list[dic
     return sorted(summaries.values(), key=lambda item: (item["pay_group"], item["fruit_label"]))
 
 
-def group_report_employee_rows(records: list[dict]) -> list[dict]:
+def group_report_employee_rows(records: list[dict], withholding_groups: set[str] | None = None) -> list[dict]:
     rows: dict[str, dict] = {}
     for record in records:
         key = str(record.get("employee_id") or record.get("emp_code") or record.get("employee_name") or "")
@@ -5874,7 +5882,7 @@ def group_report_employee_rows(records: list[dict]) -> list[dict]:
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
         row["bonus_amount"] += safe_float(record.get("bonus_amount"))
-        row["withholding_tax_amount"] = production_withholding_tax(row["pay_group"], row["amount"])
+        row["withholding_tax_amount"] = production_withholding_tax(row["pay_group"], row["amount"], withholding_groups)
         row["net_amount"] = max(
             0,
             row["amount"] + row["bonus_amount"] - row["deduction_amount"] - row["withholding_tax_amount"],
@@ -5896,9 +5904,10 @@ def build_group_report_excel(payload: dict) -> bytes:
     start_date, end_date = normalized_range(payload)
     records = group_report_records(payload)
     options = group_report_options(payload)
-    group_rows = summarize_group_report(records, "group")
-    fruit_rows = summarize_group_report(records, "fruit")
-    employee_rows = group_report_employee_rows(records)
+    withholding_groups = production_withholding_tax_groups(payload)
+    group_rows = summarize_group_report(records, "group", withholding_groups)
+    fruit_rows = summarize_group_report(records, "fruit", withholding_groups)
+    employee_rows = group_report_employee_rows(records, withholding_groups)
     show_standard_weights, show_durian_weight = production_report_field_visibility(payload)
     water_label, flower_label = production_report_weight_labels(payload)
 
@@ -6003,9 +6012,10 @@ def build_group_report_pdf(payload: dict) -> bytes:
     start_date, end_date = normalized_range(payload)
     records = group_report_records(payload)
     options = group_report_options(payload)
-    group_rows = summarize_group_report(records, "group")
-    fruit_rows = summarize_group_report(records, "fruit")
-    employee_rows = group_report_employee_rows(records)
+    withholding_groups = production_withholding_tax_groups(payload)
+    group_rows = summarize_group_report(records, "group", withholding_groups)
+    fruit_rows = summarize_group_report(records, "fruit", withholding_groups)
+    employee_rows = group_report_employee_rows(records, withholding_groups)
     show_standard_weights, show_durian_weight = production_report_field_visibility(payload)
     water_label, flower_label = production_report_weight_labels(payload)
     _, _, pdf_normal, section = pdf_styles()
