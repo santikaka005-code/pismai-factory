@@ -723,6 +723,8 @@ let productionEditorOpen = false;
 let productionEditorDate = new Date().toISOString().slice(0, 10);
 let productionEditorFruit = "mangosteen";
 let productionEditorEmployeeSearch = "";
+let productionEditorSelectedIds = [];
+let productionEditorBatchDate = "";
 let editingProductionRecordId = null;
 let deletingProductionRecordId = null;
 let productionEditorSaving = false;
@@ -1063,6 +1065,23 @@ function getBatchPileWeights(type, pileNo = null) {
   }
 
   return batchGridState[stateKey][pileKey];
+}
+
+function productionPileToneClass(pileNo) {
+  const normalized = Number(pileNo);
+  return Number.isInteger(normalized) && normalized >= 1 && normalized <= 5
+    ? `production-pile-tone-${normalized}`
+    : "production-pile-tone-1";
+}
+
+function applyProductionPileTone(element, pileNo) {
+  if (!element) return;
+  element.classList.remove(...[1, 2, 3, 4, 5].map((value) => `production-pile-tone-${value}`));
+  element.classList.add(productionPileToneClass(pileNo));
+}
+
+function isBatchProductionSaveShortcut(event) {
+  return event?.key === "Enter" && event.shiftKey === true;
 }
 
 function isOneDecimalWeightInput(value) {
@@ -7545,6 +7564,7 @@ function getAuditLogActionLabel(action) {
     DELETE_ACCOUNT: "ลบบัญชีเข้าใช้งาน",
     START_SESSION: "เริ่มกองงาน",
     UPDATE_PRODUCTION: "แก้ไขข้อมูลผลผลิต",
+    BATCH_UPDATE_PRODUCTION_DATE: "แก้วันที่ผลผลิตหลายรายการ",
     DELETE_PRODUCTION: "ลบข้อมูลผลผลิต",
     UPDATE_TIME_RECORD: "แก้ไขเวลาทำงาน",
     DELETE_TIME_RECORD: "ลบเวลาทำงาน",
@@ -8909,6 +8929,10 @@ function renderProductionEditor(user, moduleItem) {
 
   const canManageAll = canManageAllProductionRecords(user);
   const records = getProductionEditorRecords(user);
+  const visibleRecordIds = new Set(records.map((record) => Number(record.id)));
+  productionEditorSelectedIds = productionEditorSelectedIds.filter((id) => visibleRecordIds.has(Number(id)));
+  const selectedIdSet = new Set(productionEditorSelectedIds.map(Number));
+  const allVisibleSelected = records.length > 0 && records.every((record) => selectedIdSet.has(Number(record.id)));
   const editingRecord = getProductionRecords().find(
     (record) => Number(record.id) === Number(editingProductionRecordId) && canEditProductionRecord(user, record)
   );
@@ -8990,11 +9014,34 @@ function renderProductionEditor(user, moduleItem) {
           </form>
         </section>` : ""}
 
+      <section class="panel production-batch-edit-panel">
+        <div class="production-batch-edit-head">
+          <div>
+            <span>แก้ไขแบบหลายรายการ</span>
+            <h3>เปลี่ยนวันที่พร้อมกัน</h3>
+            <p>เลือก checkbox จากตาราง แล้วกำหนดวันที่ใหม่ ระบบจะเปลี่ยนเฉพาะวันที่และบันทึก Audit Log</p>
+          </div>
+          <strong>${productionEditorSelectedIds.length.toLocaleString("th-TH")} รายการที่เลือก</strong>
+        </div>
+        <form id="productionBatchDateForm" class="production-batch-date-form">
+          <label class="field compact-field">
+            <span>วันที่ใหม่</span>
+            <input name="record_date" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionEditorBatchDate || productionEditorDate)}" required />
+          </label>
+          <label class="field production-batch-reason">
+            <span>เหตุผลการแก้ไข</span>
+            <input name="reason" minlength="3" placeholder="เช่น เลือกวันที่ผลผลิตผิด" required />
+          </label>
+          <button class="btn btn-primary" type="submit" ${productionEditorSaving || !productionEditorSelectedIds.length ? "disabled" : ""}>${productionEditorSaving ? "กำลังเปลี่ยนวันที่..." : "เปลี่ยนวันที่รายการที่เลือก"}</button>
+          <button class="btn btn-outline" data-clear-production-selection type="button" ${productionEditorSelectedIds.length ? "" : "disabled"}>ล้างที่เลือก</button>
+        </form>
+      </section>
+
       <section class="table-card">
-        <div class="table-heading">รายการ${escapeHtml(getProductionFruitLabel(productionEditorFruit))} วันที่ ${escapeHtml(productionEditorDate)}</div>
+        <div class="table-heading production-editor-table-heading"><span>รายการ${escapeHtml(getProductionFruitLabel(productionEditorFruit))} วันที่ ${escapeHtml(productionEditorDate)}</span><strong>${productionEditorSelectedIds.length.toLocaleString("th-TH")} รายการที่เลือก</strong></div>
         <div class="table-scroll">
           <table class="production-editor-table">
-            <thead><tr><th>เวลา</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th><th>${isDurian ? "น้ำหนักทุเรียน" : `${escapeHtml(labels.water)} / ${escapeHtml(labels.flower)}`}</th><th>รวมเงิน</th><th>ผู้บันทึก</th><th>จัดการ</th></tr></thead>
+            <thead><tr><th class="production-editor-check-cell"><input data-select-all-production-editor type="checkbox" aria-label="เลือกทุกรายการที่แสดง" ${allVisibleSelected ? "checked" : ""} ${records.length ? "" : "disabled"} /></th><th>เวลา</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กอง</th><th>${isDurian ? "น้ำหนักทุเรียน" : `${escapeHtml(labels.water)} / ${escapeHtml(labels.flower)}`}</th><th>รวมเงิน</th><th>ผู้บันทึก</th><th>จัดการ</th></tr></thead>
             <tbody>${records.length ? records.map((record) => {
               const employee = employees.find((item) => Number(item.id) === Number(record.employee_id));
               const weights = isDurian
@@ -9008,8 +9055,9 @@ function renderProductionEditor(user, moduleItem) {
               const deleteButton = canManageAll
                 ? `<button class="btn btn-small btn-danger" data-select-production-delete="${record.id}" type="button">ลบ</button>`
                 : "";
-              return `<tr class="${activeClass}"><td>${escapeHtml(record.record_time || "-")}</td><td><strong>${escapeHtml(record.emp_code || "-")}</strong></td><td>${escapeHtml(record.employee_name || employee?.fullname || "-")}</td><td>${normalizeProductionPileNumber(record.pile_no ?? record.pile) || "-"}</td><td>${escapeHtml(weights)}</td><td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td><td>${escapeHtml(record.created_by || "-")}</td><td><div class="production-row-actions"><button class="btn btn-small btn-outline" data-select-production-edit="${record.id}" type="button">${editLabel}</button>${deleteButton}</div></td></tr>`;
-            }).join("") : `<tr><td colspan="8" class="empty-cell">ไม่พบข้อมูลตามตัวกรอง</td></tr>`}</tbody>
+              const selected = selectedIdSet.has(Number(record.id));
+              return `<tr class="${activeClass} ${selected ? "is-batch-selected" : ""}"><td class="production-editor-check-cell"><input data-production-editor-select="${record.id}" type="checkbox" aria-label="เลือกรายการ ${record.id}" ${selected ? "checked" : ""} /></td><td>${escapeHtml(record.record_time || "-")}</td><td><strong>${escapeHtml(record.emp_code || "-")}</strong></td><td>${escapeHtml(record.employee_name || employee?.fullname || "-")}</td><td>${normalizeProductionPileNumber(record.pile_no ?? record.pile) || "-"}</td><td>${escapeHtml(weights)}</td><td><strong>${money(record.total_amount || record.grand_total || 0)}</strong></td><td>${escapeHtml(record.created_by || "-")}</td><td><div class="production-row-actions"><button class="btn btn-small btn-outline" data-select-production-edit="${record.id}" type="button">${editLabel}</button>${deleteButton}</div></td></tr>`;
+            }).join("") : `<tr><td colspan="9" class="empty-cell">ไม่พบข้อมูลตามตัวกรอง</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -9161,6 +9209,95 @@ async function saveProductionEditorRecord(user, formElement) {
   }
 }
 
+async function saveProductionEditorBatchDate(user, formElement) {
+  const selectedIds = [...new Set(productionEditorSelectedIds.map(Number).filter(Boolean))];
+  const selectedRecords = selectedIds
+    .map((id) => getProductionRecords().find((record) => Number(record.id) === id))
+    .filter(Boolean);
+  if (!selectedIds.length || selectedRecords.length !== selectedIds.length) {
+    productionEditorMessage = "ไม่พบรายการที่เลือกครบ กรุณาโหลดข้อมูลใหม่แล้วเลือกอีกครั้ง";
+    productionEditorMessageType = "error";
+    productionEditorSelectedIds = [];
+    render();
+    return;
+  }
+  const forbidden = selectedRecords.find((record) => !canEditProductionRecord(user, record));
+  if (forbidden) {
+    productionEditorMessage = `ไม่มีสิทธิ์แก้ไขรายการ #${forbidden.id} หรือระยะเวลาแก้ไขหมดแล้ว`;
+    productionEditorMessageType = "error";
+    productionEditorSelectedIds = productionEditorSelectedIds.filter((id) => Number(id) !== Number(forbidden.id));
+    render();
+    return;
+  }
+
+  const form = new FormData(formElement);
+  const recordDate = String(form.get("record_date") || "").trim();
+  const reason = String(form.get("reason") || "").trim();
+  productionEditorBatchDate = recordDate;
+  if (!isValidProductionRecordDate(recordDate) || reason.length < 3) {
+    productionEditorMessage = "กรุณาเลือกวันที่ใหม่และระบุเหตุผลอย่างน้อย 3 ตัวอักษร";
+    productionEditorMessageType = "error";
+    render();
+    return;
+  }
+  if (selectedRecords.every((record) => getRecordDate(record) === recordDate)) {
+    productionEditorMessage = "รายการที่เลือกใช้วันที่นี้อยู่แล้ว กรุณาเลือกวันที่ใหม่";
+    productionEditorMessageType = "error";
+    render();
+    return;
+  }
+  if (!window.confirm(`ยืนยันเปลี่ยนวันที่ ${selectedRecords.length} รายการเป็น ${recordDate}?`)) return;
+
+  try {
+    productionEditorSaving = true;
+    productionEditorMessage = `กำลังเปลี่ยนวันที่ ${selectedRecords.length} รายการ...`;
+    productionEditorMessageType = "success";
+    render();
+    const response = await cloudApiRequest("/api/production-records/batch-date", {
+      method: "POST",
+      body: JSON.stringify({
+        records: selectedRecords.map((record) => ({
+          id: Number(record.id),
+          expected_updated_at: record.updated_at || record.created_at
+        })),
+        record_date: recordDate,
+        reason,
+        actor_fullname: user.fullname
+      })
+    });
+    const updatedRows = Array.isArray(response.data) ? response.data : [];
+    const returnedIds = updatedRows.map((record) => Number(record.id)).sort((a, b) => a - b);
+    const expectedIds = [...selectedIds].sort((a, b) => a - b);
+    if (
+      updatedRows.length !== selectedRecords.length
+      || returnedIds.some((id, index) => id !== expectedIds[index])
+      || updatedRows.some((record) => getRecordDate(record) !== recordDate)
+    ) {
+      throw new Error("Cloud ส่งผลการแก้ไขแบบชุดกลับมาไม่ครบ กรุณารีเฟรชเพื่อตรวจสอบก่อนทำรายการต่อ");
+    }
+    const updatedById = new Map(updatedRows.map((record) => [Number(record.id), record]));
+    const merged = getProductionRecords().map((record) => updatedById.get(Number(record.id)) || record);
+    applyingCloudState = true;
+    localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
+    applyingCloudState = false;
+    await refreshLiveStateFromCloud({ renderWhenIdle: false });
+    productionEditorSelectedIds = [];
+    productionEditorDate = recordDate;
+    productionEditorBatchDate = recordDate;
+    editingProductionRecordId = null;
+    deletingProductionRecordId = null;
+    productionEditorMessage = `เปลี่ยนวันที่ ${updatedRows.length} รายการเป็น ${recordDate} และบันทึก Audit Log แล้ว`;
+    productionEditorMessageType = "success";
+  } catch (error) {
+    productionEditorMessage = error instanceof Error ? error.message : "เปลี่ยนวันที่แบบชุดไม่สำเร็จ";
+    productionEditorMessageType = "error";
+  } finally {
+    productionEditorSaving = false;
+    applyingCloudState = false;
+    render();
+  }
+}
+
 function renderProductionFruitPlaceholder(fruit) {
   return `
     <section class="panel">
@@ -9203,7 +9340,7 @@ function renderBatchEntry() {
       .join("");
 
   return `
-    <section class="panel">
+    <section class="panel" id="productionBatchEntry">
       <div class="panel-head">
         <div>
           <h2>กรอกแบบชุด</h2>
@@ -9225,24 +9362,24 @@ function renderBatchEntry() {
         </div>
       </div>
       <div class="batch-grid-entry">
-        <section class="batch-side">
+        <section class="batch-side ${productionPileToneClass(batchGridState.flower_pile_no)}">
           <div class="batch-side-head">
             <h3>${escapeHtml(labels.flower)}</h3>
             <label class="compact-field">
               <span>กอง</span>
-              <select id="batchFlowerPile">
+              <select id="batchFlowerPile" class="production-pile-select">
                 ${[1, 2, 3, 4, 5].map((pileNo) => `<option value="${pileNo}" ${batchGridState.flower_pile_no === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}
               </select>
             </label>
           </div>
           <div class="batch-weight-grid">${renderWeightInputs("flower", getBatchPileWeights("flower"))}</div>
         </section>
-        <section class="batch-side">
+        <section class="batch-side ${productionPileToneClass(batchGridState.water_pile_no)}">
           <div class="batch-side-head">
             <h3>${escapeHtml(labels.water)}</h3>
             <label class="compact-field">
               <span>กอง</span>
-              <select id="batchWaterPile">
+              <select id="batchWaterPile" class="production-pile-select">
                 ${[1, 2, 3, 4, 5].map((pileNo) => `<option value="${pileNo}" ${batchGridState.water_pile_no === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}
               </select>
             </label>
@@ -9254,7 +9391,7 @@ function renderBatchEntry() {
         <button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังรับเข้าคิว..." : "บันทึกชุดนี้"}</button>
         <button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button>
       </div>
-      <p class="demo-note">คีย์ลัด: ↑/↓ เปลี่ยนกองของช่องที่กำลังกรอก · ←/→ สลับดอก/น้ำช่องเดียวกัน</p>
+      <p class="demo-note">คีย์ลัด: Shift+Enter บันทึกชุดนี้ · ↑/↓ เปลี่ยนกองของช่องที่กำลังกรอก · ←/→ สลับดอก/น้ำช่องเดียวกัน</p>
     </section>
   `;
 }
@@ -9269,7 +9406,7 @@ function renderDurianBatchEntry() {
       <input data-durian-batch-weight data-batch-index="${index}" inputmode="decimal" type="number" min="0" step="0.1" value="${escapeHtml(value)}" />
     </label>`).join("");
   return `
-    <section class="panel">
+    <section class="panel" id="productionBatchEntry">
       <div class="panel-head"><div><h2>กรอกทุเรียนแบบชุด</h2><p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักทุเรียนแยกตามกอง กองละ 40 ช่อง</p></div></div>
       <div class="batch-employee-row">
         <label class="field"><span>วันที่บันทึกผลผลิต</span><input id="batchRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" /></label>
@@ -9277,10 +9414,10 @@ function renderDurianBatchEntry() {
         <div class="employee-result"><span>พนักงาน</span><strong>${escapeHtml(employeeName)}</strong></div>
       </div>
       <div class="durian-batch-grid">
-        <section class="batch-side durian-grade-side">
+        <section class="batch-side durian-grade-side ${productionPileToneClass(batchGridState.durian_pile_no)}">
           <div class="batch-side-head">
             <h3>น้ำหนักทุเรียน</h3>
-            <label class="compact-field"><span>กอง</span><select id="batchDurianPile">
+            <label class="compact-field"><span>กอง</span><select id="batchDurianPile" class="production-pile-select">
               ${[1,2,3,4,5].map((pileNo) => `<option value="${pileNo}" ${String(batchGridState.durian_pile_no || "1") === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}
             </select></label>
           </div>
@@ -9288,6 +9425,7 @@ function renderDurianBatchEntry() {
         </section>
       </div>
       <div class="batch-actions"><button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังรับเข้าคิว..." : "บันทึกชุดนี้"}</button><button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button></div>
+      <p class="demo-note">คีย์ลัด: Shift+Enter บันทึกชุดนี้</p>
     </section>`;
 }
 
@@ -9413,14 +9551,14 @@ function renderProductionFast(user, moduleItem) {
           : ""
       }
 
-      <form class="fast-input-form" id="productionFastForm">
+      <form class="fast-input-form ${productionPileToneClass(fastInputState.pile_no)}" id="productionFastForm">
         <label class="field">
           <span>วันที่</span>
           <input id="fastRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" required />
         </label>
         <label class="field">
           <span>กอง</span>
-          <select name="pile_no" id="fastPileNo" required>
+          <select name="pile_no" id="fastPileNo" class="production-pile-select" required>
             ${[1, 2, 3, 4, 5]
               .map(
                 (pileNo) =>
@@ -9459,6 +9597,7 @@ function renderProductionFast(user, moduleItem) {
             min="0"
             step="0.1"
             value="${escapeHtml(fastInputState.water_weight)}"
+            class="production-pile-weight"
             required
           />
         </label>
@@ -9472,6 +9611,7 @@ function renderProductionFast(user, moduleItem) {
             min="0"
             step="0.1"
             value="${escapeHtml(fastInputState.flower_weight)}"
+            class="production-pile-weight"
             required
           />
         </label>
@@ -9539,12 +9679,12 @@ function renderDurianFast(user, moduleItem) {
     <section class="panel fast-input-panel durian-fast-panel">
       <div class="panel-head"><div><h2>${escapeHtml(moduleItem.label)} - ทุเรียน</h2><p>บันทึกน้ำหนักทุเรียนรวมในแต่ละกอง</p></div><span class="badge badge-success">กรอกเร็ว</span></div>
       ${fastInputState.message ? `<div class="alert ${fastInputState.messageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(fastInputState.message)}</div>` : ""}
-      <form class="fast-input-form durian-fast-form" id="productionFastForm">
+      <form class="fast-input-form durian-fast-form ${productionPileToneClass(fastInputState.pile_no)}" id="productionFastForm">
         <label class="field"><span>วันที่</span><input id="fastRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" required /></label>
-        <label class="field"><span>กอง</span><select name="pile_no" id="fastPileNo" required>${[1,2,3,4,5].map((pileNo) => `<option value="${pileNo}" ${fastInputState.pile_no === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}</select></label>
+        <label class="field"><span>กอง</span><select name="pile_no" id="fastPileNo" class="production-pile-select" required>${[1,2,3,4,5].map((pileNo) => `<option value="${pileNo}" ${fastInputState.pile_no === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}</select></label>
         <label class="field"><span>รหัสพนักงาน</span><input name="emp_code" id="fastEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(fastInputState.emp_code)}" autocomplete="off" required /></label>
         <div class="employee-result"><span>พนักงาน</span><strong>${escapeHtml(employeeName)}</strong></div>
-        <label class="field"><span>น้ำหนักทุเรียน (กก.)</span><input id="fastDurianWeight" type="number" min="0" step="0.1" value="${escapeHtml(fastInputState.durian_weight || "")}" placeholder="0.0" required /></label>
+        <label class="field"><span>น้ำหนักทุเรียน (กก.)</span><input id="fastDurianWeight" class="production-pile-weight" type="number" min="0" step="0.1" value="${escapeHtml(fastInputState.durian_weight || "")}" placeholder="0.0" required /></label>
         <button class="btn btn-primary form-submit" type="submit" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังรับเข้าคิว..." : "บันทึก"}</button>
       </form>
       <p class="demo-note">กด Ctrl+S เพื่อบันทึก · Esc เพื่อล้างฟอร์ม</p>
@@ -9800,6 +9940,7 @@ function bindProductionFastEvents(user) {
 
   pileInput?.addEventListener("change", (event) => {
     fastInputState.pile_no = event.target.value;
+    applyProductionPileTone(form, event.target.value);
   });
 
   dateInput?.addEventListener("change", (event) => {
@@ -9876,6 +10017,8 @@ function bindProductionManagementEvents(user) {
     productionEditorOpen = true;
     productionEditorDate = productionRecordDate || new Date().toISOString().slice(0, 10);
     productionEditorFruit = selectedProductionFruit || "mangosteen";
+    productionEditorSelectedIds = [];
+    productionEditorBatchDate = productionEditorDate;
     editingProductionRecordId = null;
     deletingProductionRecordId = null;
     productionEditorMessage = "";
@@ -9884,6 +10027,8 @@ function bindProductionManagementEvents(user) {
 
   document.querySelector("[data-close-production-editor]")?.addEventListener("click", () => {
     productionEditorOpen = false;
+    productionEditorSelectedIds = [];
+    productionEditorBatchDate = "";
     editingProductionRecordId = null;
     deletingProductionRecordId = null;
     productionEditorMessage = "";
@@ -9893,6 +10038,8 @@ function bindProductionManagementEvents(user) {
 
   document.querySelector("#productionEditorDate")?.addEventListener("change", (event) => {
     productionEditorDate = event.target.value || new Date().toISOString().slice(0, 10);
+    productionEditorSelectedIds = [];
+    productionEditorBatchDate = productionEditorDate;
     editingProductionRecordId = null;
     deletingProductionRecordId = null;
     productionEditorMessage = "";
@@ -9901,6 +10048,7 @@ function bindProductionManagementEvents(user) {
 
   document.querySelector("#productionEditorFruit")?.addEventListener("change", (event) => {
     productionEditorFruit = event.target.value || "mangosteen";
+    productionEditorSelectedIds = [];
     editingProductionRecordId = null;
     deletingProductionRecordId = null;
     productionEditorMessage = "";
@@ -9922,6 +10070,53 @@ function bindProductionManagementEvents(user) {
     editingProductionRecordId = null;
     deletingProductionRecordId = null;
     render();
+  });
+
+  const selectAllProductionEditor = document.querySelector("[data-select-all-production-editor]");
+  if (selectAllProductionEditor) {
+    const visibleIds = getProductionEditorRecords(user).map((record) => Number(record.id));
+    const selectedVisibleCount = visibleIds.filter((id) => productionEditorSelectedIds.includes(id)).length;
+    selectAllProductionEditor.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
+    selectAllProductionEditor.addEventListener("change", () => {
+      const visibleIdSet = new Set(visibleIds);
+      const preserved = productionEditorSelectedIds.filter((id) => !visibleIdSet.has(Number(id)));
+      productionEditorSelectedIds = selectAllProductionEditor.checked ? [...preserved, ...visibleIds] : preserved;
+      editingProductionRecordId = null;
+      deletingProductionRecordId = null;
+      productionEditorMessage = "";
+      render();
+    });
+  }
+
+  document.querySelectorAll("[data-production-editor-select]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const recordId = Number(checkbox.dataset.productionEditorSelect);
+      if (checkbox.checked) {
+        productionEditorSelectedIds = [...new Set([...productionEditorSelectedIds, recordId])];
+      } else {
+        productionEditorSelectedIds = productionEditorSelectedIds.filter((id) => Number(id) !== recordId);
+      }
+      editingProductionRecordId = null;
+      deletingProductionRecordId = null;
+      productionEditorMessage = "";
+      render();
+    });
+  });
+
+  document.querySelector("[data-clear-production-selection]")?.addEventListener("click", () => {
+    productionEditorSelectedIds = [];
+    productionEditorMessage = "";
+    render();
+  });
+
+  document.querySelector("#productionBatchDateForm input[name='record_date']")?.addEventListener("change", (event) => {
+    productionEditorBatchDate = event.target.value;
+  });
+
+  document.querySelector("#productionBatchDateForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (productionEditorSaving) return;
+    saveProductionEditorBatchDate(user, event.currentTarget);
   });
 
   document.querySelectorAll("[data-select-production-edit]").forEach((button) => {
@@ -10189,10 +10384,22 @@ function bindProductionManagementEvents(user) {
     ,...document.querySelectorAll("[data-durian-batch-weight]")
   ].filter(Boolean);
 
+  document.querySelector("#productionBatchEntry")?.addEventListener("keydown", (event) => {
+    if (!isBatchProductionSaveShortcut(event)) return;
+    event.preventDefault();
+    if (productionSaving) return;
+    saveBatchEntries(user);
+  });
+
   batchInputs.forEach((input, index) => {
     input.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
+      if (isBatchProductionSaveShortcut(event)) {
+        event.stopPropagation();
+        if (!productionSaving) saveBatchEntries(user);
+        return;
+      }
       const nextInput = batchInputs[index + 1];
       if (nextInput) {
         nextInput.focus();

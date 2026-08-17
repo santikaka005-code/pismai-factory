@@ -43,6 +43,23 @@ class ProductionEditorServerTest(unittest.TestCase):
         self.assertIn('f"production_records?id=eq.{record_id}&{uid_filter_field}=eq.{quote(record_client_uid)}"', route)
         self.assertIn('production_record_client_uid(updated_row) != record_client_uid', route)
 
+    def test_batch_date_route_is_bounded_authorized_audited_and_rolls_back(self):
+        source = Path("report_server.py").read_text(encoding="utf-8")
+        route = source[
+            source.index('if parsed.path == "/api/production-records/batch-date"'):
+            source.index('production_record_match = re.fullmatch')
+        ]
+
+        self.assertIn("accounting_actor(self, 1)", route)
+        self.assertIn("not 1 <= len(selections) <= 50", route)
+        self.assertIn("production_record_within_self_edit_window", route)
+        self.assertIn("expected_updated_at", route)
+        self.assertIn("production_record_client_uid", route)
+        self.assertIn("def rollback_batch_date", route)
+        self.assertIn('"action": "BATCH_UPDATE_PRODUCTION_DATE"', route)
+        self.assertIn('"changed_fields": ["record_date"]', route)
+        self.assertIn("all batch date changes were rolled back", route)
+
     def test_c1_to_c3_can_edit_only_their_own_record_within_five_minutes(self):
         actor = {"username": "operator", "level": "C2"}
         account = {"username": "operator", "fullname": "Operator One", "user_level": "C2"}

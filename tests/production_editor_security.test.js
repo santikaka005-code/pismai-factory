@@ -61,6 +61,11 @@ assert.strictEqual(
 assert(source.includes("expected_updated_at"), "Production edits must use optimistic concurrency");
 assert(source.includes("data-open-production-editor"), "Production editor button is missing");
 assert(source.includes("data-select-production-delete"), "Production delete button is missing");
+assert(source.includes("data-select-all-production-editor"), "Production editor select-all checkbox is missing");
+assert(source.includes("data-production-editor-select"), "Production editor row checkboxes are missing");
+assert(source.includes("/api/production-records/batch-date"), "Batch production date endpoint is not connected");
+assert(source.includes("saveProductionEditorBatchDate"), "Batch production date save flow is missing");
+assert(source.includes("expected_updated_at: record.updated_at"), "Batch edits must include optimistic concurrency values");
 assert(
   source.includes("const showEdit = editUser ? canEditProductionRecord(editUser, record) : false"),
   "Production summary rows must enforce record-level edit permission"
@@ -69,5 +74,6 @@ assert(source.includes("expected_updated_at: existingRecord.updated_at"), "Produ
 assert(source.includes("getProductionClientUid(response.data) !== getProductionClientUid(existingRecord)"), "Production edit must verify stable client_uid");
 assert(source.includes("getProductionClientUid(record) !== existingUid"), "Production edit must remove stale local UID duplicates");
 assert(source.includes("Audit Log"), "Production editor must explain audit logging");
+assert(source.includes("BATCH_UPDATE_PRODUCTION_DATE"), "Batch date changes must be visible in Audit Log labels");
 
 console.log("Production editor permission and concurrency tests passed.");

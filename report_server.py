@@ -8239,6 +8239,212 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"deleted": before, "audit": audit_result})
             return
 
+        if parsed.path == "/api/production-records/batch-date":
+            actor = accounting_actor(self, 1)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 403)
+                return
+            selections = payload.get("records")
+            target_date = str(payload.get("record_date") or "").strip()
+            reason = str(payload.get("reason") or "").strip()
+            if (
+                not isinstance(selections, list)
+                or not 1 <= len(selections) <= 50
+                or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", target_date)
+                or target_date > datetime.now(timezone(timedelta(hours=7))).date().isoformat()
+                or len(reason) < 3
+            ):
+                self.send_json({"error": "Select 1-50 records, a valid date, and an edit reason."}, 400)
+                return
+
+            expected_by_id: dict[int, str] = {}
+            for selection in selections:
+                if not isinstance(selection, dict) or not str(selection.get("id") or "").isdigit():
+                    self.send_json({"error": "Every selected record must include a numeric id."}, 400)
+                    return
+                record_id = int(selection["id"])
+                if record_id in expected_by_id:
+                    self.send_json({"error": "Duplicate record ids are not allowed."}, 400)
+                    return
+                expected_by_id[record_id] = str(selection.get("expected_updated_at") or "")
+
+            record_ids = sorted(expected_by_id)
+            id_filter = ",".join(str(record_id) for record_id in record_ids)
+            status, existing_rows = supabase_request(
+                "GET",
+                f"production_records?id=in.({id_filter})&select=*&order=id.asc",
+            )
+            if status >= 400:
+                self.send_json({"error": existing_rows}, status)
+                return
+            existing_rows = existing_rows if isinstance(existing_rows, list) else []
+            existing_by_id = {
+                int(row.get("id")): row
+                for row in existing_rows
+                if isinstance(row, dict) and str(row.get("id") or "").isdigit()
+            }
+            if sorted(existing_by_id) != record_ids:
+                missing = [record_id for record_id in record_ids if record_id not in existing_by_id]
+                self.send_json({"error": "Some production records were not found.", "missing_ids": missing}, 404)
+                return
+
+            actor_status, actor_rows = supabase_request(
+                "GET",
+                f"account_users?id=eq.{quote(str(actor.get('sub', '')))}&select=username,fullname,user_level&limit=1",
+            )
+            actor_account = actor_rows[0] if actor_status < 400 and isinstance(actor_rows, list) and actor_rows else {}
+            actor_name = str(actor_account.get("fullname") or actor.get("username") or "System")
+            actor_username = str(actor_account.get("username") or actor.get("username") or "")
+            actor_level = account_level_number(actor_account.get("user_level") or actor.get("level"))
+
+            before_rows: list[dict] = []
+            for record_id in record_ids:
+                existing_row = existing_by_id[record_id]
+                before = live_state_to_client("production_records", existing_row)
+                if actor_level < 4 and not production_record_within_self_edit_window(
+                    before,
+                    actor,
+                    actor_account,
+                ):
+                    self.send_json(
+                        {
+                            "error": "C1-C3 may batch edit only their own production records within 5 minutes of creation.",
+                            "record_id": record_id,
+                        },
+                        403,
+                    )
+                    return
+                current_updated_at = str(before.get("updated_at") or before.get("created_at") or "")
+                if expected_by_id[record_id] and expected_by_id[record_id] != current_updated_at:
+                    self.send_json(
+                        {
+                            "error": "ข้อมูลบางรายการถูกแก้ไขจากเครื่องอื่นแล้ว กรุณาโหลดข้อมูลใหม่ก่อนแก้ไขแบบชุด",
+                            "record_id": record_id,
+                        },
+                        409,
+                    )
+                    return
+                client_uid = production_record_client_uid(existing_row)
+                if not client_uid:
+                    self.send_json({"error": "Selected record has no client_uid.", "record_id": record_id}, 409)
+                    return
+                uid_filter_field = quote("raw_payload->>client_uid", safe="")
+                uid_status, uid_rows = supabase_request(
+                    "GET",
+                    f"production_records?{uid_filter_field}=eq.{quote(client_uid)}&select=id&order=id.asc&limit=3",
+                )
+                if uid_status >= 400:
+                    self.send_json({"error": uid_rows}, uid_status)
+                    return
+                uid_ids = [
+                    int(row.get("id")) for row in uid_rows
+                    if isinstance(row, dict) and str(row.get("id") or "").isdigit()
+                ] if isinstance(uid_rows, list) else []
+                if uid_ids != [record_id]:
+                    self.send_json(
+                        {"error": "พบรายการซ้ำก่อนแก้ไขแบบชุด", "record_id": record_id, "existing_ids": uid_ids},
+                        409,
+                    )
+                    return
+                before_rows.append(before)
+
+            if all(str(before.get("record_date") or before.get("date") or "") == target_date for before in before_rows):
+                self.send_json({"error": "Selected records already use this production date."}, 400)
+                return
+
+            updated_rows: list[dict] = []
+            changed_originals: list[dict] = []
+
+            def rollback_batch_date() -> None:
+                for original in reversed(changed_originals):
+                    original_id = int(original.get("id") or 0)
+                    rollback = {key: value for key, value in original.items() if key != "id"}
+                    supabase_request(
+                        "PATCH",
+                        f"production_records?id=eq.{original_id}",
+                        rollback,
+                        prefer="return=minimal",
+                    )
+
+            updated_at = datetime.utcnow().isoformat() + "Z"
+            for record_id in record_ids:
+                original = existing_by_id[record_id]
+                raw_payload = original.get("raw_payload") if isinstance(original.get("raw_payload"), dict) else {}
+                next_raw_payload = {
+                    **raw_payload,
+                    "record_date": target_date,
+                    "date": target_date,
+                    "updated_by": actor_name,
+                    "updated_at": updated_at,
+                }
+                client_uid = production_record_client_uid(original)
+                uid_filter_field = quote("raw_payload->>client_uid", safe="")
+                update_status, update_result = supabase_request(
+                    "PATCH",
+                    f"production_records?id=eq.{record_id}&{uid_filter_field}=eq.{quote(client_uid)}",
+                    {
+                        "record_date": target_date,
+                        "updated_by": actor_name,
+                        "updated_at": updated_at,
+                        "raw_payload": next_raw_payload,
+                    },
+                    prefer="return=representation",
+                )
+                updated_row = update_result[0] if update_status < 400 and isinstance(update_result, list) and update_result else None
+                if (
+                    not updated_row
+                    or int(updated_row.get("id") or 0) != record_id
+                    or production_record_client_uid(updated_row) != client_uid
+                ):
+                    rollback_batch_date()
+                    self.send_json(
+                        {"error": "Batch date update failed; all changed records were rolled back.", "record_id": record_id},
+                        update_status if update_status >= 400 else 409,
+                    )
+                    return
+                changed_originals.append(original)
+                updated_rows.append(updated_row)
+
+            after_rows = [live_state_to_client("production_records", row) for row in updated_rows]
+            audit_created_at = datetime.utcnow().isoformat() + "Z"
+            audit_description = f"แก้วันที่ผลผลิต {len(record_ids)} รายการเป็น {target_date} เหตุผล: {reason}"
+            audit_row = {
+                "action": "BATCH_UPDATE_PRODUCTION_DATE",
+                "module": "production",
+                "description": audit_description,
+                "created_by": actor_username,
+                "user_fullname": actor_name,
+                "ip_address": self.client_address[0] if self.client_address else None,
+                "created_at": audit_created_at,
+                "metadata": {
+                    "action": "BATCH_UPDATE_PRODUCTION_DATE",
+                    "module": "production",
+                    "detail": audit_description,
+                    "description": audit_description,
+                    "created_by": actor_username,
+                    "user_fullname": actor_name,
+                    "username": actor_username,
+                    "role": actor_account.get("user_level") or actor.get("level", "C1"),
+                    "created_at": audit_created_at,
+                    "record_ids": record_ids,
+                    "reason": reason,
+                    "changed_fields": ["record_date"],
+                    "before": before_rows,
+                    "after": after_rows,
+                    "actor_level": actor.get("level", "C1"),
+                },
+            }
+            audit_status, audit_result = insert_audit_log_compatible(audit_row)
+            if audit_status >= 400:
+                rollback_batch_date()
+                self.send_json(
+                    {"error": "Audit log failed; all batch date changes were rolled back.", "audit_error": audit_result},
+                    500,
+                )
+                return
+            self.send_json({"data": after_rows, "audit": audit_result, "updated_count": len(after_rows)})
+            return
+
         production_record_match = re.fullmatch(r"/api/production-records/(\d+)", parsed.path)
         if production_record_match:
             actor = accounting_actor(self, 1)

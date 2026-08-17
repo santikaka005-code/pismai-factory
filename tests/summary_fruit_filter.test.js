@@ -27,6 +27,7 @@ const context = {
   getSession: () => ({ user: {} }),
   getSelectedSummaryDate: () => "2026-07-20",
   getDashboardRecordsForDate: () => [],
+  getDashboardRecordsForRange: () => [],
   filterProductionRecordsByFruit: (records) => records,
   getProductionTotals: () => ({ total: 0, water: 0, flower: 0, grades: { A: 0, B: 0, C: 0, D: 0, E: 0 }, amount: 0, people: new Set() }),
   getPileSummaries: () => [],
