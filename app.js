@@ -500,6 +500,7 @@ const builtInAccountLevels = {
 const defaultEmployees = [];
 
 const primaryPayGroups = ["เหมาโรงงาน", "เหมา(นนท์)", "เหมาปุ้ย"];
+const PAY_GROUP_CUSTOM_TONE_COUNT = 6;
 const PRODUCTION_WITHHOLDING_TAX_RATE = 0.03;
 const defaultProductionWithholdingTaxGroups = ["เหมา(นนท์)", "เหมาปุ้ย"];
 const legacyPayGroupMap = {
@@ -530,7 +531,9 @@ function getPayGroupToneClass(value) {
     ["เหมาปุ้ย", "pay-group-pui"]
   ]);
 
-  return toneMap.get(payGroup) || "pay-group-custom";
+  if (toneMap.has(payGroup)) return toneMap.get(payGroup);
+  const toneIndex = [...payGroup].reduce((sum, character) => sum + character.charCodeAt(0), 0) % PAY_GROUP_CUSTOM_TONE_COUNT;
+  return `pay-group-custom-${toneIndex + 1}`;
 }
 
 function renderPayGroupBadge(value) {
@@ -3173,7 +3176,17 @@ function getProductionWithholdingTax(payGroup, amount) {
 }
 
 function getEmployeePayGroups() {
-  return [...primaryPayGroups];
+  const employeeGroups = getEmployees()
+    .map((employee) => normalizeEmployeePayGroupValue(employee.pay_group))
+    .filter(Boolean);
+  const customGroups = [...new Set(employeeGroups)]
+    .filter((group) => !primaryPayGroups.includes(group))
+    .sort((a, b) => a.localeCompare(b, "th"));
+  return [...primaryPayGroups, ...customGroups];
+}
+
+function normalizeNewPayGroupName(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
 }
 
 function apiGetEmployees(search = "") {
@@ -6994,7 +7007,11 @@ function getSettingsPileAbsenceGroups(employees, dayRecords) {
   const presentEmployeeIds = new Set(dayRecords.map((record) => String(record.employee_id || "")).filter(Boolean));
   const presentEmployeeCodes = new Set(dayRecords.map((record) => String(record.emp_code || "").trim()).filter(Boolean));
 
-  return primaryPayGroups.map((payGroup) => {
+  const employeeGroups = employees.map(getEmployeePayGroup).filter(Boolean);
+  const customGroups = [...new Set(employeeGroups)]
+    .filter((group) => !primaryPayGroups.includes(group))
+    .sort((a, b) => a.localeCompare(b, "th"));
+  return [...primaryPayGroups, ...customGroups].map((payGroup) => {
     const groupEmployees = employees.filter(
       (employee) => employee.status === "Active" && getEmployeePayGroup(employee) === payGroup
     );
@@ -12556,10 +12573,8 @@ function renderEmployees(user, moduleItem) {
 function renderEmployeeForm(employee) {
   const mode = employee ? "Edit employee" : "Add employee";
   const currentPayGroup = employee ? getEmployeePayGroup(employee) : primaryPayGroups[0];
-  const selectedPayGroup = primaryPayGroups.includes(currentPayGroup)
-    ? currentPayGroup
-    : primaryPayGroups[0];
-  const payGroups = [...primaryPayGroups];
+  const selectedPayGroup = currentPayGroup || primaryPayGroups[0];
+  const payGroups = [...new Set([...getEmployeePayGroups(), selectedPayGroup])];
 
   return `
     <section class="panel">
@@ -12589,20 +12604,36 @@ function renderEmployeeForm(employee) {
           <input name="department" value="${employee ? escapeHtml(employee.department) : ""}" required />
         </label>
 
-        <label class="field">
+        <div class="field employee-pay-group-field">
           <span>กลุ่มรับเงิน</span>
-          <select name="pay_group" class="pay-group-select ${getPayGroupToneClass(selectedPayGroup)}" data-pay-group-select required>
-            <option value="">เลือกกลุ่มรับเงิน</option>
-            ${payGroups
-              .map(
-                (group) =>
-                  `<option value="${escapeHtml(group)}" ${
-                    selectedPayGroup === group ? "selected" : ""
-                  }>${escapeHtml(group)}</option>`
-              )
-              .join("")}
-          </select>
-        </label>
+          <div class="employee-pay-group-control">
+            <select name="pay_group" class="pay-group-select ${getPayGroupToneClass(selectedPayGroup)}" data-pay-group-select required>
+              <option value="">เลือกกลุ่มรับเงิน</option>
+              ${payGroups
+                .map(
+                  (group) =>
+                    `<option value="${escapeHtml(group)}" ${
+                      selectedPayGroup === group ? "selected" : ""
+                    }>${escapeHtml(group)}</option>`
+                )
+                .join("")}
+            </select>
+            <button class="btn btn-outline employee-pay-group-add" id="openPayGroupCreator" type="button" aria-expanded="false" aria-controls="payGroupCreator">
+              <span aria-hidden="true">+</span> เพิ่มกลุ่ม
+            </button>
+          </div>
+        </div>
+
+        <div class="employee-pay-group-creator" id="payGroupCreator" hidden>
+          <label for="newPayGroupName">ชื่อกลุ่มรับเงินใหม่</label>
+          <div>
+            <input id="newPayGroupName" maxlength="50" placeholder="เช่น เหมาคัดเกรด" autocomplete="off" />
+            <button class="btn btn-primary" id="confirmNewPayGroup" type="button">สร้างและเลือก</button>
+            <button class="btn btn-outline" id="cancelNewPayGroup" type="button">ยกเลิก</button>
+          </div>
+          <small>กลุ่มจะบันทึกลงฐานข้อมูลกลางพร้อมพนักงานคนนี้ และใช้เลือกกับคนอื่นได้ในครั้งถัดไป</small>
+          <span class="employee-pay-group-error" id="newPayGroupError" role="alert"></span>
+        </div>
 
         <label class="field">
           <span>Status</span>
@@ -12657,12 +12688,9 @@ function renderEmployeeRow(employee, canManage, canDelete) {
 }
 
 function updatePayGroupSelectTone(select) {
-  select.classList.remove(
-    "pay-group-factory",
-    "pay-group-non",
-    "pay-group-pui",
-    "pay-group-custom"
-  );
+  [...select.classList]
+    .filter((className) => className.startsWith("pay-group-") && className !== "pay-group-select")
+    .forEach((className) => select.classList.remove(className));
   select.classList.add(getPayGroupToneClass(select.value));
 }
 
@@ -12670,6 +12698,51 @@ function bindEmployeeEvents(user) {
   document.querySelectorAll("[data-pay-group-select]").forEach((select) => {
     updatePayGroupSelectTone(select);
     select.addEventListener("change", () => updatePayGroupSelectTone(select));
+  });
+
+  const payGroupSelect = document.querySelector("[data-pay-group-select]");
+  const payGroupCreator = document.querySelector("#payGroupCreator");
+  const payGroupInput = document.querySelector("#newPayGroupName");
+  const payGroupError = document.querySelector("#newPayGroupError");
+  const openPayGroupCreator = () => {
+    if (!payGroupCreator) return;
+    payGroupCreator.hidden = false;
+    document.querySelector("#openPayGroupCreator")?.setAttribute("aria-expanded", "true");
+    payGroupInput?.focus();
+  };
+  const closePayGroupCreator = () => {
+    if (!payGroupCreator) return;
+    payGroupCreator.hidden = true;
+    document.querySelector("#openPayGroupCreator")?.setAttribute("aria-expanded", "false");
+    if (payGroupInput) payGroupInput.value = "";
+    if (payGroupError) payGroupError.textContent = "";
+  };
+  const createAndSelectPayGroup = () => {
+    const groupName = normalizeNewPayGroupName(payGroupInput?.value);
+    if (groupName.length < 2 || groupName.length > 50) {
+      if (payGroupError) payGroupError.textContent = "ชื่อกลุ่มต้องมีความยาว 2-50 ตัวอักษร";
+      payGroupInput?.focus();
+      return false;
+    }
+    if (!payGroupSelect) return false;
+    const existingOption = [...payGroupSelect.options].find(
+      (option) => normalizeNewPayGroupName(option.value).toLocaleLowerCase("th-TH") === groupName.toLocaleLowerCase("th-TH")
+    );
+    const option = existingOption || new Option(groupName, groupName);
+    if (!existingOption) payGroupSelect.add(option);
+    payGroupSelect.value = option.value;
+    updatePayGroupSelectTone(payGroupSelect);
+    closePayGroupCreator();
+    return true;
+  };
+
+  document.querySelector("#openPayGroupCreator")?.addEventListener("click", openPayGroupCreator);
+  document.querySelector("#cancelNewPayGroup")?.addEventListener("click", closePayGroupCreator);
+  document.querySelector("#confirmNewPayGroup")?.addEventListener("click", createAndSelectPayGroup);
+  payGroupInput?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    createAndSelectPayGroup();
   });
 
   document.querySelector("#employeeSearchForm")?.addEventListener("submit", async (event) => {
@@ -12710,6 +12783,9 @@ function bindEmployeeEvents(user) {
       return;
     }
 
+    if (payGroupCreator && !payGroupCreator.hidden && normalizeNewPayGroupName(payGroupInput?.value)) {
+      if (!createAndSelectPayGroup()) return;
+    }
     const form = new FormData(event.currentTarget);
     const id = Number(form.get("id"));
     const empCode = normalizeEmployeeCodeInput(form.get("emp_code"));
@@ -15971,8 +16047,6 @@ function bindSummaryAllEvents() {
   });
 }
 
-const groupReportDefaultGroups = ["เหมาโรงงาน", "เหมา(นนท์)", "เหมาปุ้ย"];
-
 function normalizeGroupReportRange() {
   return normalizeDateRange(groupReportStartDate, groupReportEndDate);
 }
@@ -15987,9 +16061,10 @@ function getGroupReportPayGroups() {
     .filter((employee) => employee.status === "Active")
     .map((employee) => getEmployeePayGroup(employee))
     .filter(Boolean);
-  return [...new Set([...groupReportDefaultGroups, ...employeeGroups])].sort((a, b) =>
-    a.localeCompare(b, "th")
-  );
+  const customGroups = [...new Set(employeeGroups)]
+    .filter((group) => !primaryPayGroups.includes(group))
+    .sort((a, b) => a.localeCompare(b, "th"));
+  return [...primaryPayGroups, ...customGroups];
 }
 
 function getGroupReportRecords() {

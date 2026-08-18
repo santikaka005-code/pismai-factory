@@ -2157,6 +2157,107 @@ input:disabled {
   background: #ede9fe;
 }
 
+.pay-group-custom-1 {
+  border-color: #93c5fd;
+  color: #1e40af;
+  background: #dbeafe;
+}
+
+.pay-group-custom-2 {
+  border-color: #fda4af;
+  color: #9f1239;
+  background: #ffe4e6;
+}
+
+.pay-group-custom-3 {
+  border-color: #67e8f9;
+  color: #155e75;
+  background: #cffafe;
+}
+
+.pay-group-custom-4 {
+  border-color: #c4b5fd;
+  color: #5b21b6;
+  background: #ede9fe;
+}
+
+.pay-group-custom-5 {
+  border-color: #fdba74;
+  color: #9a3412;
+  background: #ffedd5;
+}
+
+.pay-group-custom-6 {
+  border-color: #f9a8d4;
+  color: #9d174d;
+  background: #fce7f3;
+}
+
+.employee-pay-group-field {
+  min-width: 0;
+}
+
+.employee-pay-group-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.employee-pay-group-add {
+  min-height: 50px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.employee-pay-group-add span {
+  display: inline;
+  margin: 0;
+  color: currentColor;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.employee-pay-group-creator {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 8px;
+  border: 1px solid #99d5ca;
+  border-radius: 8px;
+  margin-top: 10px;
+  padding: 12px;
+  background: #f0fdfa;
+}
+
+.employee-pay-group-creator[hidden] {
+  display: none;
+}
+
+.employee-pay-group-creator > label {
+  color: #134e4a;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.employee-pay-group-creator > div {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto auto;
+  gap: 8px;
+}
+
+.employee-pay-group-creator small {
+  color: #52706b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.employee-pay-group-error {
+  min-height: 0;
+  margin: 0;
+  color: #b42318;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .table-card {
   overflow: hidden;
 }
@@ -2369,7 +2470,7 @@ tr:last-child td {
 }
 
 .employee-form {
-  grid-template-columns: 1fr 1.35fr 1fr 1fr 0.8fr auto;
+  grid-template-columns: 0.8fr 1.25fr 1fr minmax(260px, 1.4fr) 0.75fr auto;
 }
 
 .rate-form {
@@ -5995,6 +6096,14 @@ tr:last-child td {
   .audit-summary-grid,
   .audit-filter-form {
     grid-template-columns: 1fr;
+  }
+
+  .employee-pay-group-creator > div {
+    grid-template-columns: 1fr;
+  }
+
+  .employee-pay-group-creator .btn {
+    width: 100%;
   }
 
   .summary-main-export-workspace > div:first-child,
