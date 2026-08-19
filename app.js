@@ -5275,6 +5275,73 @@ async function exportPfPayments(format, method, payload) {
   });
 }
 
+function normalizePfCostFruit(value) {
+  const text = String(value || "").trim().toLocaleLowerCase("th-TH");
+  if (text.includes("มังคุด") || text.includes("mangosteen")) return "mangosteen";
+  if (text.includes("ทุเรียน") || text.includes("durian")) return "durian";
+  if (text.includes("มะม่วง") || text.includes("mango")) return "mango";
+  if (text.includes("มะพร้าว") || text.includes("coconut")) return "coconut";
+  return text || "other";
+}
+
+async function getPfCostAnalysis(startDate, endDate) {
+  const range = normalizeDateRange(startDate, endDate);
+  await loadInboundData();
+  const fruitNameById = new Map(inboundData.fruits.map((fruit) => [String(fruit.id), fruit.name || fruit.label || `ผลไม้ ${fruit.id}`]));
+  const labels = new Map(productionFruitOptions.map((fruit) => [fruit.id, fruit.label]));
+  const rows = new Map();
+  const ensure = (fruitId, label = "ผลไม้อื่น") => {
+    if (!rows.has(fruitId)) rows.set(fruitId, { fruit_id: fruitId, fruit_label: label, inbound_weight: 0, inbound_cost: 0, output_weight: 0, production_labor: 0, time_labor_allocated: 0, total_estimated_cost: 0, yield_percent: 0, raw_cost_per_output_kg: 0, total_cost_per_output_kg: 0 });
+    return rows.get(fruitId);
+  };
+
+  inboundData.receipts.filter((receipt) => {
+    const date = String(receipt.received_at || receipt.receipt_date || "").slice(0, 10);
+    return date >= range.startDate && date <= range.endDate;
+  }).forEach((receipt) => {
+    const inboundLabel = fruitNameById.get(String(receipt.fruit_id)) || receipt.fruit_name || "ผลไม้อื่น";
+    const fruitId = normalizePfCostFruit(inboundLabel);
+    const row = ensure(fruitId, labels.get(fruitId) || inboundLabel);
+    row.inbound_weight += Number(receipt.weight_kg || 0);
+    row.inbound_cost += Number(receipt.total_amount || (Number(receipt.weight_kg || 0) * Number(receipt.price_per_kg || 0)) || 0);
+  });
+
+  getProductionRecords().filter((record) => {
+    const date = getRecordDate(record);
+    return date >= range.startDate && date <= range.endDate;
+  }).forEach((record) => {
+    const fruitId = productionFruitTypeForRecord(record);
+    const row = ensure(fruitId, labels.get(fruitId) || fruitId);
+    row.output_weight += getRecordTotalWeight(record);
+    row.production_labor += Number(record.total_amount || record.grand_total || 0);
+  });
+
+  const payrollRows = getPfAccountingWeeklyRows(range.startDate, range.endDate);
+  const timeLabor = payrollRows.filter((row) => row.employee_kind === "time").reduce((total, row) => total + Number(row.gross_amount || 0) + Number(row.bonus_amount || 0), 0);
+  const totalOutput = Array.from(rows.values()).reduce((total, row) => total + row.output_weight, 0);
+  rows.forEach((row) => {
+    row.time_labor_allocated = totalOutput > 0 ? timeLabor * (row.output_weight / totalOutput) : 0;
+    row.total_estimated_cost = row.inbound_cost + row.production_labor + row.time_labor_allocated;
+    row.yield_percent = row.inbound_weight > 0 ? (row.output_weight / row.inbound_weight) * 100 : 0;
+    row.raw_cost_per_output_kg = row.output_weight > 0 ? row.inbound_cost / row.output_weight : 0;
+    row.total_cost_per_output_kg = row.output_weight > 0 ? row.total_estimated_cost / row.output_weight : 0;
+  });
+  const detail = Array.from(rows.values()).sort((a, b) => b.inbound_cost - a.inbound_cost || a.fruit_label.localeCompare(b.fruit_label, "th"));
+  return {
+    start_date: range.startDate,
+    end_date: range.endDate,
+    rows: detail,
+    totals: {
+      inbound_weight: detail.reduce((total, row) => total + row.inbound_weight, 0),
+      inbound_cost: detail.reduce((total, row) => total + row.inbound_cost, 0),
+      output_weight: detail.reduce((total, row) => total + row.output_weight, 0),
+      production_labor: detail.reduce((total, row) => total + row.production_labor, 0),
+      time_labor: timeLabor,
+      total_estimated_cost: detail.reduce((total, row) => total + row.total_estimated_cost, 0)
+    }
+  };
+}
+
 function renderApp(user, route) {
   if (route !== "secret-room") window.SecretRoom?.stop?.();
   window.SecretRoom?.startNotifications?.();
@@ -5328,7 +5395,8 @@ function renderApp(user, route) {
       getWeeklyRows: getPfAccountingWeeklyRows,
       loadAllocations: getPfPaymentAllocations,
       saveAllocations: savePfPaymentAllocations,
-      exportPayments: exportPfPayments
+      exportPayments: exportPfPayments,
+      getCostAnalysis: getPfCostAnalysis
     });
     return;
   }
