@@ -6,6 +6,13 @@
   const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
   const money = (value) => `฿${(Number(value) || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const isoDate = (date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  function addDays(dateText, days) {
+    const parts = String(dateText || "").split("-").map(Number);
+    if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return dateText;
+    const date = new Date(parts[0], parts[1] - 1, parts[2]);
+    date.setDate(date.getDate() + days);
+    return isoDate(date);
+  }
 
   function currentWeek() {
     const today = new Date();
@@ -34,11 +41,22 @@
     if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) return options.onExit?.();
 
     const week = currentWeek();
-    const state = { view: "allocation", kind: "production", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, expanded: new Set(), loading: true, message: "", messageType: "success" };
+    const state = { view: "allocation", kind: "production", exportScope: "all", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, expanded: new Set(), loading: true, message: "", messageType: "success" };
     const methodOf = (row) => state.allocations[row.employee_key] === "transfer" ? "transfer" : "cash";
     const methodRows = (method) => state.rows.filter((row) => method === "all" || methodOf(row) === method);
     const sum = (rows) => rows.reduce((total, row) => total + Number(row.net_amount || 0), 0);
     const totals = () => ({ cash: methodRows("cash"), transfer: methodRows("transfer"), total: sum(state.rows) });
+    function scopedExportRows() {
+      if (state.exportScope === "all") return state.rows;
+      const [kind, group = "*"] = state.exportScope.split("::");
+      return state.rows.filter((row) => row.employee_kind === kind && (group === "*" || row.group_label === group));
+    }
+    function exportScopeLabel() {
+      if (state.exportScope === "all") return "พนักงานทั้งหมด";
+      const [kind, group = "*"] = state.exportScope.split("::");
+      const kindLabel = kind === "time" ? "พนักงานเวลา" : "พนักงานเหมา";
+      return group === "*" ? `${kindLabel}ทุกกลุ่ม` : `${kindLabel} - ${group}`;
+    }
 
     async function load() {
       state.loading = true;
@@ -80,7 +98,7 @@
     }
 
     async function exportFile(method, format) {
-      const rows = methodRows(method);
+      const rows = scopedExportRows().filter((row) => methodOf(row) === method);
       if (!rows.length) {
         state.message = `ไม่มีรายการ${method === "cash" ? "เงินสด" : "เงินโอน"}สำหรับ Export`;
         state.messageType = "error";
@@ -90,7 +108,7 @@
       state.messageType = "success";
       paint();
       try {
-        await options.exportPayments?.(format, method, { start_date: state.startDate, end_date: state.endDate, payment_method: method, rows: rows.map((row, index) => ({ ...row, sequence: index + 1, payment_method: method })), printed_by: user?.fullname || user?.username || "System Admin", printed_by_position: String(user?.level || "C4") });
+        await options.exportPayments?.(format, method, { start_date: state.startDate, end_date: state.endDate, payment_method: method, scope_label: exportScopeLabel(), rows: rows.map((row, index) => ({ ...row, sequence: index + 1, payment_method: method })), printed_by: user?.fullname || user?.username || "System Admin", printed_by_position: String(user?.level || "C4") });
         state.message = `Export ${format === "excel" ? "Excel" : "PDF"} เรียบร้อยแล้ว`;
         options.onAudit?.("PF_PAYMENT_EXPORT", `Export ${method} ${format} ${state.startDate} - ${state.endDate}`);
       } catch (error) {
@@ -128,8 +146,12 @@
     }
 
     function exportMarkup() {
-      const summary = totals();
-      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF ACCOUNTING</p><h1>Export รายการจ่ายเงิน</h1><span>แยกเอกสารเงินสดและเงินโอนตามการจัดสรรล่าสุด</span></div><div class="acr-period-static">${escapeHtml(state.startDate)} ถึง ${escapeHtml(state.endDate)}</div></header><div class="acr-export-summary"><strong>ยอดสุทธิรวม ${money(summary.total)}</strong><span>ตรวจสอบแล้ว: เงินสด + เงินโอน = ยอดสุทธิรวม</span></div><div class="acr-export-grid">${exportCard("cash", "รายการจ่ายเงินสด", summary.cash)}${exportCard("transfer", "รายการจ่ายเงินโอน", summary.transfer)}</div><section class="acr-export-preview"><div class="acr-list-head"><div><h2>ตัวอย่างรายการที่จะส่งออก</h2><span>ใช้หัวกระดาษ โลโก้ ชื่อบริษัท ช่วงวันที่ และข้อมูลผู้ออกเอกสารตามฟอร์มหลัก</span></div></div><div class="acr-table-wrap"><table><thead><tr><th>ลำดับ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กลุ่ม</th><th>วิธีจ่าย</th><th class="acr-number">ยอดสุทธิ</th></tr></thead><tbody>${state.rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${escapeHtml(row.group_label)}</td><td>${methodOf(row) === "cash" ? "เงินสด" : "เงินโอน"}</td><td class="acr-number"><strong>${money(row.net_amount)}</strong></td></tr>`).join("")}</tbody></table></div></section></section>`;
+      const rows = scopedExportRows();
+      const cashRows = rows.filter((row) => methodOf(row) === "cash");
+      const transferRows = rows.filter((row) => methodOf(row) === "transfer");
+      const productionGroups = [...new Set(state.rows.filter((row) => row.employee_kind === "production").map((row) => row.group_label))].sort((a, b) => a.localeCompare(b, "th"));
+      const timeGroups = [...new Set(state.rows.filter((row) => row.employee_kind === "time").map((row) => row.group_label))].sort((a, b) => a.localeCompare(b, "th"));
+      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF ACCOUNTING</p><h1>Export รายการจ่ายเงิน</h1><span>แยกเอกสารเงินสดและเงินโอนตามการจัดสรรล่าสุด</span></div><div class="acr-period-static">${escapeHtml(state.startDate)} ถึง ${escapeHtml(state.endDate)}</div></header><div class="acr-export-filter"><label>ขอบเขตรายงาน<select data-export-scope><option value="all" ${state.exportScope === "all" ? "selected" : ""}>พนักงานทั้งหมด</option><optgroup label="พนักงานเหมา"><option value="production::*" ${state.exportScope === "production::*" ? "selected" : ""}>พนักงานเหมาทุกกลุ่ม</option>${productionGroups.map((group) => `<option value="production::${escapeHtml(group)}" ${state.exportScope === `production::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup><optgroup label="พนักงานเวลา"><option value="time::*" ${state.exportScope === "time::*" ? "selected" : ""}>พนักงานเวลาทุกกลุ่ม</option>${timeGroups.map((group) => `<option value="time::${escapeHtml(group)}" ${state.exportScope === `time::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup></select></label><div><span>กำลังแสดง</span><strong>${escapeHtml(exportScopeLabel())}</strong><small>${rows.length} คน</small></div></div><div class="acr-export-summary"><strong>ยอดสุทธิรวม ${money(sum(rows))}</strong><span>เงินสด ${money(sum(cashRows))} + เงินโอน ${money(sum(transferRows))}</span></div><div class="acr-export-grid">${exportCard("cash", "รายการจ่ายเงินสด", cashRows)}${exportCard("transfer", "รายการจ่ายเงินโอน", transferRows)}</div><section class="acr-export-preview"><div class="acr-list-head"><div><h2>ตัวอย่างรายการที่จะส่งออก</h2><span>ไฟล์จะแสดงขอบเขต “${escapeHtml(exportScopeLabel())}” บนเอกสาร</span></div></div><div class="acr-table-wrap"><table><thead><tr><th>ลำดับ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>ประเภท</th><th>กลุ่ม</th><th>วิธีจ่าย</th><th class="acr-number">ยอดสุทธิ</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${row.employee_kind === "time" ? "พนักงานเวลา" : "พนักงานเหมา"}</td><td>${escapeHtml(row.group_label)}</td><td>${methodOf(row) === "cash" ? "เงินสด" : "เงินโอน"}</td><td class="acr-number"><strong>${money(row.net_amount)}</strong></td></tr>`).join("")}</tbody></table></div></section></section>`;
     }
 
     function paint() {
@@ -146,10 +168,20 @@
       root.querySelectorAll("[data-method-key]").forEach((button) => button.addEventListener("click", () => { state.allocations[button.dataset.methodKey] = button.dataset.method; save(`เปลี่ยน ${button.dataset.methodKey} เป็น ${button.dataset.method}`); }));
       root.querySelectorAll("[data-expand-key]").forEach((button) => button.addEventListener("click", () => { const key = button.dataset.expandKey; state.expanded.has(key) ? state.expanded.delete(key) : state.expanded.add(key); paint(); }));
       root.querySelector("[data-apply-group]")?.addEventListener("click", () => { const method = root.querySelector("[data-group-method]")?.value === "transfer" ? "transfer" : "cash"; state.rows.filter((row) => row.employee_kind === state.kind && (state.group === "all" || row.group_label === state.group)).forEach((row) => { state.allocations[row.employee_key] = method; }); save(`ตั้ง ${state.kind}/${state.group} เป็น ${method}`); });
-      const changeRange = () => { state.startDate = root.querySelector("[data-start-date]")?.value || state.startDate; state.endDate = root.querySelector("[data-end-date]")?.value || state.endDate; if (state.startDate > state.endDate) [state.startDate, state.endDate] = [state.endDate, state.startDate]; state.group = "all"; load(); };
-      root.querySelector("[data-start-date]")?.addEventListener("change", changeRange);
-      root.querySelector("[data-end-date]")?.addEventListener("change", changeRange);
+      root.querySelector("[data-start-date]")?.addEventListener("change", (event) => {
+        state.startDate = event.target.value || state.startDate;
+        state.endDate = addDays(state.startDate, 6);
+        state.group = "all";
+        load();
+      });
+      root.querySelector("[data-end-date]")?.addEventListener("change", (event) => {
+        state.endDate = event.target.value || state.endDate;
+        if (state.endDate < state.startDate) state.endDate = state.startDate;
+        state.group = "all";
+        load();
+      });
       root.querySelectorAll("[data-export-method]").forEach((button) => button.addEventListener("click", () => exportFile(button.dataset.exportMethod, button.dataset.exportFormat)));
+      root.querySelector("[data-export-scope]")?.addEventListener("change", (event) => { state.exportScope = event.target.value || "all"; paint(); });
     }
 
     paint();

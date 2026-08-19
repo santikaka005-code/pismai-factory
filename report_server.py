@@ -7073,6 +7073,7 @@ def build_accounting_payments_excel(payload: dict) -> bytes:
     start_date, end_date = normalized_range(payload)
     method = "transfer" if payload.get("payment_method") == "transfer" else "cash"
     label = accounting_payment_label(method)
+    scope_label = str(payload.get("scope_label") or "พนักงานทั้งหมด")
     rows = accounting_payment_rows(payload)
     workbook = Workbook()
     sheet = workbook.active
@@ -7084,7 +7085,7 @@ def build_accounting_payments_excel(payload: dict) -> bytes:
     sheet["A2"] = f"รายการจ่ายค่าแรง - {label}"
     sheet["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
     sheet.merge_cells("A3:J3")
-    sheet["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
+    sheet["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | ขอบเขต {scope_label}"
     sheet.merge_cells("A4:J4")
     sheet["A4"] = export_meta_text(payload)
     add_excel_logo(sheet, "K1")
@@ -7113,6 +7114,7 @@ def build_accounting_payments_pdf(payload: dict) -> bytes:
     start_date, end_date = normalized_range(payload)
     method = "transfer" if payload.get("payment_method") == "transfer" else "cash"
     label = accounting_payment_label(method)
+    scope_label = str(payload.get("scope_label") or "พนักงานทั้งหมด")
     rows = accounting_payment_rows(payload)
     buffer = BytesIO()
     document = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=12 * mm, leftMargin=12 * mm, topMargin=12 * mm, bottomMargin=16 * mm)
@@ -7122,7 +7124,7 @@ def build_accounting_payments_pdf(payload: dict) -> bytes:
     small.leading = 9
     story = report_header_story(
         f"รายการจ่ายค่าแรง - {label}",
-        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}",
+        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | ขอบเขต {xml_escape(scope_label)}",
         payload,
     )
     story += [Spacer(1, 5 * mm), Paragraph(f"จำนวน {len(rows)} คน | ยอดสุทธิรวม {report_number(sum(row['net_amount'] for row in rows))} บาท", section), Spacer(1, 3 * mm)]
