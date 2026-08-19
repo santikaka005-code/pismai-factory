@@ -5389,6 +5389,10 @@ function renderApp(user, route) {
   }
 
   if (route === "accounting-control" && window.AccountingControl) {
+    // Background bootstrap tasks can call render() several seconds after this
+    // workspace opens. Keep the mounted controller so its selected view,
+    // filters and scroll position are not reset to their initial values.
+    if (app.querySelector(".acr-shell")) return;
     window.AccountingControl.render(app, user, {
       onExit: () => { location.hash = "#/dashboard"; },
       onAudit: (action, description) => addAuditLog(user, action, description),
