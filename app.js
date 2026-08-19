@@ -5137,6 +5137,22 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
   const productionEmployees = getEmployees().filter((employee) => employee.status === "Active");
   const productionById = new Map(productionEmployees.map((employee) => [String(employee.id), employee]));
   const productionByCode = new Map(productionEmployees.map((employee) => [String(employee.emp_code), employee]));
+  productionEmployees.forEach((employee) => {
+    const employeeKey = `production:${employee.id || employee.emp_code}`;
+    rows.set(employeeKey, {
+      employee_key: employeeKey,
+      employee_kind: "production",
+      employee_id: employee.id,
+      emp_code: employee.emp_code || "-",
+      fullname: employee.fullname || "-",
+      group_label: getEmployeePayGroup(employee) || "ไม่ระบุกลุ่ม",
+      gross_amount: 0,
+      bonus_amount: 0,
+      deduction_amount: 0,
+      withholding_tax_amount: 0,
+      net_amount: 0
+    });
+  });
 
   getProductionRecords()
     .filter((record) => {
@@ -5182,6 +5198,23 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
   const timeEmployees = getTimeEmployees().filter((employee) => employee.status === "Active");
   const timeById = new Map(timeEmployees.map((employee) => [String(employee.id), employee]));
   const timeByCode = new Map(timeEmployees.map((employee) => [String(employee.emp_code), employee]));
+  timeEmployees.forEach((employee) => {
+    const type = getTimeEmployeeTypeOption(employee.employee_type);
+    const employeeKey = `time:${employee.id || employee.emp_code}`;
+    rows.set(employeeKey, {
+      employee_key: employeeKey,
+      employee_kind: "time",
+      employee_id: employee.id,
+      emp_code: employee.emp_code || "-",
+      fullname: employee.fullname || "-",
+      group_label: type.category === "special" ? "กลุ่มพิเศษ" : "กลุ่มปกติ",
+      gross_amount: 0,
+      bonus_amount: 0,
+      deduction_amount: 0,
+      withholding_tax_amount: 0,
+      net_amount: 0
+    });
+  });
   const timeRecords = getTimeRecords().filter((record) => (record.record_date || "") >= range.startDate && (record.record_date || "") <= range.endDate);
   combineTimeRecordsByEmployeeDate(timeRecords).forEach((record) => {
     const employee = timeById.get(String(record.employee_id || "")) || timeByCode.get(String(record.emp_code || ""));
@@ -5195,7 +5228,7 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
         employee_id: employee.id,
         emp_code: employee.emp_code || "-",
         fullname: employee.fullname || "-",
-        group_label: `พนักงานเวลา - ${getTimeReportGroupLabel(type.id)}`,
+        group_label: type.category === "special" ? "กลุ่มพิเศษ" : "กลุ่มปกติ",
         gross_amount: 0,
         bonus_amount: 0,
         deduction_amount: 0,
