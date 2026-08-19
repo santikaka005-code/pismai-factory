@@ -5168,9 +5168,14 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
   rows.forEach((row) => {
     if (row.employee_kind !== "production") return;
     const employee = productionById.get(String(row.employee_id || "")) || productionByCode.get(String(row.emp_code || ""));
-    row.bonus_amount = getBonusTotalForEmployee("production", employee || row, range.startDate, range.endDate);
-    row.deduction_amount = getDeductionTotalForEmployee("production", employee || row, range.startDate, range.endDate);
+    const bonusRecords = getBonusesForRange("production", range.startDate, range.endDate, employee || row);
+    const deductionRecords = getDeductionsForRange("production", range.startDate, range.endDate, employee || row);
+    row.bonus_items = bonusRecords.map((record) => ({ label: record.deduction_label || "เงินเพิ่ม", amount: Number(record.amount || 0), note: record.note || "", start_date: record.start_date || "", end_date: record.end_date || record.start_date || "", created_by: record.created_by || "" }));
+    row.deduction_items = deductionRecords.map((record) => ({ label: record.deduction_label || "รายการหัก", amount: Number(record.amount || 0), note: record.note || "", start_date: record.start_date || "", end_date: record.end_date || record.start_date || "", created_by: record.created_by || "" }));
+    row.bonus_amount = sumDeductions(bonusRecords);
+    row.deduction_amount = sumDeductions(deductionRecords);
     row.withholding_tax_amount = getProductionWithholdingTax(row.group_label, row.gross_amount);
+    if (row.withholding_tax_amount > 0) row.deduction_items.push({ label: "หัก ณ ที่จ่าย 3%", amount: row.withholding_tax_amount, note: `คำนวณจากยอดค่าแรงของกลุ่ม ${row.group_label}`, start_date: range.startDate, end_date: range.endDate, created_by: "ระบบ" });
     row.net_amount = Math.max(0, row.gross_amount + row.bonus_amount - row.deduction_amount - row.withholding_tax_amount);
   });
 
@@ -5205,8 +5210,12 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
   rows.forEach((row) => {
     if (row.employee_kind !== "time") return;
     const employee = timeById.get(String(row.employee_id || "")) || timeByCode.get(String(row.emp_code || ""));
-    row.bonus_amount = getBonusTotalForEmployee("time", employee || row, range.startDate, range.endDate);
-    row.deduction_amount = getDeductionTotalForEmployee("time", employee || row, range.startDate, range.endDate);
+    const bonusRecords = getBonusesForRange("time", range.startDate, range.endDate, employee || row);
+    const deductionRecords = getDeductionsForRange("time", range.startDate, range.endDate, employee || row);
+    row.bonus_items = bonusRecords.map((record) => ({ label: record.deduction_label || "เงินเพิ่ม", amount: Number(record.amount || 0), note: record.note || "", start_date: record.start_date || "", end_date: record.end_date || record.start_date || "", created_by: record.created_by || "" }));
+    row.deduction_items = deductionRecords.map((record) => ({ label: record.deduction_label || "รายการหัก", amount: Number(record.amount || 0), note: record.note || "", start_date: record.start_date || "", end_date: record.end_date || record.start_date || "", created_by: record.created_by || "" }));
+    row.bonus_amount = sumDeductions(bonusRecords);
+    row.deduction_amount = sumDeductions(deductionRecords);
     row.net_amount = Math.max(0, row.gross_amount + row.bonus_amount - row.deduction_amount);
   });
 

@@ -34,7 +34,7 @@
     if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) return options.onExit?.();
 
     const week = currentWeek();
-    const state = { view: "allocation", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, loading: true, message: "", messageType: "success" };
+    const state = { view: "allocation", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, expanded: new Set(), loading: true, message: "", messageType: "success" };
     const methodOf = (row) => state.allocations[row.employee_key] === "transfer" ? "transfer" : "cash";
     const methodRows = (method) => state.rows.filter((row) => method === "all" || methodOf(row) === method);
     const sum = (rows) => rows.reduce((total, row) => total + Number(row.net_amount || 0), 0);
@@ -102,7 +102,11 @@
 
     function rowMarkup(row) {
       const method = methodOf(row);
-      return `<tr><td><strong>${escapeHtml(row.emp_code || "-")}</strong><small>${escapeHtml(row.fullname || "-")}</small></td><td>${escapeHtml(row.group_label || "-")}</td><td class="acr-number">${money(row.gross_amount)}</td><td class="acr-number acr-positive">+${money(row.bonus_amount)}</td><td class="acr-number acr-negative">-${money(Number(row.deduction_amount || 0) + Number(row.withholding_tax_amount || 0))}</td><td class="acr-number"><strong>${money(row.net_amount)}</strong></td><td><div class="acr-method-switch"><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="cash" class="${method === "cash" ? "is-cash" : ""}">เงินสด</button><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="transfer" class="${method === "transfer" ? "is-transfer" : ""}">เงินโอน</button></div></td></tr>`;
+      const expanded = state.expanded.has(row.employee_key);
+      const detailItems = (items, tone, emptyText) => items?.length
+        ? items.map((item) => `<article><div><b>${escapeHtml(item.label || "-")}</b><span>${escapeHtml(item.start_date || "-")}${item.end_date && item.end_date !== item.start_date ? ` ถึง ${escapeHtml(item.end_date)}` : ""}</span></div><strong class="${tone}">${tone === "acr-positive" ? "+" : "-"}${money(item.amount)}</strong><p>${escapeHtml(item.note || "ไม่มีหมายเหตุ")}</p><small>บันทึกโดย ${escapeHtml(item.created_by || "-")}</small></article>`).join("")
+        : `<div class="acr-detail-empty">${emptyText}</div>`;
+      return `<tr class="acr-employee-row ${expanded ? "is-expanded" : ""}"><td><button type="button" class="acr-employee-toggle" data-expand-key="${escapeHtml(row.employee_key)}" aria-expanded="${expanded}"><span>${expanded ? "▾" : "▸"}</span><span><strong>${escapeHtml(row.emp_code || "-")}</strong><small>${escapeHtml(row.fullname || "-")} · ${row.employee_kind === "time" ? "พนักงานเวลา" : "พนักงานเหมา"}</small></span></button></td><td>${escapeHtml(row.group_label || "-")}</td><td class="acr-number">${money(row.gross_amount)}</td><td class="acr-number acr-positive">+${money(row.bonus_amount)}</td><td class="acr-number acr-negative">-${money(Number(row.deduction_amount || 0) + Number(row.withholding_tax_amount || 0))}</td><td class="acr-number"><strong>${money(row.net_amount)}</strong></td><td><div class="acr-method-switch"><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="cash" class="${method === "cash" ? "is-cash" : ""}">เงินสด</button><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="transfer" class="${method === "transfer" ? "is-transfer" : ""}">เงินโอน</button></div></td></tr>${expanded ? `<tr class="acr-detail-row"><td colspan="7"><div class="acr-detail-grid"><section><header><span>เงินเพิ่ม</span><strong class="acr-positive">+${money(row.bonus_amount)}</strong></header>${detailItems(row.bonus_items, "acr-positive", "ไม่มีรายการเงินเพิ่มในรอบนี้")}</section><section><header><span>รายการหัก</span><strong class="acr-negative">-${money(Number(row.deduction_amount || 0) + Number(row.withholding_tax_amount || 0))}</strong></header>${detailItems(row.deduction_items, "acr-negative", "ไม่มีรายการหักในรอบนี้")}</section></div></td></tr>` : ""}`;
     }
 
     function allocationMarkup() {
@@ -136,6 +140,7 @@
       root.querySelector("[data-reload]")?.addEventListener("click", load);
       root.querySelectorAll("[data-group]").forEach((button) => button.addEventListener("click", () => { state.group = button.dataset.group; paint(); }));
       root.querySelectorAll("[data-method-key]").forEach((button) => button.addEventListener("click", () => { state.allocations[button.dataset.methodKey] = button.dataset.method; save(`เปลี่ยน ${button.dataset.methodKey} เป็น ${button.dataset.method}`); }));
+      root.querySelectorAll("[data-expand-key]").forEach((button) => button.addEventListener("click", () => { const key = button.dataset.expandKey; state.expanded.has(key) ? state.expanded.delete(key) : state.expanded.add(key); paint(); }));
       root.querySelector("[data-apply-group]")?.addEventListener("click", () => { const method = root.querySelector("[data-group-method]")?.value === "transfer" ? "transfer" : "cash"; state.rows.filter((row) => state.group === "all" || row.group_label === state.group).forEach((row) => { state.allocations[row.employee_key] = method; }); save(`ตั้ง ${state.group} เป็น ${method}`); });
       const changeRange = () => { state.startDate = root.querySelector("[data-start-date]")?.value || state.startDate; state.endDate = root.querySelector("[data-end-date]")?.value || state.endDate; if (state.startDate > state.endDate) [state.startDate, state.endDate] = [state.endDate, state.startDate]; state.group = "all"; load(); };
       root.querySelector("[data-start-date]")?.addEventListener("change", changeRange);
