@@ -7042,6 +7042,121 @@ def build_time_summary_pdf(payload: dict) -> bytes:
     return buffer.getvalue()
 
 
+def accounting_payment_rows(payload: dict) -> list[dict]:
+    method = str(payload.get("payment_method") or "cash")
+    if method not in {"cash", "transfer"}:
+        method = "cash"
+    rows = []
+    for index, raw in enumerate(payload.get("rows") or [], start=1):
+        if not isinstance(raw, dict) or str(raw.get("payment_method") or method) != method:
+            continue
+        rows.append({
+            "sequence": index,
+            "emp_code": str(raw.get("emp_code") or "-"),
+            "fullname": str(raw.get("fullname") or "-"),
+            "group_label": str(raw.get("group_label") or "-"),
+            "gross_amount": max(0, safe_float(raw.get("gross_amount"))),
+            "bonus_amount": max(0, safe_float(raw.get("bonus_amount"))),
+            "deduction_amount": max(0, safe_float(raw.get("deduction_amount"))),
+            "withholding_tax_amount": max(0, safe_float(raw.get("withholding_tax_amount"))),
+            "net_amount": max(0, safe_float(raw.get("net_amount"))),
+            "payment_method": method,
+        })
+    return rows
+
+
+def accounting_payment_label(method: str) -> str:
+    return "เงินโอน" if method == "transfer" else "เงินสด"
+
+
+def build_accounting_payments_excel(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    method = "transfer" if payload.get("payment_method") == "transfer" else "cash"
+    label = accounting_payment_label(method)
+    rows = accounting_payment_rows(payload)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = f"Payment {method.title()}"
+    sheet.merge_cells("A1:J1")
+    sheet["A1"] = COMPANY_NAME
+    sheet["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
+    sheet.merge_cells("A2:J2")
+    sheet["A2"] = f"รายการจ่ายค่าแรง - {label}"
+    sheet["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
+    sheet.merge_cells("A3:J3")
+    sheet["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
+    sheet.merge_cells("A4:J4")
+    sheet["A4"] = export_meta_text(payload)
+    add_excel_logo(sheet, "K1")
+    sheet.append([])
+    sheet.append(["ลำดับ", "รหัส", "ชื่อพนักงาน", "กลุ่ม", "ค่าแรง", "เงินเพิ่ม", "เงินหัก", "หัก ณ ที่จ่าย", "ยอดสุทธิ", "ลงชื่อรับเงิน/หมายเหตุ"])
+    for row in rows:
+        sheet.append([row["sequence"], row["emp_code"], row["fullname"], row["group_label"], row["gross_amount"], row["bonus_amount"], row["deduction_amount"], row["withholding_tax_amount"], row["net_amount"], ""])
+    total_row = sheet.max_row + 1
+    sheet.cell(total_row, 1, "รวม")
+    sheet.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=4)
+    for column in range(5, 10):
+        letter = get_column_letter(column)
+        sheet.cell(total_row, column, f"=SUM({letter}7:{letter}{total_row - 1})" if rows else 0)
+    style_excel_report_sheet(sheet, [6], [9, 14, 28, 24, 15, 14, 14, 17, 16, 28])
+    for cell in sheet[total_row]:
+        cell.font = Font(name="Sarabun", bold=True, color="0F7A3D", size=10)
+        cell.fill = PatternFill("solid", fgColor="E8F5EE")
+    sheet.print_title_rows = "1:6"
+    sheet.print_area = f"A1:J{total_row}"
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def build_accounting_payments_pdf(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    method = "transfer" if payload.get("payment_method") == "transfer" else "cash"
+    label = accounting_payment_label(method)
+    rows = accounting_payment_rows(payload)
+    buffer = BytesIO()
+    document = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=12 * mm, leftMargin=12 * mm, topMargin=12 * mm, bottomMargin=16 * mm)
+    _, _, normal, section = pdf_styles()
+    small = normal.clone("PfPaymentSmall")
+    small.fontSize = 7
+    small.leading = 9
+    story = report_header_story(
+        f"รายการจ่ายค่าแรง - {label}",
+        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}",
+        payload,
+    )
+    story += [Spacer(1, 5 * mm), Paragraph(f"จำนวน {len(rows)} คน | ยอดสุทธิรวม {report_number(sum(row['net_amount'] for row in rows))} บาท", section), Spacer(1, 3 * mm)]
+    table_rows = [["ลำดับ", "รหัส", "ชื่อพนักงาน", "กลุ่ม", "ค่าแรง", "เงินเพิ่ม", "เงินหัก", "หัก ณ ที่จ่าย", "ยอดสุทธิ", "ลงชื่อ/หมายเหตุ"]]
+    for row in rows:
+        table_rows.append([
+            row["sequence"], row["emp_code"], Paragraph(xml_escape(row["fullname"]), small), Paragraph(xml_escape(row["group_label"]), small),
+            report_number(row["gross_amount"]), report_number(row["bonus_amount"]), report_number(row["deduction_amount"]), report_number(row["withholding_tax_amount"]), report_number(row["net_amount"]), "",
+        ])
+    table_rows.append(["รวม", "", "", "", report_number(sum(row["gross_amount"] for row in rows)), report_number(sum(row["bonus_amount"] for row in rows)), report_number(sum(row["deduction_amount"] for row in rows)), report_number(sum(row["withholding_tax_amount"] for row in rows)), report_number(sum(row["net_amount"] for row in rows)), ""])
+    table = Table(table_rows, repeatRows=1, colWidths=[12 * mm, 20 * mm, 44 * mm, 37 * mm, 25 * mm, 22 * mm, 22 * mm, 25 * mm, 27 * mm, 35 * mm])
+    set_pdf_table_style(table, 3)
+    table.setStyle(TableStyle([
+        ("ALIGN", (0, 1), (1, -1), "CENTER"), ("ALIGN", (4, 1), (8, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 1), (-1, -2), 6), ("BOTTOMPADDING", (0, 1), (-1, -2), 6),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F5EE")), ("FONTNAME", (0, -1), (-1, -1), THAI_FONT_BOLD),
+    ]))
+    story.append(table)
+
+    def draw_page(canvas_obj, doc):
+        page_width, _ = landscape(A4)
+        canvas_obj.saveState()
+        canvas_obj.setStrokeColor(colors.HexColor(BRAND_GREEN))
+        canvas_obj.line(12 * mm, 12 * mm, page_width - 12 * mm, 12 * mm)
+        canvas_obj.setFont(THAI_FONT, 7)
+        canvas_obj.setFillColor(colors.HexColor("#475467"))
+        canvas_obj.drawString(12 * mm, 7 * mm, f"PF Accounting | {label} | {format_report_date(start_date)} - {format_report_date(end_date)}")
+        canvas_obj.drawRightString(page_width - 12 * mm, 7 * mm, f"หน้า {doc.page}")
+        canvas_obj.restoreState()
+
+    document.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
+    return buffer.getvalue()
+
+
 class ReportHandler(BaseHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -9030,6 +9145,25 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path in {"/reports/accounting-payments-excel", "/reports/accounting-payments-pdf"}:
+            actor = accounting_actor(self, 4)
+            if not actor:
+                self.send_json({"error": "C4 or higher accounting session is required."}, 403)
+                return
+            payload["printed_by"] = payload.get("printed_by") or actor.get("fullname") or actor.get("username")
+            start_date, end_date = normalized_range(payload)
+            method = "transfer" if payload.get("payment_method") == "transfer" else "cash"
+            if parsed.path.endswith("-excel"):
+                content = build_accounting_payments_excel(payload)
+                content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                extension = "xlsx"
+            else:
+                content = build_accounting_payments_pdf(payload)
+                content_type = "application/pdf"
+                extension = "pdf"
+            self.send_file(content, content_type, f"PF_Payment_{method}_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.{extension}")
+            return
+
         if parsed.path == "/reports/selected-employees-pdf":
             data = {
                 "employees": payload.get("employees", []),
@@ -9218,6 +9352,53 @@ class ReportHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
         payload = self.read_json()
+
+        if parsed.path == "/api/accounting/payment-allocations":
+            actor = accounting_actor(self, 4)
+            if not actor:
+                self.send_json({"error": "C4 or higher accounting session is required."}, 403)
+                return
+            start_date, end_date = normalized_range(payload)
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_date) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_date):
+                self.send_json({"error": "A valid payment date range is required."}, 400)
+                return
+            clean_rows = []
+            for raw in payload.get("allocations") or []:
+                if not isinstance(raw, dict):
+                    continue
+                employee_key = str(raw.get("employee_key") or "").strip()[:160]
+                employee_kind = str(raw.get("employee_kind") or "").strip()
+                payment_method = str(raw.get("payment_method") or "").strip()
+                if not employee_key or employee_kind not in {"production", "time"} or payment_method not in {"cash", "transfer"}:
+                    continue
+                clean_rows.append({
+                    "company_key": ACCOUNTING_COMPANY_KEY,
+                    "week_start": start_date,
+                    "week_end": end_date,
+                    "employee_key": employee_key,
+                    "employee_kind": employee_kind,
+                    "employee_id": str(raw.get("employee_id") or "")[:100] or None,
+                    "emp_code": str(raw.get("emp_code") or "-")[:80],
+                    "fullname": str(raw.get("fullname") or "-")[:200],
+                    "group_label": str(raw.get("group_label") or "-")[:200],
+                    "payment_method": payment_method,
+                    "net_amount": max(0, round(safe_float(raw.get("net_amount")), 2)),
+                    "updated_by": str(actor.get("username") or "unknown")[:120],
+                })
+            if not clean_rows:
+                self.send_json({"data": []})
+                return
+            status, body = supabase_request(
+                "POST",
+                "ac_payment_allocations?on_conflict=company_key,week_start,week_end,employee_key",
+                clean_rows,
+                prefer="resolution=merge-duplicates,return=representation",
+            )
+            if status >= 400:
+                self.send_json({"error": body, "migration": "supabase_pf_accounting_payments.sql"}, status)
+                return
+            self.send_json({"data": body})
+            return
 
         if parsed.path == "/api/accounting/workspace":
             actor = accounting_actor(self)
@@ -9732,6 +9913,26 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
 
             self.send_error(404, "Not found")
+            return
+
+        if parsed.path == "/api/accounting/payment-allocations":
+            actor = accounting_actor(self, 4)
+            if not actor:
+                self.send_json({"error": "C4 or higher accounting session is required."}, 403)
+                return
+            start_date = str(query.get("start_date", [""])[0])
+            end_date = str(query.get("end_date", [start_date])[0])
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_date) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_date):
+                self.send_json({"error": "A valid payment date range is required."}, 400)
+                return
+            status, rows = supabase_request(
+                "GET",
+                f"ac_payment_allocations?company_key=eq.{quote(ACCOUNTING_COMPANY_KEY)}&week_start=eq.{quote(start_date)}&week_end=eq.{quote(end_date)}&select=*&order=group_label.asc,emp_code.asc",
+            )
+            if status >= 400:
+                self.send_json({"error": rows, "migration": "supabase_pf_accounting_payments.sql"}, status)
+                return
+            self.send_json({"data": rows if isinstance(rows, list) else []})
             return
 
         if parsed.path == "/api/accounting/workspace":

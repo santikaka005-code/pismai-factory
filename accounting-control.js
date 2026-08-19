@@ -1,282 +1,150 @@
 (function () {
   "use strict";
 
-  const DATA_KEY = "pismai_accounting_control_v1";
-  const ACCESS_KEY = "pismai_accounting_access_v1";
-  const PASSWORD_KEY = "pismai_accounting_password_hash_v1";
-  const DEFAULT_PASSWORD_HASH = "7ecd3c46f5a48d1ad55ae7fad8a1dabb25270d7b692929a63d243a91dad1466f";
-  const ACCESS_MINUTES = 30;
-  const THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
-  const views = [
-    ["overview", "ศูนย์ควบคุม", "⌾"],
-    ["entry", "บันทึก", "▤"],
-    ["tax", "ภาษี", "▣"],
-    ["cashflow", "เงินสด", "◫"],
-    ["calendar", "กำหนดการ", "◷"],
-    ["documents", "เอกสาร", "□"],
-    ["chart", "ผังบัญชี", "≡"],
-    ["journal", "สมุดรายวัน", "✎"],
-    ["trial", "งบทดลอง", "∑"],
-    ["statements", "งบการเงิน", "▥"],
-    ["closing", "ปิดงวด", "◉"],
-    ["settings", "กติกา", "⚙"]
-  ];
-  const lawRules = {
-    checkedAt: "18 กรกฎาคม 2569",
-    vatRate: 0.07,
-    vatEffectiveUntil: "2026-09-30",
-    vatRegistrationThreshold: 1800000,
-    citStandardRate: 0.20,
-    smeCapitalLimit: 5000000,
-    smeRevenueLimit: 30000000,
-    smeBands: [[300000, 0], [3000000, 0.15], [Infinity, 0.20]],
-    sources: [
-      ["กรมสรรพากร: VAT 7% ถึง 30 ก.ย. 2569", "https://www.rd.go.th/region/08/chiangrai/265/3664.html"],
-      ["กรมสรรพากร: เกณฑ์จด VAT 1.8 ล้านบาท", "https://rd.go.th/7061.html"],
-      ["กรมสรรพากร: อัตราภาษีเงินได้นิติบุคคล", "https://www.rd.go.th/841.html"],
-      ["กรมสรรพากร: ปฏิทินภาษีอากร", "https://www.rd.go.th/62348.html"],
-      ["กรมพัฒนาธุรกิจการค้า: กำหนดยื่นงบและ บอจ.5", "https://www.dbd.go.th/news/125290667"]
-    ]
-  };
+  const LOCAL_KEY = "pismai_pf_payment_allocations_v1";
+  const levelNumber = (user) => Number(String(user?.level || "C1").replace(/\D/g, "")) || 1;
+  const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+  const money = (value) => `฿${(Number(value) || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const isoDate = (date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 
-  let state = null;
-  let activeView = "overview";
-  let currentUser = null;
-  let callbacks = {};
-  let notice = "";
-  let noticeType = "success";
-
-  function exitControl() {
-    window.AccountingLedger?.deactivate?.();
-    callbacks.onExit?.();
+  function currentWeek() {
+    const today = new Date();
+    const start = new Date(today);
+    start.setDate(today.getDate() - (today.getDay() || 7) + 1);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    return { startDate: isoDate(start), endDate: isoDate(end) };
   }
 
-  function esc(value) {
-    return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
-  }
-  function num(value) { const n = Number(value); return Number.isFinite(n) ? n : 0; }
-  function money(value) { return num(value).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-  function todayIso() { return new Date().toISOString().slice(0, 10); }
-  function currentPeriod() { return new Date().toISOString().slice(0, 7); }
-  function thaiPeriod(period) { const [year, month] = String(period).split("-").map(Number); return `${THAI_MONTHS[(month || 1) - 1]} ${(year || 2026) + 543}`; }
-  function levelNumber(user) { return Number(String(user?.level || "C1").replace(/\D/g, "")) || 1; }
-  function isC4(user) { return levelNumber(user) === 4; }
-  function isC5(user) { return levelNumber(user) >= 5 || user?.role === "developer" || user?.is_system; }
-  function uid(prefix) { return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
-  function addMonthsClamped(date, amount) {
-    const source = new Date(date);
-    const originalDay = source.getDate();
-    const target = new Date(source.getFullYear(), source.getMonth() + amount, 1, 12);
-    const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0, 12).getDate();
-    target.setDate(Math.min(originalDay, lastDay));
-    return target;
-  }
-  function addDays(date, amount) {
-    const next = new Date(date);
-    next.setDate(next.getDate() + amount);
-    return next;
-  }
-  function iso(date) {
-    const value = new Date(date);
-    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
-  }
-  function daysUntil(date) { return Math.ceil((new Date(`${date}T23:59:59`) - new Date()) / 86400000); }
-  function formatDate(date) { return new Date(`${date}T12:00:00`).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "numeric" }); }
-
-  function defaultState() {
-    return {
-      version: 1,
-      company: { name: "พิศมัยผลไม้แช่แข็ง", taxId: "", vatRegistered: true, entityType: "limited", paidCapital: 0, fiscalYearEnd: "2026-12-31" },
-      selectedPeriod: currentPeriod(),
-      months: {},
-      transactions: [],
-      obligations: [],
-      documents: [],
-      scenario: "normal",
-      updatedAt: new Date().toISOString(),
-      updatedBy: ""
-    };
-  }
-  function load() {
-    try { return { ...defaultState(), ...JSON.parse(localStorage.getItem(DATA_KEY) || "{}") }; }
-    catch { return defaultState(); }
-  }
-  function save(action) {
-    state.updatedAt = new Date().toISOString();
-    state.updatedBy = currentUser?.fullname || currentUser?.username || "";
-    localStorage.setItem(DATA_KEY, JSON.stringify(state));
-    callbacks.onAudit?.("ACCOUNTING_CONTROL", action);
-  }
-  function monthData() {
-    const blank = { revenue: 0, otherIncome: 0, costOfSales: 0, payroll: 0, operatingExpense: 0, otherExpense: 0, openingCash: 0, receivables: 0, payables: 0, outputVat: 0, inputVat: 0, nonDeductibleExpense: 0, taxLossCarryforward: 0, withholdingCredit: 0, employees: 0 };
-    return { ...blank, ...(state.months[state.selectedPeriod] || {}) };
-  }
-  function calc() {
-    const m = monthData();
-    const income = num(m.revenue) + num(m.otherIncome);
-    const expenses = num(m.costOfSales) + num(m.payroll) + num(m.operatingExpense) + num(m.otherExpense);
-    const profit = income - expenses;
-    const grossProfit = num(m.revenue) - num(m.costOfSales);
-    const vatPayable = state.company.vatRegistered ? num(m.outputVat) - num(m.inputVat) : 0;
-    const taxableProfit = Math.max(0, profit + num(m.nonDeductibleExpense) - num(m.taxLossCarryforward));
-    const annualRevenue = Object.entries(state.months).filter(([period]) => period.slice(0, 4) === state.selectedPeriod.slice(0, 4)).reduce((sum, [, row]) => sum + num(row.revenue) + num(row.otherIncome), 0);
-    const isSme = num(state.company.paidCapital) <= lawRules.smeCapitalLimit && annualRevenue <= lawRules.smeRevenueLimit;
-    const cit = Math.max(0, calculateCit(taxableProfit, isSme) - num(m.withholdingCredit));
-    const wht = state.transactions.filter((row) => row.period === state.selectedPeriod).reduce((sum, row) => sum + num(row.amount) * num(row.rate) / 100, 0);
-    const thirtyDay = num(m.payables) + Math.max(0, vatPayable) + wht + num(m.payroll);
-    const projectedCash = num(m.openingCash) + num(m.receivables) - thirtyDay;
-    return { ...m, income, expenses, profit, grossProfit, vatPayable, taxableProfit, annualRevenue, isSme, cit, wht, thirtyDay, projectedCash };
-  }
-  function calculateCit(profit, isSme) {
-    if (!isSme) return profit * lawRules.citStandardRate;
-    const exempt = Math.min(profit, 300000);
-    const middle = Math.max(0, Math.min(profit, 3000000) - exempt);
-    const top = Math.max(0, profit - 3000000);
-    return middle * 0.15 + top * 0.20;
-  }
-  function scenarioData(c) {
-    const factor = state.scenario === "revenue-down" ? 0.8 : 1;
-    const extraPayroll = state.scenario === "hire-two" ? Math.max(30000, num(c.payroll) / Math.max(1, num(c.employees)) * 2) : 0;
-    const income = c.income * factor;
-    const expenses = c.expenses + extraPayroll;
-    return { income, expenses, profit: income - expenses, cash: c.projectedCash - (c.income - income) - extraPayroll, extraPayroll };
+  function readLocalWeek(startDate, endDate) {
+    try { return JSON.parse(localStorage.getItem(LOCAL_KEY) || "{}")[`${startDate}:${endDate}`] || {}; }
+    catch { return {}; }
   }
 
-  async function sha256(value) {
-    const bytes = new TextEncoder().encode(value);
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
-  function accessGranted(user) {
-    if (isC5(user)) return true;
-    if (!isC4(user)) return false;
-    try {
-      const access = JSON.parse(sessionStorage.getItem(ACCESS_KEY) || "{}");
-      return access.username === user.username && Date.now() < num(access.expiresAt);
-    } catch { return false; }
-  }
-  function renderGate(root) {
-    root.innerHTML = `<main class="acr-gate"><button class="acr-gate-back" data-ac-exit>← กลับระบบหลัก</button><section class="acr-gate-card"><div class="acr-shield">⌾</div><p class="acr-kicker">PROTECTED ACCOUNTING AREA</p><h1>ยืนยันตัวตนเพื่อเข้าพื้นที่นักบัญชี</h1><p>พื้นที่นี้มีข้อมูลประมาณการทางบัญชี ภาษี และเอกสารภายใน ระบบจะบันทึกประวัติการเข้าใช้งาน</p>${notice ? `<div class="acr-notice ${noticeType}">${esc(notice)}</div>` : ""}<form id="acrAccessForm"><label>รหัสผ่านพื้นที่นักบัญชี<input type="password" name="password" autocomplete="current-password" required autofocus /></label><button type="submit">เข้าสู่ห้องควบคุมบัญชี</button></form><small>ระดับ C5 ขึ้นไปเข้าใช้งานได้โดยไม่ต้องกรอกรหัสผ่าน • สิทธิ์หมดอายุหลังไม่ใช้งาน ${ACCESS_MINUTES} นาที</small></section></main>`;
-    root.querySelector("[data-ac-exit]")?.addEventListener("click", exitControl);
-    root.querySelector("#acrAccessForm")?.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const password = new FormData(event.currentTarget).get("password") || "";
-      const expected = DEFAULT_PASSWORD_HASH;
-      if (await sha256(password) !== expected) { notice = "รหัสผ่านไม่ถูกต้อง"; noticeType = "error"; renderGate(root); return; }
-      sessionStorage.setItem(ACCESS_KEY, JSON.stringify({ username: currentUser.username, expiresAt: Date.now() + ACCESS_MINUTES * 60000 }));
-      callbacks.onAudit?.("ACCOUNTING_ACCESS", "เข้าพื้นที่นักบัญชีด้วยรหัสผ่าน");
-      notice = ""; renderRoom(root);
-    });
+  function writeLocalWeek(startDate, endDate, allocations) {
+    let data = {};
+    try { data = JSON.parse(localStorage.getItem(LOCAL_KEY) || "{}"); } catch { data = {}; }
+    data[`${startDate}:${endDate}`] = allocations;
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(data));
   }
 
-  function render(root, user, options) {
-    currentUser = user;
-    callbacks = options || {};
-    state = load();
-    window.AccountingLedger?.init(user, () => {
-      if (String(location.hash).startsWith("#/accounting-control") && root.isConnected) renderRoom(root);
-    });
-    if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) {
-      root.innerHTML = `<main class="acr-gate"><button class="acr-gate-back" data-ac-exit>Back</button><section class="acr-gate-card"><div class="acr-shield">PF</div><p class="acr-kicker">ACCESS DENIED</p><h1>PF Accounting is available from C4 and above.</h1><p>Please contact an administrator if this account needs accounting access.</p></section></main>`;
-      root.querySelector("[data-ac-exit]")?.addEventListener("click", exitControl);
-      return;
+  function render(root, user, options = {}) {
+    localStorage.removeItem("pismai_accounting_password_hash_v1");
+    sessionStorage.removeItem("pismai_accounting_access_v1");
+    if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) return options.onExit?.();
+
+    const week = currentWeek();
+    const state = { view: "allocation", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, loading: true, message: "", messageType: "success" };
+    const methodOf = (row) => state.allocations[row.employee_key] === "transfer" ? "transfer" : "cash";
+    const methodRows = (method) => state.rows.filter((row) => method === "all" || methodOf(row) === method);
+    const sum = (rows) => rows.reduce((total, row) => total + Number(row.net_amount || 0), 0);
+    const totals = () => ({ cash: methodRows("cash"), transfer: methodRows("transfer"), total: sum(state.rows) });
+
+    async function load() {
+      state.loading = true;
+      state.message = "";
+      paint();
+      try {
+        state.rows = await Promise.resolve(options.getWeeklyRows?.(state.startDate, state.endDate) || []);
+        let saved = readLocalWeek(state.startDate, state.endDate);
+        try {
+          const cloud = await options.loadAllocations?.(state.startDate, state.endDate);
+          if (cloud && typeof cloud === "object") saved = { ...saved, ...cloud };
+        } catch (error) { console.warn("PF allocation cloud load failed; using local copy.", error); }
+        state.allocations = {};
+        state.rows.forEach((row) => { state.allocations[row.employee_key] = saved[row.employee_key] === "transfer" ? "transfer" : "cash"; });
+      } catch (error) {
+        state.message = error instanceof Error ? error.message : "โหลดข้อมูลรอบจ่ายไม่สำเร็จ";
+        state.messageType = "error";
+      } finally { state.loading = false; paint(); }
     }
-    if (!accessGranted(user)) renderGate(root); else renderRoom(root);
-  }
-  function renderRoom(root) {
-    const c = calc();
-    root.innerHTML = `<main class="acr-shell"><aside class="acr-rail"><div class="acr-logo">PF</div><nav>${views.map(([id, label, icon]) => `<button class="${activeView === id ? "active" : ""}" data-ac-view="${id}" title="${label}"><b>${icon}</b><span>${label}</span></button>`).join("")}</nav><button class="acr-exit" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside><section class="acr-workspace"><header class="acr-header"><div><p>PF ACCOUNTING</p><h1>ระบบบัญชี PF Accounting</h1><span>${esc(state.company.name)} · ${thaiPeriod(state.selectedPeriod)}</span></div><div class="acr-header-actions"><label>รอบข้อมูล<input type="month" id="acrPeriod" value="${esc(state.selectedPeriod)}" /></label><span class="acr-status">รอนักบัญชียืนยัน</span><b class="acr-user">${esc(currentUser.level || "C1")}</b></div></header><div class="acr-trust"><span>✓ ข้อมูลกรอกด้วยตนเอง</span><span>ไม่เชื่อมบัญชีธนาคาร</span><span>อัปเดต ${state.updatedAt ? new Date(state.updatedAt).toLocaleString("th-TH") : "ยังไม่มี"}</span></div>${notice ? `<div class="acr-notice ${noticeType}">${esc(notice)}</div>` : ""}<div class="acr-view">${renderView(c)}</div><footer class="acr-footer"><span>สถานะข้อมูล: ยังไม่ยืนยันโดยนักบัญชี</span><span>กติกากฎหมายตรวจสอบล่าสุด ${lawRules.checkedAt}</span><span>ผู้ใช้งาน ${esc(currentUser.fullname || currentUser.username)}</span></footer></section></main>`;
-    bindRoom(root);
-  }
-  function renderView(c) {
-    if (["chart", "journal", "trial", "statements", "closing"].includes(activeView) && window.AccountingLedger) return window.AccountingLedger.render(activeView);
-    if (activeView === "entry") return entryView(c);
-    if (activeView === "tax") return taxView(c);
-    if (activeView === "cashflow") return cashView(c);
-    if (activeView === "calendar") return calendarView();
-    if (activeView === "documents") return documentsView();
-    if (activeView === "settings") return settingsView();
-    return overviewView(c);
-  }
 
-  function metric(label, value, tone, detail) { return `<article class="acr-metric ${tone}"><span>${label}</span><strong>${value}</strong><small>${detail}</small></article>`; }
-  function overviewView(c) {
-    const s = scenarioData(c);
-    const expenseTotal = Math.max(1, c.expenses);
-    const deadlines = buildDeadlines().slice(0, 4);
-    return `<section class="acr-metrics">${metric("เงินคงเหลือจำลอง", `${money(s.cash)} ฿`, s.cash < 0 ? "red" : "green", "หลังภาระที่กรอกใน 30 วัน")}${metric("กำไรคาดการณ์", `${money(s.profit)} ฿`, s.profit < 0 ? "red" : "green", state.scenario === "normal" ? "สถานการณ์ปกติ" : "ตามสถานการณ์ที่เลือก")}${metric("ภาษีสำรอง", `${money(Math.max(0, c.vatPayable) + c.wht + c.cit)} ฿`, "amber", "VAT + หัก ณ ที่จ่าย + ภาษีนิติบุคคล")}${metric("ภาระ 30 วัน", `${money(c.thirtyDay)} ฿`, c.thirtyDay > c.openingCash + c.receivables ? "red" : "amber", "เจ้าหนี้ ภาษี และเงินเดือน")}</section><section class="acr-main-grid"><article class="acr-panel acr-runway"><div class="acr-panel-title"><div><p>FINANCIAL RUNWAY</p><h2>ไทม์ไลน์การเงิน 30 วัน</h2></div><span>${s.cash >= 500000 ? "ปลอดภัย" : s.cash >= 100000 ? "เฝ้าระวัง" : "ความเสี่ยงสูง"}</span></div>${runwaySvg(c, s)}<div class="acr-runway-legend"><span>● เงินรับคาดการณ์ ${money(c.receivables)}</span><span>● ภาระจ่าย ${money(c.thirtyDay)}</span><span>● ยอดปลายทาง ${money(s.cash)}</span></div></article><aside class="acr-decisions"><h2>ต้องตัดสินใจ</h2>${deadlines.map(deadlineCard).join("")}${c.projectedCash < 100000 ? `<article class="danger"><b>เงินสดอาจต่ำกว่าเป้า</b><span>ยอดจำลองหลังภาระ ${money(c.projectedCash)} บาท</span><button data-ac-view="cashflow">วางแผนเงินสด</button></article>` : ""}</aside></section><section class="acr-bottom-grid"><article class="acr-panel"><div class="acr-panel-title"><div><p>SCENARIO LAB</p><h2>จำลองสถานการณ์</h2></div></div><div class="acr-scenarios">${[["normal","ปกติ","ฐานข้อมูลปัจจุบัน"],["revenue-down","รายได้ลด 20%",`เงินปลายทาง ${money(s.cash)}`],["hire-two","เพิ่มพนักงาน 2 คน",`ค่าแรงเพิ่ม ${money(s.extraPayroll)}`]].map(([id,title,text]) => `<button class="${state.scenario === id ? "active" : ""}" data-scenario="${id}"><b>${title}</b><span>${text}</span></button>`).join("")}</div></article><article class="acr-panel acr-insight"><p>สิ่งที่ตัวเลขกำลังบอก</p>${insights(c, s).map((text) => `<div>› ${text}</div>`).join("")}</article><button class="acr-new-entry" data-ac-view="entry"><b>＋</b><strong>บันทึกตัวเลขใหม่</strong><span>อัปเดตข้อมูลประจำเดือน</span></button></section>`;
-  }
-  function runwaySvg(c, s) {
-    const start = Math.max(0, c.openingCash); const end = s.cash; const mid = start + c.receivables - c.thirtyDay * .45;
-    const max = Math.max(1, start, mid, end, c.thirtyDay); const y = (v) => 160 - Math.max(-.2, v / max) * 120;
-    return `<svg class="acr-chart" viewBox="0 0 900 190" role="img" aria-label="กราฟประมาณการกระแสเงินสด 30 วัน"><defs><linearGradient id="acrArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#43f08a" stop-opacity=".35"/><stop offset="1" stop-color="#43f08a" stop-opacity="0"/></linearGradient></defs><g class="grid"><line x1="35" y1="40" x2="870" y2="40"/><line x1="35" y1="100" x2="870" y2="100"/><line x1="35" y1="160" x2="870" y2="160"/></g><path class="area" d="M35 ${y(start)} C220 ${y(start*.92)} 300 ${y(mid)} 450 ${y(mid)} S700 ${y(end*1.12)} 870 ${y(end)} L870 170 L35 170 Z"/><path class="line" d="M35 ${y(start)} C220 ${y(start*.92)} 300 ${y(mid)} 450 ${y(mid)} S700 ${y(end*1.12)} 870 ${y(end)}"/><line class="today" x1="310" y1="25" x2="310" y2="170"/><text x="278" y="18">วันนี้</text><text x="35" y="185">วัน 1</text><text x="300" y="185">วัน 10</text><text x="570" y="185">วัน 20</text><text x="835" y="185">วัน 30</text></svg>`;
-  }
-  function insights(c, s) {
-    const rows = [];
-    rows.push(c.profit >= 0 ? `อัตรากำไรประมาณ ${c.income ? (c.profit / c.income * 100).toFixed(1) : "0"}% ของรายได้` : `รายจ่ายสูงกว่ารายได้ ${money(Math.abs(c.profit))} บาท`);
-    if (c.annualRevenue > lawRules.vatRegistrationThreshold && !state.company.vatRegistered) rows.push("รายได้สะสมเกินเกณฑ์ VAT 1.8 ล้านบาท ควรตรวจวันเกินเกณฑ์ทันที");
-    if (c.vatPayable > 0) rows.push(`ควรกันเงิน VAT อย่างน้อย ${money(c.vatPayable)} บาท`);
-    rows.push(s.cash < 0 ? `แบบจำลองชี้ว่าเงินสดอาจขาด ${money(Math.abs(s.cash))} บาท` : `เงินจำลองหลังภาระยังเป็นบวก ${money(s.cash)} บาท`);
-    return rows;
-  }
-  function entryView(c) {
-    const fields = [["revenue","รายได้จากการขาย/บริการ"],["otherIncome","รายได้อื่น"],["costOfSales","ต้นทุนขาย"],["payroll","เงินเดือนและค่าแรง"],["operatingExpense","ค่าใช้จ่ายดำเนินงาน"],["otherExpense","ค่าใช้จ่ายอื่น"],["openingCash","เงินสดตั้งต้นที่กรอก"],["receivables","ลูกหนี้คาดว่าจะรับใน 30 วัน"],["payables","เจ้าหนี้ครบกำหนดใน 30 วัน"],["outputVat","ภาษีขาย"],["inputVat","ภาษีซื้อที่ใช้ได้"],["nonDeductibleExpense","รายจ่ายต้องห้ามทางภาษี"],["taxLossCarryforward","ขาดทุนทางภาษีที่ใช้ได้"],["withholdingCredit","ภาษีถูกหัก ณ ที่จ่าย"],["employees","จำนวนพนักงาน"]];
-    return `<section class="acr-page-head"><div><p>MANUAL INPUT</p><h2>บันทึกข้อมูล ${thaiPeriod(state.selectedPeriod)}</h2><span>กรอกยอดสรุปจากเอกสารของบริษัท ระบบจะคำนวณประมาณการให้</span></div></section><form class="acr-form-panel" id="acrMonthForm"><div class="acr-form-warning">ตัวเลขหน้านี้ไม่ใช่ยอดจากธนาคารและยังไม่ถือว่าได้รับการตรวจสอบทางบัญชี</div><div class="acr-field-grid">${fields.map(([key,label]) => `<label><span>${label}</span><input type="number" name="${key}" step="0.01" min="0" value="${num(c[key])}" /></label>`).join("")}</div><div class="acr-form-actions"><button type="reset" class="secondary">คืนค่าก่อนแก้ไข</button><button type="submit">บันทึกและคำนวณใหม่</button></div></form><section class="acr-mini-summary">${metric("รายได้รวม", `${money(c.income)} ฿`, "green", "จากข้อมูลที่กรอก")}${metric("รายจ่ายรวม", `${money(c.expenses)} ฿`, "red", "จากข้อมูลที่กรอก")}${metric("กำไร/ขาดทุน", `${money(c.profit)} ฿`, c.profit < 0 ? "red" : "green", "ยังไม่ผ่านการตรวจสอบ")}</section>`;
-  }
-  function taxView(c) {
-    const rows = state.transactions.filter((row) => row.period === state.selectedPeriod);
-    return `<section class="acr-page-head"><div><p>TAX ESTIMATOR</p><h2>ศูนย์ประมาณการภาษี</h2><span>อ้างอิงกติกาที่ตรวจสอบล่าสุด ${lawRules.checkedAt}</span></div></section><section class="acr-metrics tax">${metric("VAT คาดว่านำส่ง", `${money(Math.max(0,c.vatPayable))} ฿`, "amber", `ภาษีขาย ${money(c.outputVat)} - ภาษีซื้อ ${money(c.inputVat)}`)}${metric("หัก ณ ที่จ่าย", `${money(c.wht)} ฿`, "amber", `${rows.length} รายการในเดือนนี้`)}${metric("ภาษีนิติบุคคล", `${money(c.cit)} ฿`, "amber", c.isSme ? "คำนวณแบบ SME ตามข้อมูลที่กรอก" : "อัตราทั่วไป 20%")}${metric("กำไรทางภาษี", `${money(c.taxableProfit)} ฿`, "green", "กำไร + รายจ่ายต้องห้าม - ขาดทุนที่ใช้ได้")}</section><section class="acr-two-col"><article class="acr-panel"><div class="acr-panel-title"><div><p>WITHHOLDING TAX</p><h2>รายการภาษีหัก ณ ที่จ่าย</h2></div></div><form id="acrWhtForm" class="acr-inline-form"><input name="payee" placeholder="ชื่อผู้รับเงิน" required/><select name="type"><option value="service|3">ค่าบริการ/จ้างทำของ 3%</option><option value="rent|5">ค่าเช่า 5%</option><option value="advertising|2">ค่าโฆษณา 2%</option><option value="transport|1">ค่าขนส่ง 1%</option><option value="custom|0">กำหนดอัตราเอง</option></select><input name="amount" type="number" min="0" step="0.01" placeholder="ยอดก่อนหัก" required/><input name="custom_rate" type="number" min="0" step="0.01" placeholder="อัตรา %"/><button>เพิ่ม</button></form><div class="acr-table"><table><thead><tr><th>ผู้รับเงิน</th><th>ประเภท</th><th>ฐาน</th><th>อัตรา</th><th>ภาษี</th><th></th></tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><td>${esc(row.payee)}</td><td>${esc(row.label)}</td><td>${money(row.amount)}</td><td>${num(row.rate)}%</td><td>${money(num(row.amount)*num(row.rate)/100)}</td><td><button class="acr-delete" data-delete-wht="${esc(row.id)}">ลบ</button></td></tr>`).join("") : `<tr><td colspan="6">ยังไม่มีรายการ</td></tr>`}</tbody></table></div></article><article class="acr-panel acr-law-note"><h2>ข้อควรตรวจสอบ</h2><ul><li>VAT 7% ใช้ถึง 30 กันยายน 2569 ระบบจะเตือนให้ทบทวนหลังวันดังกล่าว</li><li>เกณฑ์จด VAT คือรายรับเกิน 1.8 ล้านบาทต่อปี และโดยทั่วไปต้องยื่นคำขอภายใน 30 วันนับแต่วันที่เกิน</li><li>อัตราหัก ณ ที่จ่ายขึ้นกับลักษณะสัญญา ผู้จ่าย ผู้รับ และข้อยกเว้น รายการที่ระบบแนะนำต้องให้นักบัญชีตรวจ</li><li>สิทธิ SME พิจารณาทุนชำระแล้วและรายได้ทั้งรอบบัญชี ตัวเลขนี้เป็นเพียงประมาณการจากข้อมูลที่มี</li></ul><button data-ac-view="settings" class="secondary">ดูแหล่งกฎหมายและกติกา</button></article></section>`;
-  }
-  function cashView(c) {
-    const s = scenarioData(c);
-    return `<section class="acr-page-head"><div><p>CASH PLANNING</p><h2>แผนกระแสเงินสด</h2><span>แบบจำลองจากเงินตั้งต้น ลูกหนี้ เจ้าหนี้ เงินเดือน และภาษีที่กรอก</span></div></section><section class="acr-cash-equation"><div><span>เงินตั้งต้น</span><b>${money(c.openingCash)}</b></div><i>+</i><div><span>คาดว่าจะรับ</span><b>${money(c.receivables)}</b></div><i>−</i><div><span>ภาระ 30 วัน</span><b>${money(c.thirtyDay)}</b></div><i>=</i><div class="result"><span>เงินปลายทาง</span><b>${money(c.projectedCash)}</b></div></section><section class="acr-two-col"><article class="acr-panel"><h2>เลือกสถานการณ์</h2><div class="acr-scenarios vertical">${[["normal","ปกติ"],["revenue-down","รายได้ลด 20%"],["hire-two","เพิ่มพนักงาน 2 คน"]].map(([id,title]) => `<button class="${state.scenario===id?"active":""}" data-scenario="${id}"><b>${title}</b><span>เงินปลายทาง ${money(state.scenario===id?s.cash:c.projectedCash)}</span></button>`).join("")}</div></article><article class="acr-panel"><h2>ผลจำลอง</h2>${runwaySvg(c,s)}<div class="acr-risk ${s.cash < 0 ? "danger" : s.cash < 100000 ? "warning" : "safe"}"><b>${s.cash < 0 ? "เงินสดไม่พอรองรับภาระ" : s.cash < 100000 ? "เงินสดอยู่ในระดับเฝ้าระวัง" : "เงินสดยังอยู่ในระดับบวก"}</b><span>${s.cash < 0 ? `ต้องหาเงินเพิ่มหรือลด/เลื่อนรายจ่ายอย่างน้อย ${money(Math.abs(s.cash))} บาท` : `คงเหลือจำลอง ${money(s.cash)} บาท`}</span></div></article></section>`;
-  }
-  function buildDeadlines() {
-    const [year, month] = state.selectedPeriod.split("-").map(Number);
-    const nextMonth = new Date(year, month, 1);
-    const fiscal = state.company.fiscalYearEnd || `${year}-12-31`;
-    const fiscalDate = new Date(`${fiscal}T12:00:00`);
-    const agm = addMonthsClamped(fiscalDate, 4);
-    const dbd = addMonthsClamped(agm, 1);
-    const shareholderList = addDays(agm, 14);
-    const pnd50 = addDays(fiscalDate, 150);
-    const rows = [
-      { id:"wht", title:"ภาษีหัก ณ ที่จ่าย", detail:"ภ.ง.ด.1/3/53 (ยื่นออนไลน์)", date:iso(new Date(year, month, 15)), tone:"warning" },
-      { id:"vat", title:"ภาษีมูลค่าเพิ่ม (VAT)", detail:"ภ.พ.30 (ยื่นออนไลน์)", date:iso(new Date(year, month, 23)), tone:"danger" },
-      { id:"sso", title:"เงินสมทบประกันสังคม", detail:"ตรวจยอดและนำส่งประจำเดือน", date:iso(new Date(year, month, 15)), tone:"warning" },
-      { id:"agm", title:"ประชุมสามัญผู้ถือหุ้น", detail:"ภายใน 4 เดือนนับแต่วันปิดบัญชี", date:iso(agm), tone:"normal" },
-      { id:"boj5", title:"บัญชีรายชื่อผู้ถือหุ้น (บอจ.5)", detail:"ภายใน 14 วันหลังประชุมผู้ถือหุ้น (คำนวณจากวันประชุมล่าสุด)", date:iso(shareholderList), tone:"normal" },
-      { id:"dbd", title:"นำส่งงบการเงิน DBD", detail:"ภายใน 1 เดือนหลังอนุมัติ (คำนวณจากวันประชุมล่าสุด)", date:iso(dbd), tone:"normal" },
-      { id:"pnd50", title:"ภาษีเงินได้นิติบุคคล (ภ.ง.ด.50)", detail:"ภายใน 150 วันนับแต่วันสิ้นรอบบัญชี", date:iso(pnd50), tone:"normal" }
-    ];
-    return rows.sort((a,b) => a.date.localeCompare(b.date));
-  }
-  function deadlineCard(row) { const days = daysUntil(row.date); return `<article class="${days < 0 ? "danger" : days <= 7 ? "warning" : ""}"><b>${esc(row.title)}</b><span>${esc(row.detail)}</span><small>${formatDate(row.date)} · ${days < 0 ? `เกิน ${Math.abs(days)} วัน` : `เหลือ ${days} วัน`}</small><button data-ac-view="calendar">ตรวจสอบ</button></article>`; }
-  function calendarView() {
-    const completed = new Set(state.obligations.filter((x) => x.completed).map((x) => x.id));
-    return `<section class="acr-page-head"><div><p>COMPLIANCE CALENDAR</p><h2>งานและกำหนดเวลา</h2><span>วันครบกำหนดสร้างจากรอบข้อมูลและวันปิดบัญชี โปรดตรวจปฏิทินราชการก่อนยื่นจริง</span></div></section><section class="acr-deadline-list">${buildDeadlines().map((row) => `<article><label><input type="checkbox" data-obligation="${row.id}" ${completed.has(row.id)?"checked":""}/><span class="check"></span></label><div><b>${esc(row.title)}</b><span>${esc(row.detail)}</span></div><time>${formatDate(row.date)}</time><em class="${daysUntil(row.date)<0?"late":daysUntil(row.date)<=7?"soon":""}">${daysUntil(row.date)<0?`เกิน ${Math.abs(daysUntil(row.date))} วัน`:`เหลือ ${daysUntil(row.date)} วัน`}</em></article>`).join("")}</section><div class="acr-form-warning">ระบบคำนวณวันตามกติกาทั่วไปและยังไม่เลื่อนวันหยุดราชการอัตโนมัติ ให้ตรวจสอบปฏิทินกรมสรรพากรก่อนยื่นทุกครั้ง</div>`;
-  }
-  function documentsView() {
-    return `<section class="acr-page-head"><div><p>DOCUMENT REGISTER</p><h2>ทะเบียนเอกสาร</h2><span>บันทึกสถานะเอกสาร ไม่ได้อัปโหลดข้อมูลการเงินจริง</span></div></section><form id="acrDocumentForm" class="acr-inline-form document"><input name="name" placeholder="ชื่อเอกสาร" required/><select name="type"><option>ใบกำกับภาษี</option><option>หนังสือรับรองหัก ณ ที่จ่าย</option><option>หลักฐานยื่นแบบ</option><option>งบการเงิน</option><option>สัญญา</option><option>เอกสารบริษัท</option></select><input name="date" type="date" value="${todayIso()}" required/><select name="status"><option>รอตรวจ</option><option>ครบถ้วน</option><option>ขาดเอกสาร</option></select><button>เพิ่มเอกสาร</button></form><section class="acr-document-grid">${state.documents.length ? state.documents.map((doc) => `<article><span>${esc(doc.type)}</span><b>${esc(doc.name)}</b><small>${formatDate(doc.date)}</small><em class="${doc.status === "ครบถ้วน" ? "ok" : doc.status === "ขาดเอกสาร" ? "bad" : ""}">${esc(doc.status)}</em><button class="acr-delete" data-delete-document="${esc(doc.id)}">ลบ</button></article>`).join("") : `<div class="acr-empty">ยังไม่มีเอกสารในทะเบียน</div>`}</section>`;
-  }
-  function settingsView() {
-    return `<section class="acr-page-head"><div><p>RULES & CONFIGURATION</p><h2>ข้อมูลบริษัทและกติกาคำนวณ</h2><span>เฉพาะ C5 ขึ้นไปควรแก้ไขข้อมูลสำคัญ</span></div></section><section class="acr-two-col"><form id="acrCompanyForm" class="acr-form-panel"><h2>ข้อมูลกิจการ</h2><label>ชื่อบริษัท<input name="name" value="${esc(state.company.name)}" required/></label><label>เลขประจำตัวผู้เสียภาษี<input name="taxId" value="${esc(state.company.taxId)}" maxlength="13"/></label><label>ทุนชำระแล้ว<input name="paidCapital" type="number" min="0" step="0.01" value="${num(state.company.paidCapital)}"/></label><label>วันสิ้นรอบบัญชี<input name="fiscalYearEnd" type="date" value="${esc(state.company.fiscalYearEnd)}"/></label><label class="acr-check"><input name="vatRegistered" type="checkbox" ${state.company.vatRegistered?"checked":""}/> จดทะเบียนภาษีมูลค่าเพิ่มแล้ว</label><button ${isC5(currentUser)?"":"disabled"}>บันทึกข้อมูลบริษัท</button>${isC5(currentUser)?"":"<small>ต้องใช้ระดับ C5 ขึ้นไป</small>"}</form><article class="acr-panel acr-rules"><h2>กติกาที่ระบบใช้อยู่</h2><dl><div><dt>VAT</dt><dd>7% ถึง 30 กันยายน 2569</dd></div><div><dt>เกณฑ์จด VAT</dt><dd>รายรับเกิน 1.8 ล้านบาท/ปี</dd></div><div><dt>ภาษีนิติบุคคลทั่วไป</dt><dd>20% ของกำไรสุทธิทางภาษี</dd></div><div><dt>เงื่อนไข SME ที่ใช้ประเมิน</dt><dd>ทุนชำระแล้วไม่เกิน 5 ล้านบาท และรายได้ไม่เกิน 30 ล้านบาท</dd></div><div><dt>อัตรา SME</dt><dd>0–300,000 ยกเว้น; 300,001–3 ล้าน 15%; ส่วนเกิน 3 ล้าน 20%</dd></div></dl><h3>แหล่งอ้างอิงราชการ</h3>${lawRules.sources.map(([label,url]) => `<a href="${url}" target="_blank" rel="noopener">↗ ${esc(label)}</a>`).join("")}<div class="acr-rule-alert">หลังวันที่ 30 กันยายน 2569 ระบบจะไม่สมมติอัตรา VAT ใหม่ และจะแสดงคำเตือนให้ตรวจประกาศล่าสุด</div></article></section>${isC5(currentUser)?`<section class="acr-panel acr-password"><h2>เปลี่ยนรหัสผ่านพื้นที่นักบัญชี</h2><form id="acrPasswordForm"><input name="password" type="password" minlength="6" placeholder="รหัสใหม่อย่างน้อย 6 ตัว" required/><input name="confirm" type="password" minlength="6" placeholder="ยืนยันรหัสใหม่" required/><button>เปลี่ยนรหัสผ่าน</button></form><small>รหัสถูกเก็บเป็น SHA-256 digest ในอุปกรณ์นี้ ไม่เก็บข้อความรหัสผ่านโดยตรง</small></section>`:""}`;
-  }
+    async function save(description) {
+      writeLocalWeek(state.startDate, state.endDate, state.allocations);
+      state.message = "กำลังบันทึกวิธีจ่าย...";
+      state.messageType = "success";
+      paint();
+      try {
+        await options.saveAllocations?.({
+          start_date: state.startDate,
+          end_date: state.endDate,
+          allocations: state.rows.map((row) => ({ employee_key: row.employee_key, employee_kind: row.employee_kind, employee_id: row.employee_id, emp_code: row.emp_code, fullname: row.fullname, group_label: row.group_label, payment_method: methodOf(row), net_amount: Number(row.net_amount || 0) }))
+        });
+        state.message = "บันทึกวิธีจ่ายเรียบร้อยแล้ว";
+        options.onAudit?.("PF_PAYMENT_ALLOCATION_SAVE", description);
+      } catch (error) {
+        state.message = "บันทึกไว้ในเครื่องแล้ว แต่ฐานกลางยังไม่พร้อม: " + (error instanceof Error ? error.message : "บันทึกไม่สำเร็จ");
+        state.messageType = "warning";
+      }
+      paint();
+    }
 
-  function bindRoom(root) {
-    window.AccountingLedger?.bind(root, () => renderRoom(root));
-    root.querySelectorAll("[data-ac-view]").forEach((button) => button.addEventListener("click", () => { activeView = button.dataset.acView; notice = ""; renderRoom(root); }));
-    root.querySelector("[data-ac-exit]")?.addEventListener("click", exitControl);
-    root.querySelector("#acrPeriod")?.addEventListener("change", (event) => { state.selectedPeriod = event.target.value || currentPeriod(); save("เปลี่ยนรอบข้อมูล"); renderRoom(root); });
-    root.querySelectorAll("[data-scenario]").forEach((button) => button.addEventListener("click", () => { state.scenario = button.dataset.scenario; save(`เลือกสถานการณ์ ${state.scenario}`); renderRoom(root); }));
-    root.querySelector("#acrMonthForm")?.addEventListener("submit", (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const row = {}; form.forEach((value,key) => row[key] = num(value)); state.months[state.selectedPeriod] = row; save(`บันทึกตัวเลขรอบ ${state.selectedPeriod}`); notice="บันทึกข้อมูลและคำนวณใหม่แล้ว"; noticeType="success"; activeView="overview"; renderRoom(root); });
-    root.querySelector("#acrWhtForm")?.addEventListener("submit", (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const [type, suggested] = String(form.get("type")).split("|"); const rate = type === "custom" ? num(form.get("custom_rate")) : num(suggested); const labels={service:"ค่าบริการ/จ้างทำของ",rent:"ค่าเช่า",advertising:"ค่าโฆษณา",transport:"ค่าขนส่ง",custom:"กำหนดเอง"}; state.transactions.push({id:uid("wht"),period:state.selectedPeriod,payee:String(form.get("payee")),type,label:labels[type],amount:num(form.get("amount")),rate}); save("เพิ่มรายการภาษีหัก ณ ที่จ่าย"); renderRoom(root); });
-    root.querySelectorAll("[data-delete-wht]").forEach((button) => button.addEventListener("click", () => { state.transactions = state.transactions.filter((row) => row.id !== button.dataset.deleteWht); save("ลบรายการภาษีหัก ณ ที่จ่าย"); renderRoom(root); }));
-    root.querySelectorAll("[data-obligation]").forEach((input) => input.addEventListener("change", () => { state.obligations = state.obligations.filter((row) => row.id !== input.dataset.obligation); state.obligations.push({id:input.dataset.obligation,completed:input.checked,updatedAt:new Date().toISOString()}); save("อัปเดตสถานะงานบัญชี"); renderRoom(root); }));
-    root.querySelector("#acrDocumentForm")?.addEventListener("submit", (event) => { event.preventDefault(); const form=new FormData(event.currentTarget); state.documents.unshift({id:uid("doc"),name:String(form.get("name")),type:String(form.get("type")),date:String(form.get("date")),status:String(form.get("status"))}); save("เพิ่มทะเบียนเอกสาร"); renderRoom(root); });
-    root.querySelectorAll("[data-delete-document]").forEach((button) => button.addEventListener("click", () => { state.documents=state.documents.filter((doc)=>doc.id!==button.dataset.deleteDocument); save("ลบทะเบียนเอกสาร"); renderRoom(root); }));
-    root.querySelector("#acrCompanyForm")?.addEventListener("submit", (event) => { event.preventDefault(); if(!isC5(currentUser)) return; const form=new FormData(event.currentTarget); state.company={...state.company,name:String(form.get("name")),taxId:String(form.get("taxId")),paidCapital:num(form.get("paidCapital")),fiscalYearEnd:String(form.get("fiscalYearEnd")),vatRegistered:form.get("vatRegistered")==="on"}; save("แก้ไขข้อมูลบริษัทในพื้นที่นักบัญชี"); notice="บันทึกข้อมูลบริษัทแล้ว"; noticeType="success"; renderRoom(root); });
-    root.querySelector("#acrPasswordForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const form=new FormData(event.currentTarget); const password=String(form.get("password")); if(password!==String(form.get("confirm"))){notice="รหัสผ่านทั้งสองช่องไม่ตรงกัน";noticeType="error";renderRoom(root);return;} localStorage.setItem(PASSWORD_KEY,await sha256(password)); callbacks.onAudit?.("ACCOUNTING_PASSWORD","เปลี่ยนรหัสผ่านพื้นที่นักบัญชี"); notice="เปลี่ยนรหัสผ่านแล้ว";noticeType="success";renderRoom(root); });
+    async function exportFile(method, format) {
+      const rows = methodRows(method);
+      if (!rows.length) {
+        state.message = `ไม่มีรายการ${method === "cash" ? "เงินสด" : "เงินโอน"}สำหรับ Export`;
+        state.messageType = "error";
+        return paint();
+      }
+      state.message = `กำลังสร้าง ${format === "excel" ? "Excel" : "PDF"}...`;
+      state.messageType = "success";
+      paint();
+      try {
+        await options.exportPayments?.(format, method, { start_date: state.startDate, end_date: state.endDate, payment_method: method, rows: rows.map((row, index) => ({ ...row, sequence: index + 1, payment_method: method })), printed_by: user?.fullname || user?.username || "System Admin", printed_by_position: String(user?.level || "C4") });
+        state.message = `Export ${format === "excel" ? "Excel" : "PDF"} เรียบร้อยแล้ว`;
+        options.onAudit?.("PF_PAYMENT_EXPORT", `Export ${method} ${format} ${state.startDate} - ${state.endDate}`);
+      } catch (error) {
+        state.message = error instanceof Error ? error.message : "Export ไม่สำเร็จ";
+        state.messageType = "error";
+      }
+      paint();
+    }
+
+    function rowMarkup(row) {
+      const method = methodOf(row);
+      return `<tr><td><strong>${escapeHtml(row.emp_code || "-")}</strong><small>${escapeHtml(row.fullname || "-")}</small></td><td>${escapeHtml(row.group_label || "-")}</td><td class="acr-number">${money(row.gross_amount)}</td><td class="acr-number acr-positive">+${money(row.bonus_amount)}</td><td class="acr-number acr-negative">-${money(Number(row.deduction_amount || 0) + Number(row.withholding_tax_amount || 0))}</td><td class="acr-number"><strong>${money(row.net_amount)}</strong></td><td><div class="acr-method-switch"><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="cash" class="${method === "cash" ? "is-cash" : ""}">เงินสด</button><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="transfer" class="${method === "transfer" ? "is-transfer" : ""}">เงินโอน</button></div></td></tr>`;
+    }
+
+    function allocationMarkup() {
+      const summary = totals();
+      const groups = [...new Set(state.rows.map((row) => row.group_label || "ไม่ระบุกลุ่ม"))].sort((a, b) => a.localeCompare(b, "th"));
+      const visible = state.group === "all" ? state.rows : state.rows.filter((row) => row.group_label === state.group);
+      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF ACCOUNTING</p><h1>จัดสรรการจ่ายเงินประจำสัปดาห์</h1><span>นำยอดสุทธิหลังหักและบวกจากระบบค่าแรงมาแบ่งวิธีจ่าย</span></div><div class="acr-period"><label>เริ่มต้น<input type="date" data-start-date value="${state.startDate}"></label><label>สิ้นสุด<input type="date" data-end-date value="${state.endDate}"></label></div></header>
+        <div class="acr-sync-line"><span>ข้อมูลล่าสุดจากระบบค่าแรง · ${state.rows.length.toLocaleString("th-TH")} คน</span><button type="button" data-reload>↻ โหลดข้อมูลล่าสุด</button></div>
+        <div class="acr-metrics"><article><span>ยอดสุทธิทั้งหมด</span><strong>${money(summary.total)}</strong><small>${state.rows.length} คน</small></article><article class="cash"><span>เตรียมเงินสด</span><strong>${money(sum(summary.cash))}</strong><small>${summary.cash.length} คน</small></article><article class="transfer"><span>ยอดเงินโอน</span><strong>${money(sum(summary.transfer))}</strong><small>${summary.transfer.length} คน</small></article></div>
+        <div class="acr-allocation-grid"><aside class="acr-groups"><h2>เลือกกลุ่มพนักงาน</h2><button type="button" data-group="all" class="${state.group === "all" ? "active" : ""}"><b>ทุกกลุ่ม</b><span>${state.rows.length} คน</span></button>${groups.map((group) => { const rows = state.rows.filter((row) => row.group_label === group); return `<button type="button" data-group="${escapeHtml(group)}" class="${state.group === group ? "active" : ""}"><b>${escapeHtml(group)}</b><span>${rows.length} คน · ${money(sum(rows))}</span></button>`; }).join("")}<div class="acr-group-default"><label>ตั้งวิธีจ่ายให้กลุ่มนี้<select data-group-method><option value="cash">เงินสดทั้งกลุ่ม</option><option value="transfer">เงินโอนทั้งกลุ่ม</option></select></label><button type="button" data-apply-group>ใช้กับ ${state.group === "all" ? "ทุกกลุ่ม" : escapeHtml(state.group)}</button></div></aside>
+          <section class="acr-list"><div class="acr-list-head"><div><h2>${state.group === "all" ? "พนักงานทั้งหมด" : escapeHtml(state.group)}</h2><span>เปลี่ยนรายคนได้ ยอดจะย้ายฝั่งทันที</span></div><b>${visible.length} คน</b></div>${state.loading ? `<div class="acr-empty">กำลังดึงยอดสุทธิล่าสุด...</div>` : visible.length ? `<div class="acr-table-wrap"><table><thead><tr><th>พนักงาน</th><th>กลุ่ม</th><th class="acr-number">ค่าแรง</th><th class="acr-number">เงินเพิ่ม</th><th class="acr-number">เงินหัก</th><th class="acr-number">ยอดสุทธิ</th><th>วิธีจ่าย</th></tr></thead><tbody>${visible.map(rowMarkup).join("")}</tbody></table></div>` : `<div class="acr-empty">ยังไม่มีข้อมูลค่าแรงในช่วงวันที่นี้</div>`}<footer class="acr-reconcile"><span>เงินสด ${money(sum(summary.cash))}</span><b>+</b><span>เงินโอน ${money(sum(summary.transfer))}</span><b>=</b><strong>${money(summary.total)}</strong></footer></section></div></section>`;
+    }
+
+    function exportCard(method, label, rows) {
+      return `<article class="acr-export-card ${method}"><div><span>${method === "cash" ? "CASH" : "BANK TRANSFER"}</span><h2>${label}</h2><p>${rows.length} คน · ${money(sum(rows))}</p></div><div class="acr-export-actions"><button type="button" data-export-method="${method}" data-export-format="excel">Export Excel</button><button type="button" data-export-method="${method}" data-export-format="pdf">Export PDF / พิมพ์</button></div></article>`;
+    }
+
+    function exportMarkup() {
+      const summary = totals();
+      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF ACCOUNTING</p><h1>Export รายการจ่ายเงิน</h1><span>แยกเอกสารเงินสดและเงินโอนตามการจัดสรรล่าสุด</span></div><div class="acr-period-static">${escapeHtml(state.startDate)} ถึง ${escapeHtml(state.endDate)}</div></header><div class="acr-export-summary"><strong>ยอดสุทธิรวม ${money(summary.total)}</strong><span>ตรวจสอบแล้ว: เงินสด + เงินโอน = ยอดสุทธิรวม</span></div><div class="acr-export-grid">${exportCard("cash", "รายการจ่ายเงินสด", summary.cash)}${exportCard("transfer", "รายการจ่ายเงินโอน", summary.transfer)}</div><section class="acr-export-preview"><div class="acr-list-head"><div><h2>ตัวอย่างรายการที่จะส่งออก</h2><span>ใช้หัวกระดาษ โลโก้ ชื่อบริษัท ช่วงวันที่ และข้อมูลผู้ออกเอกสารตามฟอร์มหลัก</span></div></div><div class="acr-table-wrap"><table><thead><tr><th>ลำดับ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>กลุ่ม</th><th>วิธีจ่าย</th><th class="acr-number">ยอดสุทธิ</th></tr></thead><tbody>${state.rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${escapeHtml(row.group_label)}</td><td>${methodOf(row) === "cash" ? "เงินสด" : "เงินโอน"}</td><td class="acr-number"><strong>${money(row.net_amount)}</strong></td></tr>`).join("")}</tbody></table></div></section></section>`;
+    }
+
+    function paint() {
+      root.innerHTML = `<main class="acr-shell"><aside class="acr-rail"><div class="acr-logo">PF</div><div class="acr-rail-brand">PF Accounting<small>สิทธิ์ C4 ขึ้นไป</small></div><nav><button type="button" data-view="allocation" class="${state.view === "allocation" ? "active" : ""}"><span>▦</span>จัดสรรเงินจ่าย</button><button type="button" data-view="export" class="${state.view === "export" ? "active" : ""}"><span>⇩</span>Export / พิมพ์</button></nav><button class="acr-exit" type="button" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside><div class="acr-workspace">${state.view === "allocation" ? allocationMarkup() : exportMarkup()}${state.message ? `<div class="acr-toast ${state.messageType}">${escapeHtml(state.message)}</div>` : ""}</div></main>`;
+      bind();
+    }
+
+    function bind() {
+      root.querySelector("[data-ac-exit]")?.addEventListener("click", () => options.onExit?.());
+      root.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => { state.view = button.dataset.view; paint(); }));
+      root.querySelector("[data-reload]")?.addEventListener("click", load);
+      root.querySelectorAll("[data-group]").forEach((button) => button.addEventListener("click", () => { state.group = button.dataset.group; paint(); }));
+      root.querySelectorAll("[data-method-key]").forEach((button) => button.addEventListener("click", () => { state.allocations[button.dataset.methodKey] = button.dataset.method; save(`เปลี่ยน ${button.dataset.methodKey} เป็น ${button.dataset.method}`); }));
+      root.querySelector("[data-apply-group]")?.addEventListener("click", () => { const method = root.querySelector("[data-group-method]")?.value === "transfer" ? "transfer" : "cash"; state.rows.filter((row) => state.group === "all" || row.group_label === state.group).forEach((row) => { state.allocations[row.employee_key] = method; }); save(`ตั้ง ${state.group} เป็น ${method}`); });
+      const changeRange = () => { state.startDate = root.querySelector("[data-start-date]")?.value || state.startDate; state.endDate = root.querySelector("[data-end-date]")?.value || state.endDate; if (state.startDate > state.endDate) [state.startDate, state.endDate] = [state.endDate, state.startDate]; state.group = "all"; load(); };
+      root.querySelector("[data-start-date]")?.addEventListener("change", changeRange);
+      root.querySelector("[data-end-date]")?.addEventListener("change", changeRange);
+      root.querySelectorAll("[data-export-method]").forEach((button) => button.addEventListener("click", () => exportFile(button.dataset.exportMethod, button.dataset.exportFormat)));
+    }
+
+    paint();
+    load();
   }
 
   window.AccountingControl = { render };

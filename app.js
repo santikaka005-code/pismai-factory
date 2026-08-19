@@ -1194,6 +1194,7 @@ function visibleNavModulesForUser(user) {
     .map((routeId) => modules.find((item) => item.id === routeId))
     .filter((item) => item && !item.hidden)
     .filter((item) => item.id !== "inbound" || canOpen(user, "inbound"))
+    .filter((item) => item.id !== "accounting-control" || ["C4", "C5", "C6", "C7"].includes(getUserLevel(user)))
     .map((item) => ({ ...item, locked: !canOpen(user, item.id) }));
 }
 
@@ -5130,16 +5131,111 @@ async function handleLogin(event) {
   }
 }
 
+function getPfAccountingWeeklyRows(startDate, endDate) {
+  const range = normalizeDateRange(startDate, endDate);
+  const rows = new Map();
+  const productionEmployees = getEmployees().filter((employee) => employee.status === "Active");
+  const productionById = new Map(productionEmployees.map((employee) => [String(employee.id), employee]));
+  const productionByCode = new Map(productionEmployees.map((employee) => [String(employee.emp_code), employee]));
+
+  getProductionRecords()
+    .filter((record) => {
+      const date = getRecordDate(record);
+      return date >= range.startDate && date <= range.endDate;
+    })
+    .forEach((record) => {
+      const employee = productionById.get(String(record.employee_id || "")) || productionByCode.get(String(record.emp_code || ""));
+      if (!employee) return;
+      const employeeKey = `production:${employee.id || employee.emp_code}`;
+      if (!rows.has(employeeKey)) {
+        rows.set(employeeKey, {
+          employee_key: employeeKey,
+          employee_kind: "production",
+          employee_id: employee.id,
+          emp_code: employee.emp_code || "-",
+          fullname: employee.fullname || "-",
+          group_label: getEmployeePayGroup(employee) || "พนักงานงานน้ำหนัก",
+          gross_amount: 0,
+          bonus_amount: 0,
+          deduction_amount: 0,
+          withholding_tax_amount: 0,
+          net_amount: 0
+        });
+      }
+      rows.get(employeeKey).gross_amount += Number(record.total_amount || record.grand_total || 0);
+    });
+
+  rows.forEach((row) => {
+    if (row.employee_kind !== "production") return;
+    const employee = productionById.get(String(row.employee_id || "")) || productionByCode.get(String(row.emp_code || ""));
+    row.bonus_amount = getBonusTotalForEmployee("production", employee || row, range.startDate, range.endDate);
+    row.deduction_amount = getDeductionTotalForEmployee("production", employee || row, range.startDate, range.endDate);
+    row.withholding_tax_amount = getProductionWithholdingTax(row.group_label, row.gross_amount);
+    row.net_amount = Math.max(0, row.gross_amount + row.bonus_amount - row.deduction_amount - row.withholding_tax_amount);
+  });
+
+  const timeEmployees = getTimeEmployees().filter((employee) => employee.status === "Active");
+  const timeById = new Map(timeEmployees.map((employee) => [String(employee.id), employee]));
+  const timeByCode = new Map(timeEmployees.map((employee) => [String(employee.emp_code), employee]));
+  const timeRecords = getTimeRecords().filter((record) => (record.record_date || "") >= range.startDate && (record.record_date || "") <= range.endDate);
+  combineTimeRecordsByEmployeeDate(timeRecords).forEach((record) => {
+    const employee = timeById.get(String(record.employee_id || "")) || timeByCode.get(String(record.emp_code || ""));
+    if (!employee) return;
+    const type = getTimeEmployeeTypeOption(employee.employee_type || record.employee_type);
+    const employeeKey = `time:${employee.id || employee.emp_code}`;
+    if (!rows.has(employeeKey)) {
+      rows.set(employeeKey, {
+        employee_key: employeeKey,
+        employee_kind: "time",
+        employee_id: employee.id,
+        emp_code: employee.emp_code || "-",
+        fullname: employee.fullname || "-",
+        group_label: `พนักงานเวลา - ${getTimeReportGroupLabel(type.id)}`,
+        gross_amount: 0,
+        bonus_amount: 0,
+        deduction_amount: 0,
+        withholding_tax_amount: 0,
+        net_amount: 0
+      });
+    }
+    const receipt = getTimeReceiptRow({ ...record, daily_wage: Number(employee.daily_wage || record.daily_wage || type.dailyWage), ot_hourly_rate: Number(employee.ot_hourly_rate || record.ot_hourly_rate || TIME_OT_HOURLY_RATE) });
+    rows.get(employeeKey).gross_amount += Number(receipt.totalAmount || 0);
+  });
+
+  rows.forEach((row) => {
+    if (row.employee_kind !== "time") return;
+    const employee = timeById.get(String(row.employee_id || "")) || timeByCode.get(String(row.emp_code || ""));
+    row.bonus_amount = getBonusTotalForEmployee("time", employee || row, range.startDate, range.endDate);
+    row.deduction_amount = getDeductionTotalForEmployee("time", employee || row, range.startDate, range.endDate);
+    row.net_amount = Math.max(0, row.gross_amount + row.bonus_amount - row.deduction_amount);
+  });
+
+  return Array.from(rows.values()).sort((a, b) => `${a.group_label} ${a.emp_code}`.localeCompare(`${b.group_label} ${b.emp_code}`, "th", { numeric: true }));
+}
+
+async function getPfPaymentAllocations(startDate, endDate) {
+  const query = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  const response = await cloudApiRequest(`/api/accounting/payment-allocations?${query.toString()}`);
+  const allocations = {};
+  (response.data || []).forEach((row) => { allocations[row.employee_key] = row.payment_method; });
+  return allocations;
+}
+
+async function savePfPaymentAllocations(payload) {
+  return cloudApiRequest("/api/accounting/payment-allocations", { method: "PUT", body: JSON.stringify(payload) });
+}
+
+async function exportPfPayments(format, method, payload) {
+  return downloadReport(`${REPORT_API_BASE}/reports/accounting-payments-${format}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(getSession()?.token ? { "X-Session-Token": getSession().token } : {}) },
+    body: JSON.stringify({ ...payload, payment_method: method })
+  });
+}
+
 function renderApp(user, route) {
   if (route !== "secret-room") window.SecretRoom?.stop?.();
   window.SecretRoom?.startNotifications?.();
-  if (route === "accounting-control" && window.AccountingControl) {
-    window.AccountingControl.render(app, user, {
-      onExit: () => { location.hash = "#/dashboard"; },
-      onAudit: (action, description) => addAuditLog(user, action, description)
-    });
-    return;
-  }
   if (!liveStateCloudBootstrapped) {
     liveStateCloudBootstrapped = true;
     bootstrapLiveStateFromCloud().then(() => render()).catch((error) => {
@@ -5164,7 +5260,7 @@ function renderApp(user, route) {
     employeeCloudBootstrapped = true;
     bootstrapEmployeesWithCloud().then(() => {
       const currentRoute = location.hash.replace("#/", "");
-      if (["dashboard", "employees", "production-employees", "time-employees", "production", "time-report", "compare-data", "summary-person", "summary-all", "summary-main", "settings"].includes(currentRoute)) {
+      if (["dashboard", "employees", "production-employees", "time-employees", "production", "time-report", "compare-data", "summary-person", "summary-all", "summary-main", "settings", "accounting-control"].includes(currentRoute)) {
         render();
       }
     }).catch((error) => {
@@ -5175,12 +5271,24 @@ function renderApp(user, route) {
     deductionCloudBootstrapped = true;
     Promise.all([hydrateDeductionsFromCloud(), hydrateDeductionApplicationsFromCloud()]).then(() => {
       const currentRoute = location.hash.replace("#/", "");
-      if (["compare-data", "summary-person", "summary-all", "summary-main", "summary-group-report", "summary-time-overview"].includes(currentRoute)) {
+      if (["compare-data", "summary-person", "summary-all", "summary-main", "summary-group-report", "summary-time-overview", "accounting-control"].includes(currentRoute)) {
         render();
       }
     }).catch((error) => {
       console.warn("Deduction cloud bootstrap failed.", error);
     });
+  }
+
+  if (route === "accounting-control" && window.AccountingControl) {
+    window.AccountingControl.render(app, user, {
+      onExit: () => { location.hash = "#/dashboard"; },
+      onAudit: (action, description) => addAuditLog(user, action, description),
+      getWeeklyRows: getPfAccountingWeeklyRows,
+      loadAllocations: getPfPaymentAllocations,
+      saveAllocations: savePfPaymentAllocations,
+      exportPayments: exportPfPayments
+    });
+    return;
   }
 
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
