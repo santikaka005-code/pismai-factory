@@ -5259,7 +5259,9 @@ async function getPfPaymentAllocations(startDate, endDate) {
   const query = new URLSearchParams({ start_date: startDate, end_date: endDate });
   const response = await cloudApiRequest(`/api/accounting/payment-allocations?${query.toString()}`);
   const allocations = {};
-  (response.data || []).forEach((row) => { allocations[row.employee_key] = row.payment_method; });
+  (response.data || []).forEach((row) => {
+    allocations[row.employee_key] = { payment_method: row.payment_method, net_amount: Number(row.net_amount || 0) };
+  });
   return allocations;
 }
 
@@ -17165,6 +17167,7 @@ let inboundMessage = "";
 let inboundMessageType = "success";
 let inboundConfirmPayload = null;
 let inboundFilters = { from: "", to: "", supplier: "", fruit: "", search: "" };
+let inboundSelectedReceiptIds = new Set();
 
 function inboundMoney(value) {
   return Number(value || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -17199,6 +17202,8 @@ async function loadInboundData(force = false) {
   try {
     const result = await cloudApiRequest("/api/inbound/bootstrap", { timeoutMs: 20000 });
     inboundData = result.data || { fruits: [], prices: [], receipts: [] };
+    const availableIds = new Set(inboundData.receipts.map((row) => Number(row.id)));
+    inboundSelectedReceiptIds = new Set([...inboundSelectedReceiptIds].filter((id) => availableIds.has(id)));
     inboundLoaded = true;
     inboundMessage = "";
   } catch (error) {
@@ -17294,12 +17299,56 @@ function renderInboundHistory(user) {
   const totalWeight = rows.reduce((sum, row) => sum + Number(row.weight_kg || 0), 0);
   const totalAmount = rows.reduce((sum, row) => sum + Number(row.total_amount || 0), 0);
   const suppliers = [...new Set(inboundData.receipts.map((row) => row.supplier_name).filter(Boolean))].sort((a, b) => a.localeCompare(b, "th"));
+  const selectedRows = inboundData.receipts.filter((row) => inboundSelectedReceiptIds.has(Number(row.id)));
+  const allVisibleSelected = rows.length > 0 && rows.every((row) => inboundSelectedReceiptIds.has(Number(row.id)));
   return `${renderInboundHeader("รายการรับเข้า", "ผลไม้ชนิดเดียวกันสามารถรับคนละราคาได้ โดยเก็บราคาจริงแยกทุกรายการ", user, "history")}${renderInboundStatus()}
     <section class="inbound-metrics"><div><span>น้ำหนักตามตัวกรอง</span><strong>${inboundMoney(totalWeight)}</strong><small>กก.</small></div><div><span>ยอดเงินตามตัวกรอง</span><strong>${inboundMoney(totalAmount)}</strong><small>บาท</small></div><div><span>จำนวนรายการ</span><strong>${rows.length.toLocaleString("th-TH")}</strong><small>รายการ</small></div></section>
     <section class="panel inbound-history-panel"><form id="inboundFilterForm" class="inbound-filters"><label><span>จากวันที่</span><input name="from" type="date" value="${escapeHtml(inboundFilters.from)}" /></label><label><span>ถึงวันที่</span><input name="to" type="date" value="${escapeHtml(inboundFilters.to)}" /></label><label><span>ผู้ส่ง</span><select name="supplier"><option value="">ทั้งหมด</option>${suppliers.map((name) => `<option ${inboundFilters.supplier === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label><label><span>ผลไม้</span><select name="fruit"><option value="">ทั้งหมด</option>${inboundData.fruits.map((fruit) => `<option value="${fruit.id}" ${inboundFilters.fruit === String(fruit.id) ? "selected" : ""}>${escapeHtml(fruit.name)}</option>`).join("")}</select></label><label class="is-search"><span>ค้นหา</span><input name="search" type="search" value="${escapeHtml(inboundFilters.search)}" placeholder="ชื่อผู้ส่ง หรือหมายเหตุ" /></label><button class="btn btn-primary" type="submit">ค้นหา</button><button class="btn btn-outline" id="clearInboundFilters" type="button">ล้างตัวกรอง</button></form>
+      <div class="inbound-selection-bar"><div><strong>เลือกแล้ว <span id="inboundSelectedCount">${selectedRows.length.toLocaleString("th-TH")}</span> รายการ</strong><small>รายการที่ติ๊กจะถูกรวมอยู่ในฟอร์มเดียวกัน</small></div><div><button class="btn btn-outline" id="printSelectedInbound" type="button" ${selectedRows.length ? "" : "disabled"}>พิมพ์</button><button class="btn btn-outline" id="exportSelectedInboundExcel" type="button" ${selectedRows.length ? "" : "disabled"}>Excel</button><button class="btn btn-primary" id="exportSelectedInboundPdf" type="button" ${selectedRows.length ? "" : "disabled"}>PDF</button></div></div>
       <div class="inbound-info-strip">ข้อมูลราคาที่แสดงคือราคาจริง ณ ตอนรับเข้า และจะไม่เปลี่ยนตามราคาแนะนำใหม่</div>
-      <div class="table-scroll"><table class="inbound-table"><thead><tr><th>วันเวลา</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th class="is-price">ราคา/กก.</th><th>ยอดเงิน</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td><strong>${escapeHtml(row.supplier_name)}</strong></td><td>${escapeHtml(row.fruit_name)}</td><td class="number-cell">${inboundMoney(row.weight_kg)}</td><td class="number-cell is-price"><strong>${inboundMoney(row.price_per_kg)}</strong></td><td class="number-cell"><strong>${inboundMoney(row.total_amount)}</strong></td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("") || `<tr><td colspan="8" class="empty-cell">ไม่พบรายการรับเข้า</td></tr>`}</tbody><tfoot><tr><th colspan="3">รวมทั้งหมด</th><th>${inboundMoney(totalWeight)} กก.</th><th></th><th>${inboundMoney(totalAmount)} บาท</th><th colspan="2">${rows.length.toLocaleString("th-TH")} รายการ</th></tr></tfoot></table></div>
+      <div class="table-scroll"><table class="inbound-table"><thead><tr><th class="inbound-check-cell"><input id="selectAllInboundVisible" type="checkbox" ${allVisibleSelected ? "checked" : ""} aria-label="เลือกทุกรายการที่แสดง" /></th><th>วันเวลา</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th class="is-price">ราคา/กก.</th><th>ยอดเงิน</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row) => `<tr class="${inboundSelectedReceiptIds.has(Number(row.id)) ? "is-selected" : ""}"><td class="inbound-check-cell"><input class="inbound-row-check" type="checkbox" value="${Number(row.id)}" ${inboundSelectedReceiptIds.has(Number(row.id)) ? "checked" : ""} aria-label="เลือกรายการรับเข้า ${Number(row.id)}" /></td><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td><strong>${escapeHtml(row.supplier_name)}</strong></td><td>${escapeHtml(row.fruit_name)}</td><td class="number-cell">${inboundMoney(row.weight_kg)}</td><td class="number-cell is-price"><strong>${inboundMoney(row.price_per_kg)}</strong></td><td class="number-cell"><strong>${inboundMoney(row.total_amount)}</strong></td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("") || `<tr><td colspan="9" class="empty-cell">ไม่พบรายการรับเข้า</td></tr>`}</tbody><tfoot><tr><th></th><th colspan="3">รวมทั้งหมด</th><th>${inboundMoney(totalWeight)} กก.</th><th></th><th>${inboundMoney(totalAmount)} บาท</th><th colspan="2">${rows.length.toLocaleString("th-TH")} รายการ</th></tr></tfoot></table></div>
     </section>`;
+}
+
+function inboundSelectedRows() {
+  return inboundData.receipts.filter((row) => inboundSelectedReceiptIds.has(Number(row.id)));
+}
+
+function printSelectedInboundReceipts() {
+  const rows = inboundSelectedRows();
+  if (!rows.length) return;
+  const totalWeight = rows.reduce((sum, row) => sum + Number(row.weight_kg || 0), 0);
+  const totalAmount = rows.reduce((sum, row) => sum + Number(row.total_amount || 0), 0);
+  const popup = window.open("", "_blank");
+  if (!popup) {
+    inboundMessage = "เบราว์เซอร์บล็อกหน้าต่างพิมพ์ กรุณาอนุญาต Pop-up แล้วลองอีกครั้ง";
+    inboundMessageType = "error";
+    render();
+    return;
+  }
+  popup.document.write(`<!doctype html><html lang="th"><head><meta charset="utf-8"><title>รายการรับเข้าที่เลือก</title><style>@page{size:A4 landscape;margin:12mm}body{font-family:"Sarabun","Noto Sans Thai",sans-serif;color:#1f2937}h1{margin:0;color:#0f766e;font-size:22px}p{margin:4px 0 14px;color:#667085}table{width:100%;border-collapse:collapse;font-size:10px}th,td{padding:7px;border:1px solid #cfd6df;vertical-align:top}th{color:#fff;background:#0f766e}td.num{text-align:right}tfoot td{font-weight:700;background:#ecfdf3}.meta{display:flex;justify-content:space-between}.no-print{margin-bottom:12px}@media print{.no-print{display:none}}</style></head><body><button class="no-print" onclick="window.print()">พิมพ์เอกสาร</button><div class="meta"><div><h1>ฟอร์มรวมรายการรับเข้าที่เลือก</h1><p>Pitsamai Frozen Fruits • ${rows.length.toLocaleString("th-TH")} รายการ</p></div><p>พิมพ์เมื่อ ${escapeHtml(new Date().toLocaleString("th-TH"))}</p></div><table><thead><tr><th>#</th><th>วันเวลา</th><th>เลขที่</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th>ราคา/กก.</th><th>ยอดเงิน</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td>IN-${String(row.id).padStart(6, "0")}</td><td>${escapeHtml(row.supplier_name)}</td><td>${escapeHtml(row.fruit_name)}</td><td class="num">${inboundMoney(row.weight_kg)}</td><td class="num">${inboundMoney(row.price_per_kg)}</td><td class="num">${inboundMoney(row.total_amount)}</td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("")}</tbody><tfoot><tr><td colspan="5">รวม ${rows.length.toLocaleString("th-TH")} รายการ</td><td class="num">${inboundMoney(totalWeight)} กก.</td><td></td><td class="num">${inboundMoney(totalAmount)} บาท</td><td colspan="2"></td></tr></tfoot></table></body></html>`);
+  popup.document.close();
+  popup.focus();
+  window.setTimeout(() => popup.print(), 250);
+}
+
+async function exportSelectedInbound(format) {
+  const receiptIds = [...inboundSelectedReceiptIds];
+  if (!receiptIds.length) return;
+  const token = getSession()?.token || "";
+  try {
+    await downloadReport(`${REPORT_API_BASE}/reports/inbound-selected-${format}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { "X-Session-Token": token } : {}) },
+      body: JSON.stringify({ receipt_ids: receiptIds })
+    });
+    inboundMessage = `ดาวน์โหลด ${format === "excel" ? "Excel" : "PDF"} รวม ${receiptIds.length.toLocaleString("th-TH")} รายการแล้ว`;
+    inboundMessageType = "success";
+  } catch (error) {
+    inboundMessage = error.message || "ส่งออกรายการรับเข้าไม่สำเร็จ";
+    inboundMessageType = "error";
+  }
+  render();
 }
 
 function bindInboundEvents(user, route) {
@@ -17335,6 +17384,18 @@ function bindInboundEvents(user, route) {
   if (route === "inbound-history") {
     document.querySelector("#inboundFilterForm")?.addEventListener("submit", (event) => { event.preventDefault(); inboundFilters = Object.fromEntries(new FormData(event.currentTarget)); render(); });
     document.querySelector("#clearInboundFilters")?.addEventListener("click", () => { inboundFilters = { from: "", to: "", supplier: "", fruit: "", search: "" }; render(); });
+    document.querySelectorAll(".inbound-row-check").forEach((checkbox) => checkbox.addEventListener("change", () => {
+      const id = Number(checkbox.value);
+      if (checkbox.checked) inboundSelectedReceiptIds.add(id); else inboundSelectedReceiptIds.delete(id);
+      render();
+    }));
+    document.querySelector("#selectAllInboundVisible")?.addEventListener("change", (event) => {
+      inboundFilteredReceipts().forEach((row) => event.currentTarget.checked ? inboundSelectedReceiptIds.add(Number(row.id)) : inboundSelectedReceiptIds.delete(Number(row.id)));
+      render();
+    });
+    document.querySelector("#printSelectedInbound")?.addEventListener("click", printSelectedInboundReceipts);
+    document.querySelector("#exportSelectedInboundExcel")?.addEventListener("click", () => exportSelectedInbound("excel"));
+    document.querySelector("#exportSelectedInboundPdf")?.addEventListener("click", () => exportSelectedInbound("pdf"));
   }
 }
 

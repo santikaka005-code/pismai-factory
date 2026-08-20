@@ -7159,6 +7159,114 @@ def build_accounting_payments_pdf(payload: dict) -> bytes:
     return buffer.getvalue()
 
 
+def inbound_export_rows(payload: dict) -> list[dict]:
+    rows = payload.get("rows", [])
+    if not isinstance(rows, list):
+        return []
+    cleaned = []
+    for row in rows[:200]:
+        if not isinstance(row, dict):
+            continue
+        cleaned.append(row)
+    return cleaned
+
+
+def inbound_export_datetime(value: object) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        return parsed.astimezone(timezone(timedelta(hours=7))).strftime("%d/%m/%Y %H:%M")
+    except (TypeError, ValueError):
+        return str(value or "-")
+
+
+def build_inbound_selected_excel(payload: dict) -> bytes:
+    rows = inbound_export_rows(payload)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "รายการรับเข้า"
+    headers = ["ลำดับ", "วันเวลา", "เลขที่รายการ", "ผู้ส่ง", "ผลไม้", "น้ำหนัก (กก.)", "ราคา/กก.", "ยอดเงิน (บาท)", "หมายเหตุ", "ผู้บันทึก"]
+    sheet.merge_cells("A1:J1")
+    sheet["A1"] = COMPANY_NAME
+    sheet["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
+    sheet.merge_cells("A2:J2")
+    sheet["A2"] = "ฟอร์มรวมรายการรับเข้าที่เลือก"
+    sheet["A2"].font = Font(name="Sarabun", bold=True, size=15, color="111827")
+    sheet.merge_cells("A3:J3")
+    sheet["A3"] = f"จำนวน {len(rows)} รายการ | พิมพ์เมื่อ {datetime.now(timezone(timedelta(hours=7))).strftime('%d/%m/%Y %H:%M')} | ผู้พิมพ์ {payload.get('printed_by') or '-'}"
+    sheet.append([])
+    sheet.append(headers)
+    header_row = 5
+    for index, row in enumerate(rows, 1):
+        sheet.append([
+            index, inbound_export_datetime(row.get("received_at")), f"IN-{int(row.get('id') or 0):06d}",
+            row.get("supplier_name") or "-", row.get("fruit_name") or "-", safe_float(row.get("weight_kg")),
+            safe_float(row.get("price_per_kg")), safe_float(row.get("total_amount")), row.get("note") or "-", row.get("created_by") or "-",
+        ])
+    total_row = sheet.max_row + 1
+    sheet.cell(total_row, 1, "รวมรายการที่เลือก")
+    sheet.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=5)
+    sheet.cell(total_row, 6, sum(safe_float(row.get("weight_kg")) for row in rows))
+    sheet.cell(total_row, 8, sum(safe_float(row.get("total_amount")) for row in rows))
+    green, white, line = "0F766E", "FFFFFF", "D0D5DD"
+    for cell in sheet[header_row]:
+        cell.font = Font(name="Sarabun", bold=True, color=white)
+        cell.fill = PatternFill("solid", fgColor=green)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    thin = Side(style="thin", color=line)
+    for row_cells in sheet.iter_rows(min_row=header_row, max_row=total_row, min_col=1, max_col=10):
+        for cell in row_cells:
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            if cell.row > header_row:
+                cell.font = Font(name="Sarabun", bold=cell.row == total_row, size=10)
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+    for column in (6, 7, 8):
+        for cell in sheet.iter_cols(min_col=column, max_col=column, min_row=header_row + 1, max_row=total_row):
+            cell[0].number_format = '#,##0.00'
+    widths = [8, 20, 16, 28, 18, 16, 14, 18, 32, 18]
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    sheet.freeze_panes = "A6"
+    sheet.auto_filter.ref = f"A{header_row}:J{max(header_row, total_row - 1)}"
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.fitToWidth = 1
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def build_inbound_selected_pdf(payload: dict) -> bytes:
+    rows = inbound_export_rows(payload)
+    buffer = BytesIO()
+    document = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=10 * mm, leftMargin=10 * mm, topMargin=12 * mm, bottomMargin=12 * mm)
+    styles = getSampleStyleSheet()
+    for style in styles.byName.values():
+        style.fontName = THAI_FONT
+    styles["Title"].fontName = THAI_FONT_BOLD
+    story = [Paragraph("ฟอร์มรวมรายการรับเข้าที่เลือก", styles["Title"]), Paragraph(f"{COMPANY_NAME} | {len(rows)} รายการ | ผู้พิมพ์ {xml_escape(str(payload.get('printed_by') or '-'))}", styles["Normal"]), Spacer(1, 5 * mm)]
+    table_rows = [["ลำดับ", "วันเวลา", "เลขที่", "ผู้ส่ง", "ผลไม้", "น้ำหนัก", "ราคา/กก.", "ยอดเงิน", "หมายเหตุ", "ผู้บันทึก"]]
+    for index, row in enumerate(rows, 1):
+        table_rows.append([
+            index, inbound_export_datetime(row.get("received_at")), f"IN-{int(row.get('id') or 0):06d}",
+            Paragraph(xml_escape(str(row.get("supplier_name") or "-")), styles["Normal"]), str(row.get("fruit_name") or "-"),
+            f"{safe_float(row.get('weight_kg')):,.2f}", f"{safe_float(row.get('price_per_kg')):,.2f}", f"{safe_float(row.get('total_amount')):,.2f}",
+            Paragraph(xml_escape(str(row.get("note") or "-")), styles["Normal"]), str(row.get("created_by") or "-"),
+        ])
+    table_rows.append(["รวม", "", "", "", f"{len(rows)} รายการ", f"{sum(safe_float(row.get('weight_kg')) for row in rows):,.2f}", "", f"{sum(safe_float(row.get('total_amount')) for row in rows):,.2f}", "", ""])
+    table = Table(table_rows, colWidths=[12*mm, 27*mm, 20*mm, 35*mm, 20*mm, 22*mm, 19*mm, 24*mm, 43*mm, 24*mm], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F766E")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), THAI_FONT_BOLD), ("FONTNAME", (0, 1), (-1, -1), THAI_FONT),
+        ("FONTSIZE", (0, 0), (-1, -1), 7), ("GRID", (0, 0), (-1, -1), .4, colors.HexColor("#D0D5DD")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"), ("ALIGN", (0, 1), (0, -1), "CENTER"),
+        ("ALIGN", (5, 1), (7, -1), "RIGHT"), ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#ECFDF3")),
+        ("FONTNAME", (0, -1), (-1, -1), THAI_FONT_BOLD),
+    ]))
+    story.append(table)
+    document.build(story)
+    return buffer.getvalue()
+
+
 class ReportHandler(BaseHTTPRequestHandler):
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -9164,6 +9272,35 @@ class ReportHandler(BaseHTTPRequestHandler):
                 content_type = "application/pdf"
                 extension = "pdf"
             self.send_file(content, content_type, f"PF_Payment_{method}_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.{extension}")
+            return
+
+        if parsed.path in {"/reports/inbound-selected-excel", "/reports/inbound-selected-pdf"}:
+            actor = inbound_authorized_actor(self)
+            if not actor:
+                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
+                return
+            try:
+                receipt_ids = list(dict.fromkeys(int(value) for value in payload.get("receipt_ids", []) if int(value) > 0))
+            except (TypeError, ValueError):
+                receipt_ids = []
+            if not receipt_ids or len(receipt_ids) > 200:
+                self.send_json({"error": "Select 1-200 inbound receipts for export."}, 400)
+                return
+            status, body = supabase_request("GET", f"inbound_receipts?id=in.({','.join(str(value) for value in receipt_ids)})&select=*")
+            if status >= 400:
+                self.send_json({"error": body}, status)
+                return
+            by_id = {int(row.get("id") or 0): row for row in body if isinstance(row, dict)} if isinstance(body, list) else {}
+            rows = [by_id[value] for value in receipt_ids if value in by_id]
+            if len(rows) != len(receipt_ids):
+                self.send_json({"error": "Some selected inbound receipts no longer exist."}, 409)
+                return
+            export_payload = {"rows": rows, "printed_by": actor.get("username") or "-"}
+            timestamp = datetime.now(timezone(timedelta(hours=7))).strftime("%Y%m%d-%H%M")
+            if parsed.path.endswith("-excel"):
+                self.send_file(build_inbound_selected_excel(export_payload), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"Inbound_Selected_{timestamp}.xlsx")
+            else:
+                self.send_file(build_inbound_selected_pdf(export_payload), "application/pdf", f"Inbound_Selected_{timestamp}.pdf")
             return
 
         if parsed.path == "/reports/selected-employees-pdf":

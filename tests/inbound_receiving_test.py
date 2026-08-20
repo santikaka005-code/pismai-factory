@@ -1,7 +1,10 @@
 import unittest
+from io import BytesIO
 from pathlib import Path
 
 import report_server
+from openpyxl import load_workbook
+from pypdf import PdfReader
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +42,7 @@ class InboundReceivingTests(unittest.TestCase):
         self.assertNotIn('"inbound"', c4_block)
         self.assertIn('item.id !== "inbound" || canOpen(user, "inbound")', app_source)
         self.assertIn('account_level_number(actor.get("level")) >= 5', server_source)
-        self.assertEqual(server_source.count("actor = inbound_authorized_actor(self)"), 4)
+        self.assertGreaterEqual(server_source.count("actor = inbound_authorized_actor(self)"), 5)
 
     def test_migration_has_snapshot_fields_and_positive_constraints(self):
         sql = (ROOT / "supabase_inbound_receiving_migration.sql").read_text(encoding="utf-8")
@@ -47,6 +50,28 @@ class InboundReceivingTests(unittest.TestCase):
             self.assertIn(field, sql)
         self.assertIn("check (weight_kg > 0)", sql)
         self.assertIn("check (price_per_kg > 0)", sql)
+
+    def test_selected_receipts_generate_one_combined_excel_and_pdf(self):
+        payload = {
+            "printed_by": "tester",
+            "rows": [
+                {"id": 11, "received_at": "2026-08-20T01:30:00Z", "supplier_name": "สวนหนึ่ง", "fruit_name": "มังคุด", "weight_kg": 100, "price_per_kg": 18, "total_amount": 1800, "note": "ล็อตเช้า", "created_by": "tester"},
+                {"id": 12, "received_at": "2026-08-20T02:00:00Z", "supplier_name": "สวนสอง", "fruit_name": "มังคุด", "weight_kg": 50, "price_per_kg": 20, "total_amount": 1000, "note": "เกรด A", "created_by": "tester"},
+            ],
+        }
+        excel_bytes = report_server.build_inbound_selected_excel(payload)
+        workbook = load_workbook(BytesIO(excel_bytes), data_only=True)
+        sheet = workbook["รายการรับเข้า"]
+        self.assertEqual(sheet["F8"].value, 150)
+        self.assertEqual(sheet["H8"].value, 2800)
+        pdf_bytes = report_server.build_inbound_selected_pdf(payload)
+        self.assertGreaterEqual(len(PdfReader(BytesIO(pdf_bytes)).pages), 1)
+
+    def test_history_ui_has_checkbox_and_all_three_export_actions(self):
+        source = (ROOT / "app.js").read_text(encoding="utf-8")
+        for marker in ["selectAllInboundVisible", "inbound-row-check", "printSelectedInbound", "exportSelectedInboundExcel", "exportSelectedInboundPdf"]:
+            self.assertIn(marker, source)
+        self.assertIn("/reports/inbound-selected-${format}", source)
 
 
 if __name__ == "__main__":
