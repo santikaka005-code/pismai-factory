@@ -49,10 +49,12 @@
     if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) return options.onExit?.();
 
     const week = currentWeek();
-    const state = { view: "allocation", kind: "production", exportScope: "all", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, expanded: new Set(), loading: true, message: "", messageType: "success", costPreset: "week", costStartDate: week.startDate, costEndDate: week.endDate, costData: null, costLoading: false };
+    const state = { view: "allocation", kind: "production", exportScope: "all", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, adjustments: {}, expanded: new Set(), loading: true, message: "", messageType: "success", percentKind: "production", percentGroup: "all", percentMode: "add", percentValue: 0, costPreset: "week", costStartDate: week.startDate, costEndDate: week.endDate, costData: null, costLoading: false };
     const methodOf = (row) => state.allocations[row.employee_key] === "transfer" ? "transfer" : "cash";
+    const adjustmentOf = (row) => Number(state.adjustments[row.employee_key] || 0);
+    const adjustedNet = (row) => Math.max(0, Math.round((Number(row.net_amount || 0) + adjustmentOf(row)) * 100) / 100);
     const methodRows = (method) => state.rows.filter((row) => method === "all" || methodOf(row) === method);
-    const sum = (rows) => rows.reduce((total, row) => total + Number(row.net_amount || 0), 0);
+    const sum = (rows) => rows.reduce((total, row) => total + adjustedNet(row), 0);
     const totals = () => ({ cash: methodRows("cash"), transfer: methodRows("transfer"), total: sum(state.rows) });
     function scopedExportRows() {
       if (state.exportScope === "all") return state.rows;
@@ -78,7 +80,14 @@
           if (cloud && typeof cloud === "object") saved = { ...saved, ...cloud };
         } catch (error) { console.warn("PF allocation cloud load failed; using local copy.", error); }
         state.allocations = {};
-        state.rows.forEach((row) => { state.allocations[row.employee_key] = saved[row.employee_key] === "transfer" ? "transfer" : "cash"; });
+        state.adjustments = {};
+        state.rows.forEach((row) => {
+          const stored = saved[row.employee_key];
+          state.allocations[row.employee_key] = (typeof stored === "object" ? stored?.payment_method : stored) === "transfer" ? "transfer" : "cash";
+          if (stored && typeof stored === "object" && Number.isFinite(Number(stored.net_amount))) {
+            state.adjustments[row.employee_key] = Math.round((Number(stored.net_amount) - Number(row.net_amount || 0)) * 100) / 100;
+          }
+        });
       } catch (error) {
         state.message = error instanceof Error ? error.message : "โหลดข้อมูลรอบจ่ายไม่สำเร็จ";
         state.messageType = "error";
@@ -101,17 +110,19 @@
     }
 
     async function save(description) {
-      writeLocalWeek(state.startDate, state.endDate, state.allocations);
-      state.message = "กำลังบันทึกวิธีจ่าย...";
+      const localRows = {};
+      state.rows.forEach((row) => { localRows[row.employee_key] = { payment_method: methodOf(row), net_amount: adjustedNet(row) }; });
+      writeLocalWeek(state.startDate, state.endDate, localRows);
+      state.message = "กำลังบันทึกข้อมูล PF Accounting...";
       state.messageType = "success";
       paint();
       try {
         await options.saveAllocations?.({
           start_date: state.startDate,
           end_date: state.endDate,
-          allocations: state.rows.map((row) => ({ employee_key: row.employee_key, employee_kind: row.employee_kind, employee_id: row.employee_id, emp_code: row.emp_code, fullname: row.fullname, group_label: row.group_label, payment_method: methodOf(row), net_amount: Number(row.net_amount || 0) }))
+          allocations: state.rows.map((row) => ({ employee_key: row.employee_key, employee_kind: row.employee_kind, employee_id: row.employee_id, emp_code: row.emp_code, fullname: row.fullname, group_label: row.group_label, payment_method: methodOf(row), net_amount: adjustedNet(row) }))
         });
-        state.message = "บันทึกวิธีจ่ายเรียบร้อยแล้ว";
+        state.message = "บันทึกข้อมูล PF Accounting เรียบร้อยแล้ว";
         options.onAudit?.("PF_PAYMENT_ALLOCATION_SAVE", description);
       } catch (error) {
         state.message = "บันทึกไว้ในเครื่องแล้ว แต่ฐานกลางยังไม่พร้อม: " + (error instanceof Error ? error.message : "บันทึกไม่สำเร็จ");
@@ -131,7 +142,7 @@
       state.messageType = "success";
       paint();
       try {
-        await options.exportPayments?.(format, method, { start_date: state.startDate, end_date: state.endDate, payment_method: method, scope_label: exportScopeLabel(), rows: rows.map((row, index) => ({ ...row, sequence: index + 1, payment_method: method })), printed_by: user?.fullname || user?.username || "System Admin", printed_by_position: String(user?.level || "C4") });
+        await options.exportPayments?.(format, method, { start_date: state.startDate, end_date: state.endDate, payment_method: method, scope_label: exportScopeLabel(), rows: rows.map((row, index) => ({ ...row, net_amount: adjustedNet(row), sequence: index + 1, payment_method: method })), printed_by: user?.fullname || user?.username || "System Admin", printed_by_position: String(user?.level || "C4") });
         state.message = `Export ${format === "excel" ? "Excel" : "PDF"} เรียบร้อยแล้ว`;
         options.onAudit?.("PF_PAYMENT_EXPORT", `Export ${method} ${format} ${state.startDate} - ${state.endDate}`);
       } catch (error) {
@@ -147,7 +158,8 @@
       const detailItems = (items, tone, emptyText) => items?.length
         ? items.map((item) => `<article><div><b>${escapeHtml(item.label || "-")}</b><span>${escapeHtml(item.start_date || "-")}${item.end_date && item.end_date !== item.start_date ? ` ถึง ${escapeHtml(item.end_date)}` : ""}</span></div><strong class="${tone}">${tone === "acr-positive" ? "+" : "-"}${money(item.amount)}</strong><p>${escapeHtml(item.note || "ไม่มีหมายเหตุ")}</p><small>บันทึกโดย ${escapeHtml(item.created_by || "-")}</small></article>`).join("")
         : `<div class="acr-detail-empty">${emptyText}</div>`;
-      return `<tr class="acr-employee-row ${expanded ? "is-expanded" : ""}"><td><button type="button" class="acr-employee-toggle" data-expand-key="${escapeHtml(row.employee_key)}" aria-expanded="${expanded}"><span>${expanded ? "▾" : "▸"}</span><span><strong>${escapeHtml(row.emp_code || "-")}</strong><small>${escapeHtml(row.fullname || "-")} · ${row.employee_kind === "time" ? "พนักงานเวลา" : "พนักงานเหมา"}</small></span></button></td><td>${escapeHtml(row.group_label || "-")}</td><td class="acr-number">${money(row.gross_amount)}</td><td class="acr-number acr-positive">+${money(row.bonus_amount)}</td><td class="acr-number acr-negative">-${money(Number(row.deduction_amount || 0) + Number(row.withholding_tax_amount || 0))}</td><td class="acr-number"><strong>${money(row.net_amount)}</strong></td><td><div class="acr-method-switch"><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="cash" class="${method === "cash" ? "is-cash" : ""}">เงินสด</button><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="transfer" class="${method === "transfer" ? "is-transfer" : ""}">เงินโอน</button></div></td></tr>${expanded ? `<tr class="acr-detail-row"><td colspan="7"><div class="acr-detail-grid"><section><header><span>เงินเพิ่ม</span><strong class="acr-positive">+${money(row.bonus_amount)}</strong></header>${detailItems(row.bonus_items, "acr-positive", "ไม่มีรายการเงินเพิ่มในรอบนี้")}</section><section><header><span>รายการหัก</span><strong class="acr-negative">-${money(Number(row.deduction_amount || 0) + Number(row.withholding_tax_amount || 0))}</strong></header>${detailItems(row.deduction_items, "acr-negative", "ไม่มีรายการหักในรอบนี้")}</section></div></td></tr>` : ""}`;
+      const adjustment = adjustmentOf(row);
+      return `<tr class="acr-employee-row ${expanded ? "is-expanded" : ""}"><td><button type="button" class="acr-employee-toggle" data-expand-key="${escapeHtml(row.employee_key)}" aria-expanded="${expanded}"><span>${expanded ? "▾" : "▸"}</span><span><strong>${escapeHtml(row.emp_code || "-")}</strong><small>${escapeHtml(row.fullname || "-")} · ${row.employee_kind === "time" ? "พนักงานเวลา" : "พนักงานเหมา"}</small></span></button></td><td>${escapeHtml(row.group_label || "-")}</td><td class="acr-number">${money(row.gross_amount)}</td><td class="acr-number acr-positive">+${money(row.bonus_amount)}</td><td class="acr-number acr-negative">-${money(Number(row.deduction_amount || 0) + Number(row.withholding_tax_amount || 0))}</td><td class="acr-number"><strong>${money(adjustedNet(row))}</strong>${adjustment ? `<small class="${adjustment > 0 ? "acr-positive" : "acr-negative"}">${adjustment > 0 ? "+" : ""}${money(adjustment)} จากเปอร์เซ็นต์</small>` : ""}</td><td><div class="acr-method-switch"><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="cash" class="${method === "cash" ? "is-cash" : ""}">เงินสด</button><button type="button" data-method-key="${escapeHtml(row.employee_key)}" data-method="transfer" class="${method === "transfer" ? "is-transfer" : ""}">เงินโอน</button></div></td></tr>${expanded ? `<tr class="acr-detail-row"><td colspan="7"><div class="acr-detail-grid"><section><header><span>เงินเพิ่ม</span><strong class="acr-positive">+${money(row.bonus_amount)}</strong></header>${detailItems(row.bonus_items, "acr-positive", "ไม่มีรายการเงินเพิ่มในรอบนี้")}</section><section><header><span>รายการหัก</span><strong class="acr-negative">-${money(Number(row.deduction_amount || 0) + Number(row.withholding_tax_amount || 0))}</strong></header>${detailItems(row.deduction_items, "acr-negative", "ไม่มีรายการหักในรอบนี้")}</section></div></td></tr>` : ""}`;
     }
 
     function allocationMarkup() {
@@ -174,7 +186,22 @@
       const transferRows = rows.filter((row) => methodOf(row) === "transfer");
       const productionGroups = [...new Set(state.rows.filter((row) => row.employee_kind === "production").map((row) => row.group_label))].sort((a, b) => a.localeCompare(b, "th"));
       const timeGroups = [...new Set(state.rows.filter((row) => row.employee_kind === "time").map((row) => row.group_label))].sort((a, b) => a.localeCompare(b, "th"));
-      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF ACCOUNTING</p><h1>Export รายการจ่ายเงิน</h1><span>แยกเอกสารเงินสดและเงินโอนตามการจัดสรรล่าสุด</span></div><div class="acr-period-static">${escapeHtml(state.startDate)} ถึง ${escapeHtml(state.endDate)}</div></header><div class="acr-export-filter"><label>ขอบเขตรายงาน<select data-export-scope><option value="all" ${state.exportScope === "all" ? "selected" : ""}>พนักงานทั้งหมด</option><optgroup label="พนักงานเหมา"><option value="production::*" ${state.exportScope === "production::*" ? "selected" : ""}>พนักงานเหมาทุกกลุ่ม</option>${productionGroups.map((group) => `<option value="production::${escapeHtml(group)}" ${state.exportScope === `production::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup><optgroup label="พนักงานเวลา"><option value="time::*" ${state.exportScope === "time::*" ? "selected" : ""}>พนักงานเวลาทุกกลุ่ม</option>${timeGroups.map((group) => `<option value="time::${escapeHtml(group)}" ${state.exportScope === `time::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup></select></label><div><span>กำลังแสดง</span><strong>${escapeHtml(exportScopeLabel())}</strong><small>${rows.length} คน</small></div></div><div class="acr-export-summary"><strong>ยอดสุทธิรวม ${money(sum(rows))}</strong><span>เงินสด ${money(sum(cashRows))} + เงินโอน ${money(sum(transferRows))}</span></div><div class="acr-export-grid">${exportCard("cash", "รายการจ่ายเงินสด", cashRows)}${exportCard("transfer", "รายการจ่ายเงินโอน", transferRows)}</div><section class="acr-export-preview"><div class="acr-list-head"><div><h2>ตัวอย่างรายการที่จะส่งออก</h2><span>ไฟล์จะแสดงขอบเขต “${escapeHtml(exportScopeLabel())}” บนเอกสาร</span></div></div><div class="acr-table-wrap"><table><thead><tr><th>ลำดับ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>ประเภท</th><th>กลุ่ม</th><th>วิธีจ่าย</th><th class="acr-number">ยอดสุทธิ</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${row.employee_kind === "time" ? "พนักงานเวลา" : "พนักงานเหมา"}</td><td>${escapeHtml(row.group_label)}</td><td>${methodOf(row) === "cash" ? "เงินสด" : "เงินโอน"}</td><td class="acr-number"><strong>${money(row.net_amount)}</strong></td></tr>`).join("")}</tbody></table></div></section></section>`;
+      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF ACCOUNTING</p><h1>Export รายการจ่ายเงิน</h1><span>แยกเอกสารเงินสดและเงินโอนตามการจัดสรรล่าสุด</span></div><div class="acr-period-static">${escapeHtml(state.startDate)} ถึง ${escapeHtml(state.endDate)}</div></header><div class="acr-export-filter"><label>ขอบเขตรายงาน<select data-export-scope><option value="all" ${state.exportScope === "all" ? "selected" : ""}>พนักงานทั้งหมด</option><optgroup label="พนักงานเหมา"><option value="production::*" ${state.exportScope === "production::*" ? "selected" : ""}>พนักงานเหมาทุกกลุ่ม</option>${productionGroups.map((group) => `<option value="production::${escapeHtml(group)}" ${state.exportScope === `production::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup><optgroup label="พนักงานเวลา"><option value="time::*" ${state.exportScope === "time::*" ? "selected" : ""}>พนักงานเวลาทุกกลุ่ม</option>${timeGroups.map((group) => `<option value="time::${escapeHtml(group)}" ${state.exportScope === `time::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup></select></label><div><span>กำลังแสดง</span><strong>${escapeHtml(exportScopeLabel())}</strong><small>${rows.length} คน</small></div></div><div class="acr-export-summary"><strong>ยอดสุทธิรวม ${money(sum(rows))}</strong><span>เงินสด ${money(sum(cashRows))} + เงินโอน ${money(sum(transferRows))}</span></div><div class="acr-export-grid">${exportCard("cash", "รายการจ่ายเงินสด", cashRows)}${exportCard("transfer", "รายการจ่ายเงินโอน", transferRows)}</div><section class="acr-export-preview"><div class="acr-list-head"><div><h2>ตัวอย่างรายการที่จะส่งออก</h2><span>ไฟล์จะแสดงขอบเขต “${escapeHtml(exportScopeLabel())}” บนเอกสาร</span></div></div><div class="acr-table-wrap"><table><thead><tr><th>ลำดับ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>ประเภท</th><th>กลุ่ม</th><th>วิธีจ่าย</th><th class="acr-number">ยอดสุทธิ</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${row.employee_kind === "time" ? "พนักงานเวลา" : "พนักงานเหมา"}</td><td>${escapeHtml(row.group_label)}</td><td>${methodOf(row) === "cash" ? "เงินสด" : "เงินโอน"}</td><td class="acr-number"><strong>${money(adjustedNet(row))}</strong></td></tr>`).join("")}</tbody></table></div></section></section>`;
+    }
+
+    function percentageMarkup() {
+      const kindRows = state.rows.filter((row) => row.employee_kind === state.percentKind);
+      const groups = [...new Set(kindRows.map((row) => row.group_label || "ไม่ระบุกลุ่ม"))].sort((a, b) => a.localeCompare(b, "th"));
+      const selected = kindRows.filter((row) => state.percentGroup === "all" || row.group_label === state.percentGroup);
+      const percent = Math.min(1000, Math.max(0, Number(state.percentValue || 0)));
+      const sign = state.percentMode === "deduct" ? -1 : 1;
+      const baseTotal = selected.reduce((total, row) => total + Number(row.net_amount || 0), 0);
+      const changeTotal = selected.reduce((total, row) => total + Math.round(Number(row.net_amount || 0) * percent * sign) / 100, 0);
+      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF PERCENT ADJUSTMENT</p><h1>ปรับยอดจ่ายด้วยเปอร์เซ็นต์</h1><span>เลือกกลุ่มเพื่อบวกหรือหักจากยอดสุทธิ โดยไม่แก้ข้อมูลค่าแรงต้นทาง</span></div><div class="acr-period-static">${escapeHtml(state.startDate)} ถึง ${escapeHtml(state.endDate)}</div></header>
+        <section class="acr-percent-form"><label>ประเภทพนักงาน<select data-percent-kind><option value="production" ${state.percentKind === "production" ? "selected" : ""}>พนักงานเหมา</option><option value="time" ${state.percentKind === "time" ? "selected" : ""}>พนักงานเวลา</option></select></label><label>กลุ่ม<select data-percent-group><option value="all">ทุกกลุ่ม</option>${groups.map((group) => `<option value="${escapeHtml(group)}" ${state.percentGroup === group ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</select></label><label>รูปแบบ<select data-percent-mode><option value="add" ${state.percentMode === "add" ? "selected" : ""}>+ บวกเพิ่ม</option><option value="deduct" ${state.percentMode === "deduct" ? "selected" : ""}>− หักออก</option></select></label><label>เปอร์เซ็นต์<div class="acr-percent-input"><input data-percent-value type="number" min="0" max="1000" step="0.01" value="${percent}"><b>%</b></div></label></section>
+        <div class="acr-metrics acr-percent-metrics"><article><span>ยอดสุทธิก่อนปรับ</span><strong>${money(baseTotal)}</strong><small>${selected.length} คน</small></article><article class="${sign > 0 ? "transfer" : "cash"}"><span>${sign > 0 ? "ยอดบวกเพิ่ม" : "ยอดหักออก"} ${percent}%</span><strong>${sign > 0 ? "+" : "−"}${money(Math.abs(changeTotal))}</strong><small>คำนวณแยกรายคน</small></article><article class="transfer"><span>ยอดหลังปรับ</span><strong>${money(Math.max(0, baseTotal + changeTotal))}</strong><small>ตัวอย่างก่อนยืนยัน</small></article></div>
+        <div class="acr-percent-actions"><button type="button" data-percent-clear>ล้างการปรับของกลุ่มนี้</button><button type="button" data-percent-apply ${!selected.length || percent <= 0 ? "disabled" : ""}>ยืนยัน${sign > 0 ? "บวก" : "หัก"} ${percent}% ให้ ${selected.length} คน</button></div>
+        <section class="acr-export-preview acr-percent-preview"><div class="acr-list-head"><div><h2>ตัวอย่างรายคน</h2><span>การยืนยันครั้งใหม่จะแทนค่าปรับเดิมของคนในกลุ่มที่เลือก</span></div></div><div class="acr-table-wrap"><table><thead><tr><th>รหัส</th><th>พนักงาน</th><th>กลุ่ม</th><th class="acr-number">ยอดต้นทาง</th><th class="acr-number">ปรับครั้งนี้</th><th class="acr-number">ยอดใหม่</th></tr></thead><tbody>${selected.map((row) => { const change = Math.round(Number(row.net_amount || 0) * percent * sign) / 100; return `<tr><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${escapeHtml(row.group_label)}</td><td class="acr-number">${money(row.net_amount)}</td><td class="acr-number ${change >= 0 ? "acr-positive" : "acr-negative"}">${change >= 0 ? "+" : "−"}${money(Math.abs(change))}</td><td class="acr-number"><strong>${money(Math.max(0, Number(row.net_amount || 0) + change))}</strong></td></tr>`; }).join("") || `<tr><td colspan="6" class="acr-empty">ยังไม่มีพนักงานในกลุ่มนี้</td></tr>`}</tbody></table></div></section></section>`;
     }
 
     function costAnalysisMarkup() {
@@ -191,8 +218,8 @@
     }
 
     function paint() {
-      const content = state.view === "allocation" ? allocationMarkup() : state.view === "export" ? exportMarkup() : costAnalysisMarkup();
-      root.innerHTML = `<main class="acr-shell"><aside class="acr-rail"><div class="acr-logo">PF</div><div class="acr-rail-brand">PF Accounting<small>สิทธิ์ C4 ขึ้นไป</small></div><nav><button type="button" data-view="allocation" class="${state.view === "allocation" ? "active" : ""}"><span>▦</span>จัดสรรเงินจ่าย</button><button type="button" data-view="export" class="${state.view === "export" ? "active" : ""}"><span>⇩</span>Export / พิมพ์</button><button type="button" data-view="cost" class="${state.view === "cost" ? "active" : ""}"><span>⌁</span>วิเคราะห์ต้นทุน</button></nav><button class="acr-exit" type="button" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside><div class="acr-workspace">${content}${state.message ? `<div class="acr-toast ${state.messageType}">${escapeHtml(state.message)}</div>` : ""}</div></main>`;
+      const content = state.view === "allocation" ? allocationMarkup() : state.view === "export" ? exportMarkup() : state.view === "percentage" ? percentageMarkup() : costAnalysisMarkup();
+      root.innerHTML = `<main class="acr-shell"><aside class="acr-rail"><div class="acr-logo">PF</div><div class="acr-rail-brand">PF Accounting<small>สิทธิ์ C4 ขึ้นไป</small></div><nav><button type="button" data-view="allocation" class="${state.view === "allocation" ? "active" : ""}"><span>▦</span>จัดสรรเงินจ่าย</button><button type="button" data-view="export" class="${state.view === "export" ? "active" : ""}"><span>⇩</span>Export / พิมพ์</button><button type="button" data-view="percentage" class="${state.view === "percentage" ? "active" : ""}"><span>%</span>ปรับเปอร์เซ็นต์</button><button type="button" data-view="cost" class="${state.view === "cost" ? "active" : ""}"><span>⌁</span>วิเคราะห์ต้นทุน</button></nav><button class="acr-exit" type="button" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside><div class="acr-workspace">${content}${state.message ? `<div class="acr-toast ${state.messageType}">${escapeHtml(state.message)}</div>` : ""}</div></main>`;
       bind();
     }
 
@@ -204,6 +231,22 @@
         if (state.view === "cost" && !state.costData && !state.costLoading) loadCostAnalysis();
       }));
       root.querySelector("[data-reload]")?.addEventListener("click", load);
+      root.querySelector("[data-percent-kind]")?.addEventListener("change", (event) => { state.percentKind = event.target.value === "time" ? "time" : "production"; state.percentGroup = "all"; paint(); });
+      root.querySelector("[data-percent-group]")?.addEventListener("change", (event) => { state.percentGroup = event.target.value || "all"; paint(); });
+      root.querySelector("[data-percent-mode]")?.addEventListener("change", (event) => { state.percentMode = event.target.value === "deduct" ? "deduct" : "add"; paint(); });
+      root.querySelector("[data-percent-value]")?.addEventListener("change", (event) => { state.percentValue = Math.min(1000, Math.max(0, Number(event.target.value || 0))); paint(); });
+      root.querySelector("[data-percent-apply]")?.addEventListener("click", () => {
+        const percent = Math.min(1000, Math.max(0, Number(state.percentValue || 0)));
+        const sign = state.percentMode === "deduct" ? -1 : 1;
+        const selected = state.rows.filter((row) => row.employee_kind === state.percentKind && (state.percentGroup === "all" || row.group_label === state.percentGroup));
+        selected.forEach((row) => { state.adjustments[row.employee_key] = Math.round(Number(row.net_amount || 0) * percent * sign) / 100; });
+        save(`${state.percentMode === "deduct" ? "หัก" : "บวก"} ${percent}% ให้ ${state.percentKind}/${state.percentGroup}`);
+      });
+      root.querySelector("[data-percent-clear]")?.addEventListener("click", () => {
+        const selected = state.rows.filter((row) => row.employee_kind === state.percentKind && (state.percentGroup === "all" || row.group_label === state.percentGroup));
+        selected.forEach((row) => { delete state.adjustments[row.employee_key]; });
+        save(`ล้างการปรับเปอร์เซ็นต์ ${state.percentKind}/${state.percentGroup}`);
+      });
       root.querySelector("[data-reload-cost]")?.addEventListener("click", loadCostAnalysis);
       root.querySelectorAll("[data-cost-preset]").forEach((button) => button.addEventListener("click", () => {
         state.costPreset = button.dataset.costPreset;
