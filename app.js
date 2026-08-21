@@ -5345,6 +5345,66 @@ async function getPfCostAnalysis(startDate, endDate) {
   };
 }
 
+async function getPfComparisonDashboard(startDate, endDate) {
+  const range = normalizeDateRange(startDate, endDate);
+  const cost = await getPfCostAnalysis(range.startDate, range.endDate);
+  const productionEmployees = getEmployees().filter((employee) => employee.status === "Active");
+  const timeEmployees = getTimeEmployees().filter((employee) => employee.status === "Active");
+  const timeById = new Map(timeEmployees.map((employee) => [String(employee.id), employee]));
+  const timeByCode = new Map(timeEmployees.map((employee) => [String(employee.emp_code), employee]));
+  const hourGroups = new Map();
+  combineTimeRecordsByEmployeeDate(getTimeRecords().filter((record) => (record.record_date || "") >= range.startDate && (record.record_date || "") <= range.endDate)).forEach((record) => {
+    const employee = timeById.get(String(record.employee_id || "")) || timeByCode.get(String(record.emp_code || ""));
+    const type = getTimeEmployeeTypeOption(employee?.employee_type || record.employee_type);
+    const label = type.category === "special" ? "กลุ่มพิเศษ" : "กลุ่มปกติ";
+    const receipt = getTimeReceiptRow(record);
+    if (!hourGroups.has(label)) hourGroups.set(label, { label, regular: 0, overtime: 0, value: 0 });
+    const item = hourGroups.get(label);
+    item.regular += Number(receipt.normalHours || 0);
+    item.overtime += Number(receipt.otHours || 0);
+    item.value += Number(receipt.normalHours || 0) + Number(receipt.otHours || 0);
+  });
+
+  const employeeGroups = new Map();
+  productionEmployees.forEach((employee) => {
+    const label = getEmployeePayGroup(employee) || "ไม่ระบุกลุ่ม";
+    const key = `production::${label}`;
+    if (!employeeGroups.has(key)) employeeGroups.set(key, { kind: "production", kind_label: "พนักงานเหมา", label, value: 0 });
+    employeeGroups.get(key).value += 1;
+  });
+  timeEmployees.forEach((employee) => {
+    const type = getTimeEmployeeTypeOption(employee.employee_type);
+    const label = type.category === "special" ? "กลุ่มพิเศษ" : "กลุ่มปกติ";
+    const key = `time::${label}`;
+    if (!employeeGroups.has(key)) employeeGroups.set(key, { kind: "time", kind_label: "พนักงานเวลา", label, value: 0 });
+    employeeGroups.get(key).value += 1;
+  });
+
+  const payrollRows = getPfAccountingWeeklyRows(range.startDate, range.endDate);
+  let stored = {};
+  try { stored = await getPfPaymentAllocations(range.startDate, range.endDate); } catch (error) { console.warn("PF comparison uses live payroll because saved allocations are unavailable.", error); }
+  const payments = payrollRows.map((row) => {
+    const saved = stored[row.employee_key];
+    const finalAmount = saved && typeof saved === "object" ? Number(saved.net_amount || 0) : Number(row.net_amount || 0);
+    return { ...row, final_amount: finalAmount, adjustment: finalAmount - Number(row.net_amount || 0), payment_method: saved?.payment_method || "cash" };
+  });
+  const paymentGroups = ["production", "time"].map((kind) => {
+    const items = payments.filter((row) => row.employee_kind === kind);
+    return { label: kind === "production" ? "พนักงานเหมา" : "พนักงานเวลา", value: items.reduce((sum, row) => sum + row.final_amount, 0), base: items.reduce((sum, row) => sum + Number(row.net_amount || 0), 0), adjustment: items.reduce((sum, row) => sum + row.adjustment, 0) };
+  });
+  const totalHours = Array.from(hourGroups.values()).reduce((sum, item) => sum + item.value, 0);
+  const totalPayment = payments.reduce((sum, row) => sum + row.final_amount, 0);
+  return {
+    start_date: range.startDate,
+    end_date: range.endDate,
+    totals: { hours: totalHours, weight: Number(cost.totals.output_weight || 0), employees: productionEmployees.length + timeEmployees.length, payment: totalPayment },
+    hours: Array.from(hourGroups.values()),
+    weights: cost.rows.map((row) => ({ label: row.fruit_label, value: Number(row.output_weight || 0), inbound: Number(row.inbound_weight || 0), output: Number(row.output_weight || 0) })),
+    employees: Array.from(employeeGroups.values()),
+    payments: paymentGroups
+  };
+}
+
 function renderApp(user, route) {
   if (route !== "secret-room") window.SecretRoom?.stop?.();
   window.SecretRoom?.startNotifications?.();
@@ -5403,7 +5463,8 @@ function renderApp(user, route) {
       loadAllocations: getPfPaymentAllocations,
       saveAllocations: savePfPaymentAllocations,
       exportPayments: exportPfPayments,
-      getCostAnalysis: getPfCostAnalysis
+      getCostAnalysis: getPfCostAnalysis,
+      getComparisonDashboard: getPfComparisonDashboard
     });
     return;
   }

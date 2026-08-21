@@ -49,7 +49,7 @@
     if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) return options.onExit?.();
 
     const week = currentWeek();
-    const state = { view: "allocation", kind: "production", exportScope: "all", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, adjustments: {}, expanded: new Set(), loading: true, message: "", messageType: "success", percentKind: "production", percentGroup: "all", percentMode: "add", percentValue: 0, costPreset: "week", costStartDate: week.startDate, costEndDate: week.endDate, costData: null, costLoading: false };
+    const state = { view: "allocation", kind: "production", exportScope: "all", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, adjustments: {}, expanded: new Set(), loading: true, message: "", messageType: "success", percentKind: "production", percentGroup: "all", percentMode: "add", percentValue: 0, graphPreset: "week", graphStartDate: week.startDate, graphEndDate: week.endDate, graphData: null, graphLoading: false, graphDrill: "", costPreset: "week", costStartDate: week.startDate, costEndDate: week.endDate, costData: null, costLoading: false };
     const methodOf = (row) => state.allocations[row.employee_key] === "transfer" ? "transfer" : "cash";
     const adjustmentOf = (row) => Number(state.adjustments[row.employee_key] || 0);
     const adjustedNet = (row) => Math.max(0, Math.round((Number(row.net_amount || 0) + adjustmentOf(row)) * 100) / 100);
@@ -107,6 +107,18 @@
         state.costLoading = false;
         paint();
       }
+    }
+
+    async function loadGraphDashboard() {
+      state.graphLoading = true;
+      state.message = "";
+      paint();
+      try {
+        state.graphData = await options.getComparisonDashboard?.(state.graphStartDate, state.graphEndDate) || { totals: {}, hours: [], weights: [], employees: [], payments: [] };
+      } catch (error) {
+        state.message = error instanceof Error ? error.message : "โหลดข้อมูลกราฟเปรียบเทียบไม่สำเร็จ";
+        state.messageType = "error";
+      } finally { state.graphLoading = false; paint(); }
     }
 
     async function save(description) {
@@ -204,6 +216,40 @@
         <section class="acr-export-preview acr-percent-preview"><div class="acr-list-head"><div><h2>ตัวอย่างรายคน</h2><span>การยืนยันครั้งใหม่จะแทนค่าปรับเดิมของคนในกลุ่มที่เลือก</span></div></div><div class="acr-table-wrap"><table><thead><tr><th>รหัส</th><th>พนักงาน</th><th>กลุ่ม</th><th class="acr-number">ยอดต้นทาง</th><th class="acr-number">ปรับครั้งนี้</th><th class="acr-number">ยอดใหม่</th></tr></thead><tbody>${selected.map((row) => { const change = Math.round(Number(row.net_amount || 0) * percent * sign) / 100; return `<tr><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${escapeHtml(row.group_label)}</td><td class="acr-number">${money(row.net_amount)}</td><td class="acr-number ${change >= 0 ? "acr-positive" : "acr-negative"}">${change >= 0 ? "+" : "−"}${money(Math.abs(change))}</td><td class="acr-number"><strong>${money(Math.max(0, Number(row.net_amount || 0) + change))}</strong></td></tr>`; }).join("") || `<tr><td colspan="6" class="acr-empty">ยังไม่มีพนักงานในกลุ่มนี้</td></tr>`}</tbody></table></div></section></section>`;
     }
 
+    function graphBars(items, valueKey = "value", tone = "green", suffix = "") {
+      const max = Math.max(1, ...items.map((item) => Math.abs(Number(item[valueKey] || 0))));
+      return `<div class="acr-chart-bars">${items.map((item) => `<div><span>${escapeHtml(item.label)}</span><i><b class="${tone}" style="width:${Math.max(2, Math.abs(Number(item[valueKey] || 0)) / max * 100)}%"></b></i><strong>${Number(item[valueKey] || 0).toLocaleString("th-TH", { maximumFractionDigits: 2 })}${suffix}</strong></div>`).join("") || `<p>ยังไม่มีข้อมูลในช่วงนี้</p>`}</div>`;
+    }
+
+    function graphDrillMarkup(data) {
+      const type = state.graphDrill;
+      if (!type) return "";
+      let title = "";
+      let panels = "";
+      if (type === "employees") {
+        title = "พนักงานทั้งหมด";
+        panels = ["production", "time"].map((kind) => { const items = data.employees.filter((item) => item.kind === kind); const total = items.reduce((sum, item) => sum + Number(item.value || 0), 0); return `<article><header><div><span>${kind === "production" ? "●" : "●"}</span><h2>${kind === "production" ? "พนักงานเหมา" : "พนักงานเวลา"}</h2></div><strong>${total.toLocaleString("th-TH")} คน</strong></header>${graphBars(items, "value", kind === "production" ? "green" : "blue", " คน")}</article>`; }).join("");
+      } else if (type === "weights") {
+        title = "น้ำหนักผลไม้ทั้งหมด";
+        panels = `<article><header><h2>น้ำหนักรับเข้า</h2><strong>${data.weights.reduce((sum, item) => sum + Number(item.inbound || 0), 0).toLocaleString("th-TH")} กก.</strong></header>${graphBars(data.weights, "inbound", "amber", " กก.")}</article><article><header><h2>ผลผลิตปลายทาง</h2><strong>${data.weights.reduce((sum, item) => sum + Number(item.output || 0), 0).toLocaleString("th-TH")} กก.</strong></header>${graphBars(data.weights, "output", "green", " กก.")}</article>`;
+      } else if (type === "hours") {
+        title = "เวลาทำงานรวม";
+        panels = `<article><header><h2>เวลาปกติ</h2></header>${graphBars(data.hours, "regular", "green", " ชม.")}</article><article><header><h2>เวลาล่วงเวลา (OT)</h2></header>${graphBars(data.hours, "overtime", "blue", " ชม.")}</article>`;
+      } else {
+        title = "ยอดจ่ายสุทธิ";
+        panels = `<article><header><h2>ยอดต้นทาง</h2></header>${graphBars(data.payments, "base", "amber", " บาท")}</article><article><header><h2>ยอดหลังบวก/หักเปอร์เซ็นต์</h2></header>${graphBars(data.payments, "value", "green", " บาท")}</article>`;
+      }
+      return `<div class="acr-graph-drill"><div class="acr-graph-breadcrumb"><span>ภาพรวม</span><b>›</b><strong>${title}</strong><button type="button" data-graph-back>← กลับภาพรวม</button></div><div class="acr-drill-grid">${panels}</div></div>`;
+    }
+
+    function graphDashboardMarkup() {
+      const data = state.graphData || { totals: {}, hours: [], weights: [], employees: [], payments: [] };
+      const totals = data.totals || {};
+      const kinds = [{ label: "พนักงานเหมา", value: data.employees.filter((item) => item.kind === "production").reduce((sum, item) => sum + Number(item.value || 0), 0) }, { label: "พนักงานเวลา", value: data.employees.filter((item) => item.kind === "time").reduce((sum, item) => sum + Number(item.value || 0), 0) }];
+      const overview = `<div class="acr-graph-kpis"><article><span>◷</span><div><small>เวลาทำงานรวม</small><strong>${Number(totals.hours || 0).toLocaleString("th-TH", { maximumFractionDigits: 2 })} ชม.</strong></div></article><article><span>●</span><div><small>น้ำหนักผลไม้ปลายทาง</small><strong>${Number(totals.weight || 0).toLocaleString("th-TH", { maximumFractionDigits: 2 })} กก.</strong></div></article><article><span>♙</span><div><small>พนักงานทั้งหมด</small><strong>${Number(totals.employees || 0).toLocaleString("th-TH")} คน</strong></div></article><article><span>฿</span><div><small>ยอดจ่ายสุทธิ</small><strong>${money(totals.payment)}</strong></div></article></div><div class="acr-graph-grid"><button type="button" data-graph-drill="hours"><header><h2>เวลาทำงานรวม</h2><span>คลิกดูเวลาปกติและ OT ↗</span></header>${graphBars(data.hours, "value", "green", " ชม.")}</button><button type="button" data-graph-drill="weights"><header><h2>น้ำหนักผลไม้ทุกชนิด</h2><span>คลิกรับเข้าเทียบปลายทาง ↗</span></header>${graphBars(data.weights, "value", "amber", " กก.")}</button><button type="button" data-graph-drill="employees"><header><h2>จำนวนพนักงาน</h2><span>คลิกแยกประเภทและกลุ่ม ↗</span></header>${graphBars(kinds, "value", "blue", " คน")}</button><button type="button" data-graph-drill="payments"><header><h2>ยอดจ่ายหลังปรับเปอร์เซ็นต์</h2><span>คลิกเทียบก่อนและหลังปรับ ↗</span></header>${graphBars(data.payments, "value", "green", " บาท")}</button></div>`;
+      return `<section class="acr-page acr-graph-page"><header class="acr-page-head"><div><p>PF DATA EXPLORER</p><h1>กราฟเปรียบเทียบข้อมูลทั้งหมด</h1><span>คลิกกราฟเพื่อซูมดูรายละเอียดเชิงลึก</span></div><button type="button" class="acr-refresh-cost" data-reload-graph>↻ โหลดข้อมูลล่าสุด</button></header><div class="acr-cost-periods"><div>${[["today","วันนี้"],["week","สัปดาห์นี้"],["month","เดือนนี้"],["year","ปีนี้"],["custom","กำหนดเอง"]].map(([value,label]) => `<button type="button" data-graph-preset="${value}" class="${state.graphPreset === value ? "active" : ""}">${label}</button>`).join("")}</div><label>เริ่มต้น<input type="date" data-graph-start value="${state.graphStartDate}" ${state.graphPreset === "custom" ? "" : "disabled"}></label><label>สิ้นสุด<input type="date" data-graph-end value="${state.graphEndDate}" ${state.graphPreset === "custom" ? "" : "disabled"}></label></div>${state.graphLoading ? `<div class="acr-empty">กำลังรวมข้อมูลทุกส่วนของระบบ...</div>` : state.graphDrill ? graphDrillMarkup(data) : overview}</section>`;
+    }
+
     function costAnalysisMarkup() {
       const data = state.costData || { rows: [], totals: {} };
       const totals = data.totals || {};
@@ -218,8 +264,8 @@
     }
 
     function paint() {
-      const content = state.view === "allocation" ? allocationMarkup() : state.view === "export" ? exportMarkup() : state.view === "percentage" ? percentageMarkup() : costAnalysisMarkup();
-      root.innerHTML = `<main class="acr-shell"><aside class="acr-rail"><div class="acr-logo">PF</div><div class="acr-rail-brand">PF Accounting<small>สิทธิ์ C4 ขึ้นไป</small></div><nav><button type="button" data-view="allocation" class="${state.view === "allocation" ? "active" : ""}"><span>▦</span>จัดสรรเงินจ่าย</button><button type="button" data-view="export" class="${state.view === "export" ? "active" : ""}"><span>⇩</span>Export / พิมพ์</button><button type="button" data-view="percentage" class="${state.view === "percentage" ? "active" : ""}"><span>%</span>ปรับเปอร์เซ็นต์</button><button type="button" data-view="cost" class="${state.view === "cost" ? "active" : ""}"><span>⌁</span>วิเคราะห์ต้นทุน</button></nav><button class="acr-exit" type="button" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside><div class="acr-workspace">${content}${state.message ? `<div class="acr-toast ${state.messageType}">${escapeHtml(state.message)}</div>` : ""}</div></main>`;
+      const content = state.view === "allocation" ? allocationMarkup() : state.view === "export" ? exportMarkup() : state.view === "percentage" ? percentageMarkup() : state.view === "graph" ? graphDashboardMarkup() : costAnalysisMarkup();
+      root.innerHTML = `<main class="acr-shell"><aside class="acr-rail"><div class="acr-logo">PF</div><div class="acr-rail-brand">PF Accounting<small>สิทธิ์ C4 ขึ้นไป</small></div><nav><button type="button" data-view="allocation" class="${state.view === "allocation" ? "active" : ""}"><span>▦</span>จัดสรรเงินจ่าย</button><button type="button" data-view="export" class="${state.view === "export" ? "active" : ""}"><span>⇩</span>Export / พิมพ์</button><button type="button" data-view="percentage" class="${state.view === "percentage" ? "active" : ""}"><span>%</span>ปรับเปอร์เซ็นต์</button><button type="button" data-view="graph" class="${state.view === "graph" ? "active" : ""}"><span>▥</span>กราฟเปรียบเทียบ</button><button type="button" data-view="cost" class="${state.view === "cost" ? "active" : ""}"><span>⌁</span>วิเคราะห์ต้นทุน</button></nav><button class="acr-exit" type="button" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside><div class="acr-workspace">${content}${state.message ? `<div class="acr-toast ${state.messageType}">${escapeHtml(state.message)}</div>` : ""}</div></main>`;
       bind();
     }
 
@@ -228,6 +274,7 @@
       root.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
         state.view = button.dataset.view;
         paint();
+        if (state.view === "graph" && !state.graphData && !state.graphLoading) loadGraphDashboard();
         if (state.view === "cost" && !state.costData && !state.costLoading) loadCostAnalysis();
       }));
       root.querySelector("[data-reload]")?.addEventListener("click", load);
@@ -248,6 +295,20 @@
         save(`ล้างการปรับเปอร์เซ็นต์ ${state.percentKind}/${state.percentGroup}`);
       });
       root.querySelector("[data-reload-cost]")?.addEventListener("click", loadCostAnalysis);
+      root.querySelector("[data-reload-graph]")?.addEventListener("click", loadGraphDashboard);
+      root.querySelectorAll("[data-graph-drill]").forEach((button) => button.addEventListener("click", () => { state.graphDrill = button.dataset.graphDrill; paint(); }));
+      root.querySelector("[data-graph-back]")?.addEventListener("click", () => { state.graphDrill = ""; paint(); });
+      root.querySelectorAll("[data-graph-preset]").forEach((button) => button.addEventListener("click", () => {
+        state.graphPreset = button.dataset.graphPreset;
+        state.graphDrill = "";
+        if (state.graphPreset === "custom") return paint();
+        const range = analysisRange(state.graphPreset);
+        state.graphStartDate = range.startDate;
+        state.graphEndDate = range.endDate;
+        loadGraphDashboard();
+      }));
+      root.querySelector("[data-graph-start]")?.addEventListener("change", (event) => { state.graphStartDate = event.target.value || state.graphStartDate; if (state.graphEndDate < state.graphStartDate) state.graphEndDate = state.graphStartDate; state.graphDrill = ""; loadGraphDashboard(); });
+      root.querySelector("[data-graph-end]")?.addEventListener("change", (event) => { state.graphEndDate = event.target.value || state.graphEndDate; if (state.graphEndDate < state.graphStartDate) state.graphStartDate = state.graphEndDate; state.graphDrill = ""; loadGraphDashboard(); });
       root.querySelectorAll("[data-cost-preset]").forEach((button) => button.addEventListener("click", () => {
         state.costPreset = button.dataset.costPreset;
         if (state.costPreset === "custom") return paint();
