@@ -10417,6 +10417,13 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path == "/api/backup/verify":
+            if not backup_authorized(self):
+                self.send_json({"error": "Backup code is required."}, 403)
+                return
+            self.send_json({"authorized": True})
+            return
+
         if parsed.path in {"/api/backup", "/api/backup/queue"}:
             if not backup_authorized(self):
                 self.send_json({"error": "Backup code is required."}, 403)

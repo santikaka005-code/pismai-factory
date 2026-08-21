@@ -564,6 +564,7 @@ let backupUnlocked = false;
 let backupAccessCode = "";
 let backupActiveTab = "backup";
 let backupSnapshot = null;
+let backupSnapshotLoading = false;
 let backupSelectedFile = null;
 let backupSelectedData = null;
 let backupFileValidation = null;
@@ -8071,6 +8072,7 @@ function resetBackupSecurityState() {
   backupAccessCode = "";
   backupActiveTab = "backup";
   backupSnapshot = null;
+  backupSnapshotLoading = false;
   backupSelectedFile = null;
   backupSelectedData = null;
   backupFileValidation = null;
@@ -8259,6 +8261,13 @@ function validateBackupPayload(parsed, file) {
 async function exportDatabaseBackup(accessCode) {
   return cloudApiRequest("/api/backup", {
     headers: { "X-Backup-Code": accessCode }
+  });
+}
+
+async function verifyBackupAccessCode(accessCode) {
+  return cloudApiRequest("/api/backup/verify", {
+    headers: { "X-Backup-Code": accessCode },
+    timeoutMs: 10000
   });
 }
 
@@ -8566,6 +8575,7 @@ function renderBackupModule(user, moduleItem) {
         <button class="${backupActiveTab === "history" ? "active" : ""}" data-backup-tab="history" type="button">◷ ประวัติ</button>
       </nav>
       ${backupMessage ? `<div class="backup-inline-message ${backupMessageType === "error" ? "is-error" : "is-success"}" role="alert">${escapeHtml(backupMessage)}</div>` : ""}
+      ${backupSnapshotLoading ? `<div class="backup-sync-status" role="status"><span></span><div><strong>เข้าสู่เมนูแล้ว</strong><small>กำลังโหลดตัวเลขสรุปล่าสุดจาก Supabase เบื้องหลัง</small></div></div>` : ""}
       ${backupActiveTab === "backup" ? renderBackupOverview(user) : backupActiveTab === "queue" ? renderQueueBackupOverview(user) : backupActiveTab === "import" ? renderBackupImport() : renderBackupHistory()}
     </section>
     ${renderBackupRestoreConfirm()}
@@ -8627,12 +8637,25 @@ function bindBackupEvents(user) {
     backupMessage = "";
     render();
     try {
-      const snapshot = await exportDatabaseBackup(code);
+      await verifyBackupAccessCode(code);
       backupAccessCode = code;
-      backupSnapshot = snapshot;
       backupUnlocked = true;
       backupBusy = false;
+      backupSnapshotLoading = true;
       render();
+      exportDatabaseBackup(code)
+        .then((snapshot) => {
+          if (!backupUnlocked || backupAccessCode !== code) return;
+          backupSnapshot = snapshot;
+          backupSnapshotLoading = false;
+          render();
+        })
+        .catch((error) => {
+          if (!backupUnlocked || backupAccessCode !== code) return;
+          backupSnapshotLoading = false;
+          setBackupMessage(error instanceof Error ? `เข้าสู่เมนูแล้ว แต่โหลดข้อมูลสรุปไม่สำเร็จ: ${error.message}` : "เข้าสู่เมนูแล้ว แต่โหลดข้อมูลสรุปไม่สำเร็จ", "error");
+          render();
+        });
     } catch (error) {
       backupBusy = false;
       setBackupMessage(error?.status === 403 ? "รหัสสำรองข้อมูลไม่ถูกต้อง" : error instanceof Error ? error.message : "ไม่สามารถตรวจสอบสิทธิ์ได้", "error");

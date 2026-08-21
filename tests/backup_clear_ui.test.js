@@ -15,11 +15,16 @@ assert.match(app, /confirmation: "BACKUP_CLEAR"/);
 assert.match(app, /Private Archive/);
 assert.match(app, /production_save_queue_events/);
 assert.match(app, /\[1, 2, 3\]\.includes\(version\)/);
+assert.match(app, /verifyBackupAccessCode/);
+assert.match(app, /\/api\/backup\/verify/);
+assert.match(app, /backupSnapshotLoading = true/);
 
 assert.match(server, /account_level_number\(actor_account\.get\("user_level"\)\) < 4/);
 assert.match(server, /actor_account\.get\("status"\)/);
 assert.match(server, /backup_archive_checksum\(verified_content\)/);
 assert.match(server, /delete_backup_snapshot_rows\(snapshot_data, scope\)/);
+assert.match(server, /parsed\.path == "\/api\/backup\/verify"/);
+assert.match(server, /self\.send_json\(\{"authorized": True\}\)/);
 assert.match(server, /MAIN_CLEAR_TABLES = \[[\s\S]*?production_records[\s\S]*?time_records/);
 assert.doesNotMatch(server.match(/MAIN_CLEAR_TABLES = \[[\s\S]*?\n\]/)[0], /account_users|employees|wage_rates|audit_logs/);
 
