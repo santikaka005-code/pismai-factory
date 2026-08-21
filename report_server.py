@@ -9731,6 +9731,77 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path == "/api/deduction-applications":
+            actor = accounting_actor(self, 5)
+            if not actor:
+                self.send_json({"error": "C5 or higher session is required to edit approved deductions."}, 403)
+                return
+            application_id = payload.get("id")
+            if application_id in [None, ""]:
+                self.send_json({"error": "id is required."}, 400)
+                return
+            applied_date = str(payload.get("applied_date", "")).strip()
+            amount = safe_float(payload.get("amount"))
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", applied_date):
+                self.send_json({"error": "A valid applied_date is required."}, 400)
+                return
+            if amount <= 0:
+                self.send_json({"error": "amount must be greater than 0."}, 400)
+                return
+            existing_status, existing_rows = supabase_request(
+                "GET",
+                f"deduction_applications?id=eq.{quote(str(application_id))}&status=eq.Applied&select=*",
+            )
+            if existing_status >= 400 or not isinstance(existing_rows, list) or not existing_rows:
+                self.send_json({"error": existing_rows if existing_status >= 400 else "Approved deduction application not found."}, existing_status if existing_status >= 400 else 404)
+                return
+            existing_application = existing_rows[0]
+            deduction_id = existing_application.get("deduction_id")
+            deduction_status, deduction_rows = supabase_request(
+                "GET",
+                f"deduction_records?id=eq.{quote(str(deduction_id))}&select=id,amount,status&limit=1",
+            )
+            if deduction_status >= 400 or not isinstance(deduction_rows, list) or not deduction_rows:
+                self.send_json({"error": deduction_rows if deduction_status >= 400 else "Source deduction not found."}, deduction_status if deduction_status >= 400 else 404)
+                return
+            source_deduction = deduction_rows[0]
+            other_status, other_applications = supabase_request(
+                "GET",
+                f"deduction_applications?deduction_id=eq.{quote(str(deduction_id))}&status=eq.Applied&id=neq.{quote(str(application_id))}&select=amount",
+            )
+            if other_status >= 400:
+                self.send_json({"error": other_applications}, other_status)
+                return
+            other_total = sum(safe_float(row.get("amount")) for row in other_applications) if isinstance(other_applications, list) else 0
+            source_amount = safe_float(source_deduction.get("amount"))
+            if other_total + amount > source_amount + 0.004:
+                self.send_json({"error": "Total approved amount cannot exceed the original deduction amount."}, 409)
+                return
+            update_row = {
+                "applied_date": applied_date,
+                "amount": round(amount, 2),
+                "note": str(payload.get("note", "")).strip(),
+            }
+            status, body = supabase_request(
+                "PATCH",
+                f"deduction_applications?id=eq.{quote(str(application_id))}&status=eq.Applied",
+                update_row,
+                prefer="return=representation",
+            )
+            if status >= 400:
+                self.send_json({"data": None, "error": body}, status)
+                return
+            new_total = other_total + amount
+            next_status = "Completed" if source_amount <= new_total + 0.004 else "Pending"
+            supabase_request(
+                "PATCH",
+                f"deduction_records?id=eq.{quote(str(deduction_id))}",
+                {"status": next_status, "updated_at": datetime.utcnow().isoformat() + "Z"},
+                prefer="return=minimal",
+            )
+            self.send_json({"data": body, "error": None}, status)
+            return
+
         if parsed.path == "/api/wage-rates":
             actor = accounting_actor(self, 4)
             if not actor:

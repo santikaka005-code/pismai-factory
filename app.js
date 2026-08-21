@@ -702,6 +702,7 @@ let deductionBonusEmployeeKind = "time";
 let deductionApprovalEmployeeKind = "production";
 let deductionApprovalView = "pending";
 let deductionApplications = [];
+let editingApprovedDeductionApplicationId = null;
 let deductionStartDate = new Date().toISOString().slice(0, 10);
 let deductionEndDate = new Date().toISOString().slice(0, 10);
 let deductionEmployeeId = "";
@@ -1228,6 +1229,11 @@ function canManageAllProductionRecords(user) {
 
 function canDeleteProductionRecords(user) {
   return canManageAllProductionRecords(user);
+}
+
+function canEditApprovedDeductions(user) {
+  const levelNumber = Number(String(getUserLevel(user)).replace(/\D/g, "")) || 1;
+  return levelNumber >= 5 || isTopLevelUser(user);
 }
 
 function canManageWageRates(user) {
@@ -2699,6 +2705,15 @@ async function applyCloudDeductionBatch(appliedDate, items, actor) {
   return Array.isArray(data.data) ? data.data.map(normalizeDeductionApplication) : [];
 }
 
+async function updateCloudDeductionApplication(id, payload) {
+  const data = await cloudApiRequest("/api/deduction-applications", {
+    method: "PUT",
+    body: JSON.stringify({ id, ...payload })
+  });
+  const updated = Array.isArray(data.data) ? data.data.map(normalizeDeductionApplication) : [];
+  return updated[0] || null;
+}
+
 async function updateCloudDeduction(id, payload) {
   const data = await cloudApiRequest("/api/deductions", {
     method: "PUT",
@@ -2789,6 +2804,68 @@ function getAppliedTotalForDeduction(deductionId) {
   return deductionApplications
     .filter((record) => record.status === "Applied" && Number(record.deduction_id) === Number(deductionId))
     .reduce((sum, record) => sum + Number(record.amount || 0), 0);
+}
+
+function getAppliedTotalForDeductionExcept(deductionId, applicationId) {
+  return deductionApplications
+    .filter((record) =>
+      record.status === "Applied" &&
+      Number(record.deduction_id) === Number(deductionId) &&
+      Number(record.id) !== Number(applicationId)
+    )
+    .reduce((sum, record) => sum + Number(record.amount || 0), 0);
+}
+
+function approvedDeductionAuditDiff(before, after) {
+  const fields = [
+    ["applied_date", "วันที่อนุมัติ"],
+    ["amount", "ยอดที่อนุมัติหัก"],
+    ["note", "หมายเหตุ"]
+  ];
+  return fields
+    .filter(([key]) => String(before?.[key] ?? "") !== String(after?.[key] ?? ""))
+    .map(([key, label]) => {
+      const beforeValue = key === "amount" ? money(before?.[key] || 0) : (before?.[key] || "-");
+      const afterValue = key === "amount" ? money(after?.[key] || 0) : (after?.[key] || "-");
+      return `${label}: "${beforeValue}" -> "${afterValue}"`;
+    })
+    .join(" | ");
+}
+
+async function apiUpdateApprovedDeductionApplication(id, payload, actor) {
+  if (!canEditApprovedDeductions(actor)) {
+    throw new Error("บัญชีนี้ไม่มีสิทธิ์แก้ไขรายการอนุมัติแล้ว ต้องเป็น C5 ขึ้นไป");
+  }
+  const existing = deductionApplications.find((record) => Number(record.id) === Number(id));
+  if (!existing || existing.status !== "Applied") throw new Error("ไม่พบรายการอนุมัติแล้วนี้");
+  const source = getDeductionRecords().find((record) => Number(record.id) === Number(existing.deduction_id));
+  const nextAmount = Number(payload.amount || 0);
+  if (!payload.applied_date) throw new Error("กรุณาเลือกวันที่อนุมัติ");
+  if (nextAmount <= 0) throw new Error("ยอดที่อนุมัติหักต้องมากกว่า 0");
+  if (source) {
+    const otherApplied = getAppliedTotalForDeductionExcept(existing.deduction_id, existing.id);
+    if (otherApplied + nextAmount > Number(source.amount || 0) + 0.004) {
+      throw new Error(`ยอดรวมที่อนุมัติหักแล้วห้ามเกินยอดตั้งต้น ${money(source.amount || 0)}`);
+    }
+  }
+  const before = { ...existing };
+  const updated = await updateCloudDeductionApplication(id, {
+    applied_date: payload.applied_date,
+    amount: nextAmount,
+    note: payload.note || "",
+    updated_by: actor?.fullname || actor?.username || ""
+  });
+  if (!updated) throw new Error("ไม่สามารถแก้ไขรายการอนุมัติแล้วได้");
+  deductionApplications = deductionApplications.map((record) =>
+    Number(record.id) === Number(id) ? updated : record
+  );
+  const diff = approvedDeductionAuditDiff(before, updated);
+  addAuditLog(
+    actor,
+    "UPDATE_APPROVED_DEDUCTION",
+    `แก้ไขรายการอนุมัติหักเงิน #${id} (${existing.emp_code} ${existing.employee_name}) รายการ: ${source?.deduction_label || "-"} | ${diff || "ไม่มีค่าที่เปลี่ยน"}`
+  );
+  return updated;
 }
 
 function getDeductionsForRange(kind, startDate, endDate, employee = null) {
@@ -6440,6 +6517,7 @@ function renderDeductionApproval(user, moduleItem) {
   const rows = getPendingDeductionRows(deductionApprovalEmployeeKind);
   const approvedRows = getApprovedDeductionRows(deductionApprovalEmployeeKind);
   const showingApproved = deductionApprovalView === "approved";
+  const canEditApproved = canEditApprovedDeductions(user);
   const visibleEmployeeCount = new Set((showingApproved ? approvedRows : rows).map((row) => `${row.employee_kind}-${row.employee_id || row.emp_code}`)).size;
   const remainingTotal = rows.reduce((sum, row) => sum + row.remaining_amount, 0);
   const approvedTotal = approvedRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
@@ -6489,19 +6567,43 @@ function renderDeductionApproval(user, moduleItem) {
           </div>
           <div class="table-scroll">
             <table>
-              <thead><tr><th>วันที่อนุมัติ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>ยอดตั้งต้น</th><th>ยอดที่อนุมัติหัก</th><th>คงเหลือ</th><th>ผู้อนุมัติ</th></tr></thead>
+              <thead><tr><th>วันที่อนุมัติ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>ยอดตั้งต้น</th><th>ยอดที่อนุมัติหัก</th><th>คงเหลือ</th><th>ผู้อนุมัติ</th><th>จัดการ</th></tr></thead>
               <tbody>
                 ${approvedRows.length ? approvedRows.map((row) => `
                   <tr>
-                    <td><span class="deduction-date-cell">${escapeHtml(row.applied_date)}</span></td>
+                    <td>${editingApprovedDeductionApplicationId === row.id ? `<input class="deduction-approved-edit-input" form="approvedDeductionEditForm-${row.id}" name="applied_date" type="date" value="${escapeHtml(row.applied_date)}" required />` : `<span class="deduction-date-cell">${escapeHtml(row.applied_date)}</span>`}</td>
                     <td><strong>${escapeHtml(row.emp_code)}</strong></td>
                     <td>${escapeHtml(row.employee_name)}</td>
                     <td>${escapeHtml(row.deduction_label)}</td>
                     <td>${money(row.source_amount || 0)}</td>
-                    <td><strong>${money(row.amount || 0)}</strong></td>
+                    <td>${editingApprovedDeductionApplicationId === row.id ? `<input class="deduction-approved-edit-input" form="approvedDeductionEditForm-${row.id}" name="amount" type="number" min="0.01" step="0.01" value="${Number(row.amount || 0)}" required />` : `<strong>${money(row.amount || 0)}</strong>`}</td>
                     <td>${money(row.remaining_amount || 0)}</td>
                     <td>${escapeHtml(row.created_by || "-")}</td>
-                  </tr>`).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีรายการอนุมัติแล้วสำหรับ${kindLabel}</td></tr>`}
+                    <td>
+                      ${editingApprovedDeductionApplicationId === row.id ? `
+                        <form class="table-actions" id="approvedDeductionEditForm-${row.id}" data-approved-deduction-edit="${row.id}">
+                          <button class="btn btn-small btn-primary" type="submit">บันทึก</button>
+                          <button class="btn btn-small btn-outline" type="button" data-cancel-approved-deduction-edit>ยกเลิก</button>
+                        </form>
+                      ` : `
+                        <div class="table-actions">
+                          ${canEditApproved
+                            ? `<button class="btn btn-small btn-outline" type="button" data-edit-approved-deduction="${row.id}">แก้ไข</button>`
+                            : `<span class="badge badge-muted">เฉพาะ C5+</span>`}
+                        </div>
+                      `}
+                    </td>
+                  </tr>
+                  ${editingApprovedDeductionApplicationId === row.id ? `
+                    <tr class="deduction-approved-note-row">
+                      <td colspan="9">
+                        <label class="field">
+                          <span>หมายเหตุ</span>
+                          <input form="approvedDeductionEditForm-${row.id}" name="note" value="${escapeHtml(row.note || "")}" placeholder="เหตุผลหรือรายละเอียดการแก้ไข" />
+                        </label>
+                      </td>
+                    </tr>
+                  ` : ""}`).join("") : `<tr><td colspan="9" class="empty-cell">ยังไม่มีรายการอนุมัติแล้วสำหรับ${kindLabel}</td></tr>`}
               </tbody>
             </table>
           </div>
@@ -6776,7 +6878,50 @@ function bindDeductionEvents(user) {
   document.querySelectorAll("[data-approval-view]").forEach((button) => {
     button.addEventListener("click", () => {
       deductionApprovalView = button.dataset.approvalView === "approved" ? "approved" : "pending";
+      editingApprovedDeductionApplicationId = null;
       setDeductionMessage("");
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-edit-approved-deduction]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!canEditApprovedDeductions(user)) {
+        setDeductionMessage("บัญชีนี้ไม่มีสิทธิ์แก้ไขรายการอนุมัติแล้ว ต้องเป็น C5 ขึ้นไป", "error");
+        render();
+        return;
+      }
+      editingApprovedDeductionApplicationId = Number(button.dataset.editApprovedDeduction || 0);
+      setDeductionMessage("");
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-cancel-approved-deduction-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      editingApprovedDeductionApplicationId = null;
+      setDeductionMessage("");
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-approved-deduction-edit]").forEach((formElement) => {
+    formElement.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const id = Number(formElement.dataset.approvedDeductionEdit || 0);
+      const form = new FormData(formElement);
+      try {
+        await apiUpdateApprovedDeductionApplication(id, {
+          applied_date: String(form.get("applied_date") || ""),
+          amount: Number(form.get("amount") || 0),
+          note: String(form.get("note") || "")
+        }, user);
+        editingApprovedDeductionApplicationId = null;
+        await Promise.all([hydrateDeductionsFromCloud(), hydrateDeductionApplicationsFromCloud()]);
+        setDeductionMessage("แก้ไขรายการอนุมัติแล้วและบันทึก Audit Log เรียบร้อยแล้ว");
+      } catch (error) {
+        setDeductionMessage(error instanceof Error ? error.message : "แก้ไขรายการอนุมัติแล้วไม่สำเร็จ", "error");
+      }
       render();
     });
   });
@@ -7973,6 +8118,7 @@ function getAuditLogActionLabel(action) {
     CREATE_ATTENDANCE_BONUS: "เพิ่มเบี้ยขยัน",
     CREATE_DEDUCTION: "เพิ่มรายการหักเงิน",
     UPDATE_DEDUCTION: "แก้ไขรายการหักเงิน",
+    UPDATE_APPROVED_DEDUCTION: "แก้ไขรายการอนุมัติหักเงิน",
     DELETE_DEDUCTION: "ลบรายการหักเงิน",
     APPLY_DEDUCTION_BATCH: "นำรายการหักเงินไปใช้",
     UPDATE_WITHHOLDING_TAX_GROUPS: "ตั้งค่าหัก ณ ที่จ่าย 3%",

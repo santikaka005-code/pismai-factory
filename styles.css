@@ -7165,6 +7165,25 @@ tr:last-child td {
   background: #edf2f7;
 }
 
+.deduction-approved-edit-input {
+  width: 128px;
+  min-height: 38px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 0 9px;
+  color: #0f172a;
+  background: #ffffff;
+  font-weight: 700;
+}
+
+.deduction-approved-note-row td {
+  background: #f8fafc;
+}
+
+.deduction-approved-note-row .field {
+  max-width: 620px;
+}
+
 .deduction-remaining {
   color: #b42318;
 }
