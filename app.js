@@ -6548,13 +6548,13 @@ function renderDeductionEntry(user, moduleItem) {
         </div>
       </div>
       ${!context.bonusMode && context.employeeKind === "production" ? `
-        <section class="panel withholding-tax-panel">
+        <form class="panel withholding-tax-panel" id="withholdingTaxForm">
           <div class="section-title-row">
             <div>
               <h3>ตั้งค่าหัก ณ ที่จ่าย 3%</h3>
-              <p class="muted-text">เลือกกลุ่มที่ต้องการให้ระบบหัก 3% อัตโนมัติในรายงานแบบกลุ่มและไฟล์ Export</p>
+              <p class="muted-text">เลือกกลุ่มไว้ก่อน แล้วกดยืนยัน ระบบจึงจะเริ่มใช้การหัก 3% ในรายงานแบบกลุ่มและไฟล์ Export</p>
             </div>
-            <span class="summary-mode-pill">${withholdingTaxGroups.length.toLocaleString("th-TH")} กลุ่มที่เปิดหัก</span>
+            <span class="summary-mode-pill" id="withholdingTaxSavedCount">ค่าปัจจุบัน ${withholdingTaxGroups.length.toLocaleString("th-TH")} กลุ่ม</span>
           </div>
           <div class="withholding-tax-options">
             ${withholdingTaxGroupOptions.map((group) => `
@@ -6564,8 +6564,11 @@ function renderDeductionEntry(user, moduleItem) {
               </label>
             `).join("")}
           </div>
-          <p class="withholding-tax-note">ถ้าไม่ติ๊กกลุ่มไหน กลุ่มนั้นจะไม่ถูกหัก 3% และในอนาคตถ้าเพิ่มกลุ่มพนักงานใหม่ กลุ่มนั้นจะขึ้นให้เลือกตรงนี้ด้วย</p>
-        </section>
+          <div class="withholding-tax-confirm-row">
+            <p class="withholding-tax-note" id="withholdingTaxPendingStatus">ค่าที่แสดงได้รับการยืนยันและกำลังใช้งานอยู่</p>
+            <button class="btn btn-primary withholding-tax-confirm-button" id="confirmWithholdingTaxGroups" type="submit" disabled>ยืนยันการตั้งค่าหัก 3%</button>
+          </div>
+        </form>
       ` : ""}
 
       <div class="summary-metrics deduction-metrics">
@@ -6729,15 +6732,59 @@ function bindDeductionEvents(user) {
     render();
   });
 
+  const withholdingTaxForm = document.querySelector("#withholdingTaxForm");
+  const getSelectedWithholdingTaxGroups = () => [...document.querySelectorAll("[data-withholding-tax-group]:checked")]
+    .map((checkbox) => normalizeEmployeePayGroupValue(checkbox.dataset.withholdingTaxGroup || ""))
+    .filter(Boolean);
+  const getSortedWithholdingTaxGroups = (groups) => [...new Set(groups)].sort((a, b) => a.localeCompare(b, "th"));
+  const sameWithholdingTaxGroups = (left, right) => {
+    const normalizedLeft = getSortedWithholdingTaxGroups(left);
+    const normalizedRight = getSortedWithholdingTaxGroups(right);
+    return normalizedLeft.length === normalizedRight.length
+      && normalizedLeft.every((group, index) => group === normalizedRight[index]);
+  };
+  const updateWithholdingTaxConfirmationState = () => {
+    if (!withholdingTaxForm) return;
+    const changed = !sameWithholdingTaxGroups(getSelectedWithholdingTaxGroups(), getProductionWithholdingTaxGroups());
+    const confirmButton = document.querySelector("#confirmWithholdingTaxGroups");
+    const statusNode = document.querySelector("#withholdingTaxPendingStatus");
+    if (confirmButton) confirmButton.disabled = !changed;
+    if (statusNode) {
+      statusNode.textContent = changed
+        ? "มีการเปลี่ยนแปลงที่ยังไม่ยืนยัน ระบบยังใช้ค่าเดิมอยู่"
+        : "ค่าที่แสดงได้รับการยืนยันและกำลังใช้งานอยู่";
+      statusNode.classList.toggle("is-pending", changed);
+    }
+  };
+
   document.querySelectorAll("[data-withholding-tax-group]").forEach((input) => {
-    input.addEventListener("change", () => {
-      const selectedGroups = [...document.querySelectorAll("[data-withholding-tax-group]:checked")]
-        .map((checkbox) => checkbox.dataset.withholdingTaxGroup || "")
-        .filter(Boolean);
-      saveProductionWithholdingTaxGroups(selectedGroups);
-      setDeductionMessage("บันทึกการตั้งค่าหัก ณ ที่จ่าย 3% แล้ว");
-      render();
-    });
+    input.addEventListener("change", updateWithholdingTaxConfirmationState);
+  });
+
+  withholdingTaxForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const currentGroups = getProductionWithholdingTaxGroups();
+    const selectedGroups = getSelectedWithholdingTaxGroups();
+    if (sameWithholdingTaxGroups(selectedGroups, currentGroups)) {
+      updateWithholdingTaxConfirmationState();
+      return;
+    }
+    const enabledGroups = selectedGroups.filter((group) => !currentGroups.includes(group));
+    const disabledGroups = currentGroups.filter((group) => !selectedGroups.includes(group));
+    const confirmationLines = ["ยืนยันเปลี่ยนการตั้งค่าหัก ณ ที่จ่าย 3%?"];
+    if (enabledGroups.length) confirmationLines.push(`เปิดหัก: ${enabledGroups.join(", ")}`);
+    if (disabledGroups.length) confirmationLines.push(`ยกเลิกหัก: ${disabledGroups.join(", ")}`);
+    confirmationLines.push("การตั้งค่านี้จะมีผลกับรายงานและไฟล์ Export หลังจากยืนยัน");
+    if (!window.confirm(confirmationLines.join("\n"))) return;
+
+    saveProductionWithholdingTaxGroups(selectedGroups);
+    addAuditLog(
+      user,
+      "UPDATE_WITHHOLDING_TAX_GROUPS",
+      `Withholding tax 3% groups changed from [${currentGroups.join(", ") || "none"}] to [${selectedGroups.join(", ") || "none"}]`
+    );
+    setDeductionMessage(`ยืนยันการตั้งค่าหัก ณ ที่จ่าย 3% แล้ว (${selectedGroups.length.toLocaleString("th-TH")} กลุ่ม)`);
+    render();
   });
 
   document.querySelector("#deductionForm")?.addEventListener("submit", async (event) => {
@@ -7862,6 +7909,7 @@ function getAuditLogActionLabel(action) {
     UPDATE_DEDUCTION: "แก้ไขรายการหักเงิน",
     DELETE_DEDUCTION: "ลบรายการหักเงิน",
     APPLY_DEDUCTION_BATCH: "นำรายการหักเงินไปใช้",
+    UPDATE_WITHHOLDING_TAX_GROUPS: "ตั้งค่าหัก ณ ที่จ่าย 3%",
     REGISTER_ACCOUNT: "สร้างบัญชีเข้าใช้งาน",
     UPDATE_ACCOUNT: "แก้ไขบัญชีเข้าใช้งาน",
     DELETE_ACCOUNT: "ลบบัญชีเข้าใช้งาน",

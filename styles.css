@@ -6995,9 +6995,45 @@ tr:last-child td {
 }
 
 .withholding-tax-note {
-  margin: 10px 0 0;
+  margin: 0;
   color: #64748b;
   font-size: 13px;
+}
+
+.withholding-tax-confirm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 14px;
+  border-top: 1px solid #dbe4ea;
+  padding-top: 14px;
+}
+
+.withholding-tax-note.is-pending {
+  color: #9a3412;
+  font-weight: 800;
+}
+
+.withholding-tax-confirm-button {
+  min-width: 230px;
+}
+
+.withholding-tax-confirm-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+@media (max-width: 720px) {
+  .withholding-tax-confirm-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .withholding-tax-confirm-button {
+    width: 100%;
+    min-width: 0;
+  }
 }
 
 .deduction-metrics {
