@@ -1233,7 +1233,35 @@ function canDeleteProductionRecords(user) {
 
 function canEditApprovedDeductions(user) {
   const levelNumber = Number(String(getUserLevel(user)).replace(/\D/g, "")) || 1;
-  return levelNumber >= 5 || isTopLevelUser(user);
+  return levelNumber >= 4 || isTopLevelUser(user);
+}
+
+const APPROVED_DEDUCTION_C4_EDIT_WINDOW_MS = 15 * 60 * 1000;
+
+function approvedDeductionCreatedAgeMs(row) {
+  const createdAt = Date.parse(row?.created_at || "");
+  if (!Number.isFinite(createdAt)) return Infinity;
+  return Date.now() - createdAt;
+}
+
+function approvedDeductionCreatedByUser(row, user) {
+  const createdBy = normalizeProductionEditorIdentity(row?.created_by || "");
+  if (!createdBy) return false;
+  return [user?.fullname, user?.username].some((value) => normalizeProductionEditorIdentity(value) === createdBy);
+}
+
+function canEditApprovedDeductionApplication(user, row) {
+  const levelNumber = Number(String(getUserLevel(user)).replace(/\D/g, "")) || 1;
+  if (levelNumber >= 5 || isTopLevelUser(user)) return true;
+  if (levelNumber !== 4) return false;
+  return approvedDeductionCreatedAgeMs(row) <= APPROVED_DEDUCTION_C4_EDIT_WINDOW_MS;
+}
+
+function canDeleteApprovedDeductionApplication(user, row) {
+  const levelNumber = Number(String(getUserLevel(user)).replace(/\D/g, "")) || 1;
+  if (levelNumber >= 5 || isTopLevelUser(user)) return true;
+  if (levelNumber !== 4) return false;
+  return approvedDeductionCreatedByUser(row, user);
 }
 
 function canManageWageRates(user) {
@@ -2714,6 +2742,13 @@ async function updateCloudDeductionApplication(id, payload) {
   return updated[0] || null;
 }
 
+async function deleteCloudDeductionApplication(id) {
+  await cloudApiRequest("/api/deduction-applications", {
+    method: "DELETE",
+    body: JSON.stringify({ id })
+  });
+}
+
 async function updateCloudDeduction(id, payload) {
   const data = await cloudApiRequest("/api/deductions", {
     method: "PUT",
@@ -2833,11 +2868,11 @@ function approvedDeductionAuditDiff(before, after) {
 }
 
 async function apiUpdateApprovedDeductionApplication(id, payload, actor) {
-  if (!canEditApprovedDeductions(actor)) {
-    throw new Error("บัญชีนี้ไม่มีสิทธิ์แก้ไขรายการอนุมัติแล้ว ต้องเป็น C5 ขึ้นไป");
-  }
   const existing = deductionApplications.find((record) => Number(record.id) === Number(id));
   if (!existing || existing.status !== "Applied") throw new Error("ไม่พบรายการอนุมัติแล้วนี้");
+  if (!canEditApprovedDeductionApplication(actor, existing)) {
+    throw new Error("บัญชีนี้ไม่มีสิทธิ์แก้ไขรายการนี้: C5 ขึ้นไปแก้ได้ตลอด ส่วน C4 แก้ได้ภายใน 15 นาทีหลังบันทึกเท่านั้น");
+  }
   const source = getDeductionRecords().find((record) => Number(record.id) === Number(existing.deduction_id));
   const nextAmount = Number(payload.amount || 0);
   if (!payload.applied_date) throw new Error("กรุณาเลือกวันที่อนุมัติ");
@@ -2866,6 +2901,22 @@ async function apiUpdateApprovedDeductionApplication(id, payload, actor) {
     `แก้ไขรายการอนุมัติหักเงิน #${id} (${existing.emp_code} ${existing.employee_name}) รายการ: ${source?.deduction_label || "-"} | ${diff || "ไม่มีค่าที่เปลี่ยน"}`
   );
   return updated;
+}
+
+async function apiDeleteApprovedDeductionApplication(id, actor) {
+  const existing = deductionApplications.find((record) => Number(record.id) === Number(id));
+  if (!existing || existing.status !== "Applied") throw new Error("ไม่พบรายการอนุมัติแล้วนี้");
+  if (!canDeleteApprovedDeductionApplication(actor, existing)) {
+    throw new Error("บัญชีนี้ไม่มีสิทธิ์ลบรายการนี้: C5 ขึ้นไปลบได้ตลอด ส่วน C4 ลบได้เฉพาะรายการที่ตัวเองบันทึก");
+  }
+  const source = getDeductionRecords().find((record) => Number(record.id) === Number(existing.deduction_id));
+  await deleteCloudDeductionApplication(id);
+  deductionApplications = deductionApplications.filter((record) => Number(record.id) !== Number(id));
+  addAuditLog(
+    actor,
+    "DELETE_APPROVED_DEDUCTION",
+    `ลบรายการอนุมัติหักเงิน #${id} (${existing.emp_code} ${existing.employee_name}) รายการ: ${source?.deduction_label || "-"} | วันที่อนุมัติ: "${existing.applied_date || "-"}" | ยอดที่ลบ: "${money(existing.amount || 0)}" | หมายเหตุเดิม: "${existing.note || "-"}"`
+  );
 }
 
 function getDeductionsForRange(kind, startDate, endDate, employee = null) {
@@ -6517,7 +6568,6 @@ function renderDeductionApproval(user, moduleItem) {
   const rows = getPendingDeductionRows(deductionApprovalEmployeeKind);
   const approvedRows = getApprovedDeductionRows(deductionApprovalEmployeeKind);
   const showingApproved = deductionApprovalView === "approved";
-  const canEditApproved = canEditApprovedDeductions(user);
   const visibleEmployeeCount = new Set((showingApproved ? approvedRows : rows).map((row) => `${row.employee_kind}-${row.employee_id || row.emp_code}`)).size;
   const remainingTotal = rows.reduce((sum, row) => sum + row.remaining_amount, 0);
   const approvedTotal = approvedRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
@@ -6587,9 +6637,15 @@ function renderDeductionApproval(user, moduleItem) {
                         </form>
                       ` : `
                         <div class="table-actions">
-                          ${canEditApproved
+                          ${canEditApprovedDeductionApplication(user, row)
                             ? `<button class="btn btn-small btn-outline" type="button" data-edit-approved-deduction="${row.id}">แก้ไข</button>`
-                            : `<span class="badge badge-muted">เฉพาะ C5+</span>`}
+                            : ""}
+                          ${canDeleteApprovedDeductionApplication(user, row)
+                            ? `<button class="btn btn-small btn-danger" type="button" data-delete-approved-deduction="${row.id}">ลบ</button>`
+                            : ""}
+                          ${canEditApprovedDeductionApplication(user, row) || canDeleteApprovedDeductionApplication(user, row)
+                            ? ""
+                            : `<span class="badge badge-muted">ไม่มีสิทธิ์</span>`}
                         </div>
                       `}
                     </td>
@@ -6886,12 +6942,14 @@ function bindDeductionEvents(user) {
 
   document.querySelectorAll("[data-edit-approved-deduction]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (!canEditApprovedDeductions(user)) {
-        setDeductionMessage("บัญชีนี้ไม่มีสิทธิ์แก้ไขรายการอนุมัติแล้ว ต้องเป็น C5 ขึ้นไป", "error");
+      const id = Number(button.dataset.editApprovedDeduction || 0);
+      const row = deductionApplications.find((record) => Number(record.id) === id);
+      if (!canEditApprovedDeductionApplication(user, row)) {
+        setDeductionMessage("บัญชีนี้ไม่มีสิทธิ์แก้ไขรายการนี้: C5 ขึ้นไปแก้ได้ตลอด ส่วน C4 แก้ได้ภายใน 15 นาทีหลังบันทึกเท่านั้น", "error");
         render();
         return;
       }
-      editingApprovedDeductionApplicationId = Number(button.dataset.editApprovedDeduction || 0);
+      editingApprovedDeductionApplicationId = id;
       setDeductionMessage("");
       render();
     });
@@ -6921,6 +6979,28 @@ function bindDeductionEvents(user) {
         setDeductionMessage("แก้ไขรายการอนุมัติแล้วและบันทึก Audit Log เรียบร้อยแล้ว");
       } catch (error) {
         setDeductionMessage(error instanceof Error ? error.message : "แก้ไขรายการอนุมัติแล้วไม่สำเร็จ", "error");
+      }
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-delete-approved-deduction]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = Number(button.dataset.deleteApprovedDeduction || 0);
+      const row = deductionApplications.find((record) => Number(record.id) === id);
+      if (!canDeleteApprovedDeductionApplication(user, row)) {
+        setDeductionMessage("บัญชีนี้ไม่มีสิทธิ์ลบรายการนี้: C5 ขึ้นไปลบได้ตลอด ส่วน C4 ลบได้เฉพาะรายการที่ตัวเองบันทึก", "error");
+        render();
+        return;
+      }
+      if (!window.confirm(`ยืนยันลบรายการอนุมัติหักเงินของ ${row?.emp_code || "-"} ${row?.employee_name || ""} ยอด ${money(row?.amount || 0)} ?`)) return;
+      try {
+        await apiDeleteApprovedDeductionApplication(id, user);
+        editingApprovedDeductionApplicationId = null;
+        await Promise.all([hydrateDeductionsFromCloud(), hydrateDeductionApplicationsFromCloud()]);
+        setDeductionMessage("ลบรายการอนุมัติแล้วและบันทึก Audit Log เรียบร้อยแล้ว");
+      } catch (error) {
+        setDeductionMessage(error instanceof Error ? error.message : "ลบรายการอนุมัติแล้วไม่สำเร็จ", "error");
       }
       render();
     });
@@ -8119,6 +8199,7 @@ function getAuditLogActionLabel(action) {
     CREATE_DEDUCTION: "เพิ่มรายการหักเงิน",
     UPDATE_DEDUCTION: "แก้ไขรายการหักเงิน",
     UPDATE_APPROVED_DEDUCTION: "แก้ไขรายการอนุมัติหักเงิน",
+    DELETE_APPROVED_DEDUCTION: "ลบรายการอนุมัติหักเงิน",
     DELETE_DEDUCTION: "ลบรายการหักเงิน",
     APPLY_DEDUCTION_BATCH: "นำรายการหักเงินไปใช้",
     UPDATE_WITHHOLDING_TAX_GROUPS: "ตั้งค่าหัก ณ ที่จ่าย 3%",

@@ -159,6 +159,7 @@ def session_token(account: dict) -> str:
     payload = {
         "sub": str(account.get("id", "")),
         "username": str(account.get("username", "")),
+        "fullname": str(account.get("fullname", "")),
         "level": str(account.get("user_level", "C1")),
         "role": str(account.get("role", "")),
         "exp": int(time.time()) + 12 * 60 * 60,
@@ -187,6 +188,43 @@ def accounting_actor(handler: BaseHTTPRequestHandler, minimum_level: int = 4) ->
     actor = verify_session_token(handler.headers.get("X-Session-Token", ""))
     level = int("".join(filter(str.isdigit, str(actor.get("level", "C1")))) or "1") if actor else 0
     return actor if actor and level >= minimum_level else None
+
+
+APPROVED_DEDUCTION_C4_EDIT_WINDOW_SECONDS = 15 * 60
+
+
+def actor_identity_values(actor: dict | None) -> set[str]:
+    values = {str((actor or {}).get("username") or "").strip().lower(), str((actor or {}).get("fullname") or "").strip().lower()}
+    return {value for value in values if value}
+
+
+def approved_application_age_seconds(application: dict) -> float:
+    raw = str(application.get("created_at") or "").replace("Z", "+00:00")
+    try:
+        created_at = datetime.fromisoformat(raw)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - created_at.astimezone(timezone.utc)).total_seconds()
+    except (ValueError, TypeError):
+        return float("inf")
+
+
+def can_actor_edit_approved_application(actor: dict, application: dict) -> bool:
+    level = account_level_number(actor.get("level"))
+    if level >= 5:
+        return True
+    if level != 4:
+        return False
+    return approved_application_age_seconds(application) <= APPROVED_DEDUCTION_C4_EDIT_WINDOW_SECONDS
+
+
+def can_actor_delete_approved_application(actor: dict, application: dict) -> bool:
+    level = account_level_number(actor.get("level"))
+    if level >= 5:
+        return True
+    if level != 4:
+        return False
+    return str(application.get("created_by") or "").strip().lower() in actor_identity_values(actor)
 
 
 PRODUCTION_SELF_EDIT_WINDOW_SECONDS = 5 * 60
@@ -9732,9 +9770,9 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/deduction-applications":
-            actor = accounting_actor(self, 5)
+            actor = accounting_actor(self, 4)
             if not actor:
-                self.send_json({"error": "C5 or higher session is required to edit approved deductions."}, 403)
+                self.send_json({"error": "C4 or higher session is required to edit approved deductions."}, 403)
                 return
             application_id = payload.get("id")
             if application_id in [None, ""]:
@@ -9756,6 +9794,9 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": existing_rows if existing_status >= 400 else "Approved deduction application not found."}, existing_status if existing_status >= 400 else 404)
                 return
             existing_application = existing_rows[0]
+            if not can_actor_edit_approved_application(actor, existing_application):
+                self.send_json({"error": "C5 or higher can edit anytime. C4 can edit only within 15 minutes after the approved deduction was saved."}, 403)
+                return
             deduction_id = existing_application.get("deduction_id")
             deduction_status, deduction_rows = supabase_request(
                 "GET",
@@ -9926,6 +9967,62 @@ class ReportHandler(BaseHTTPRequestHandler):
                 prefer="return=minimal",
             )
             self.send_json({"data": {"deleted": True} if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/deduction-applications":
+            actor = accounting_actor(self, 4)
+            if not actor:
+                self.send_json({"error": "C4 or higher session is required to delete approved deductions."}, 403)
+                return
+            application_id = payload.get("id")
+            if application_id in [None, ""]:
+                self.send_json({"error": "id is required."}, 400)
+                return
+            existing_status, existing_rows = supabase_request(
+                "GET",
+                f"deduction_applications?id=eq.{quote(str(application_id))}&status=eq.Applied&select=*",
+            )
+            if existing_status >= 400 or not isinstance(existing_rows, list) or not existing_rows:
+                self.send_json({"error": existing_rows if existing_status >= 400 else "Approved deduction application not found."}, existing_status if existing_status >= 400 else 404)
+                return
+            existing_application = existing_rows[0]
+            if not can_actor_delete_approved_application(actor, existing_application):
+                self.send_json({"error": "C5 or higher can delete anytime. C4 can delete only approved deductions they created."}, 403)
+                return
+            deduction_id = existing_application.get("deduction_id")
+            deduction_status, deduction_rows = supabase_request(
+                "GET",
+                f"deduction_records?id=eq.{quote(str(deduction_id))}&select=id,amount,status&limit=1",
+            )
+            if deduction_status >= 400 or not isinstance(deduction_rows, list) or not deduction_rows:
+                self.send_json({"error": deduction_rows if deduction_status >= 400 else "Source deduction not found."}, deduction_status if deduction_status >= 400 else 404)
+                return
+            source_deduction = deduction_rows[0]
+            other_status, other_applications = supabase_request(
+                "GET",
+                f"deduction_applications?deduction_id=eq.{quote(str(deduction_id))}&status=eq.Applied&id=neq.{quote(str(application_id))}&select=amount",
+            )
+            if other_status >= 400:
+                self.send_json({"error": other_applications}, other_status)
+                return
+            other_total = sum(safe_float(row.get("amount")) for row in other_applications) if isinstance(other_applications, list) else 0
+            delete_status, delete_body = supabase_request(
+                "DELETE",
+                f"deduction_applications?id=eq.{quote(str(application_id))}&status=eq.Applied",
+                prefer="return=minimal",
+            )
+            if delete_status >= 400:
+                self.send_json({"data": None, "error": delete_body}, delete_status)
+                return
+            source_amount = safe_float(source_deduction.get("amount"))
+            next_status = "Completed" if source_amount <= other_total + 0.004 else "Pending"
+            supabase_request(
+                "PATCH",
+                f"deduction_records?id=eq.{quote(str(deduction_id))}",
+                {"status": next_status, "updated_at": datetime.utcnow().isoformat() + "Z"},
+                prefer="return=minimal",
+            )
+            self.send_json({"data": {"deleted": True}, "error": None})
             return
 
         self.send_error(404, "Not found")
