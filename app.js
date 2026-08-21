@@ -700,6 +700,7 @@ const timeQueueTrackers = new Map();
 let deductionActiveTab = "production";
 let deductionBonusEmployeeKind = "time";
 let deductionApprovalEmployeeKind = "production";
+let deductionApprovalView = "pending";
 let deductionApplications = [];
 let deductionStartDate = new Date().toISOString().slice(0, 10);
 let deductionEndDate = new Date().toISOString().slice(0, 10);
@@ -6412,10 +6413,36 @@ function getPendingDeductionRows(kind) {
     .sort((a, b) => `${a.emp_code} ${a.start_date} ${a.id}`.localeCompare(`${b.emp_code} ${b.start_date} ${b.id}`, "th", { numeric: true }));
 }
 
+function getApprovedDeductionRows(kind) {
+  const normalizedKind = normalizeDeductionKind(kind);
+  const deductionMap = new Map(getDeductionRecords().map((record) => [Number(record.id), record]));
+  return deductionApplications
+    .filter((application) => application.status === "Applied" && application.employee_kind === normalizedKind)
+    .map((application) => {
+      const source = deductionMap.get(Number(application.deduction_id));
+      return {
+        ...application,
+        deduction_label: source?.deduction_label || getDeductionTypeLabel(source?.deduction_type || "advance"),
+        source_amount: Number(source?.amount || 0),
+        source_start_date: source?.start_date || "",
+        remaining_amount: source
+          ? Math.max(0, Number(source.amount || 0) - getAppliedTotalForDeduction(source.id))
+          : 0,
+        note: application.note || source?.note || ""
+      };
+    })
+    .sort((a, b) =>
+      `${b.applied_date} ${b.emp_code} ${b.id}`.localeCompare(`${a.applied_date} ${a.emp_code} ${a.id}`, "th", { numeric: true })
+    );
+}
+
 function renderDeductionApproval(user, moduleItem) {
   const rows = getPendingDeductionRows(deductionApprovalEmployeeKind);
-  const employeeCount = new Set(rows.map((row) => `${row.employee_kind}-${row.employee_id || row.emp_code}`)).size;
+  const approvedRows = getApprovedDeductionRows(deductionApprovalEmployeeKind);
+  const showingApproved = deductionApprovalView === "approved";
+  const visibleEmployeeCount = new Set((showingApproved ? approvedRows : rows).map((row) => `${row.employee_kind}-${row.employee_id || row.emp_code}`)).size;
   const remainingTotal = rows.reduce((sum, row) => sum + row.remaining_amount, 0);
+  const approvedTotal = approvedRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
   const kindLabel = deductionApprovalEmployeeKind === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก";
   return `
     <section class="summary-page deduction-page deduction-approval-page">
@@ -6439,16 +6466,47 @@ function renderDeductionApproval(user, moduleItem) {
           <button class="${deductionApprovalEmployeeKind === "production" ? "active" : ""}" type="button" data-approval-employee-kind="production">พนักงานเหมาน้ำหนัก</button>
           <button class="${deductionApprovalEmployeeKind === "time" ? "active" : ""}" type="button" data-approval-employee-kind="time">พนักงานเหมาเวลา</button>
         </div>
+        <div class="deduction-kind-switch deduction-approval-view-switch" role="group" aria-label="มุมมองรายการอนุมัติหักเงิน">
+          <span>เมนู</span>
+          <button class="${!showingApproved ? "active" : ""}" type="button" data-approval-view="pending">รออนุมัติ</button>
+          <button class="${showingApproved ? "active" : ""}" type="button" data-approval-view="approved">รายการอนุมัติแล้ว</button>
+        </div>
         <label class="field deduction-approval-date">
           <span>วันที่นำยอดไปหัก</span>
           <input id="deductionApprovalDate" type="date" value="${escapeHtml(deductionStartDate)}" required />
         </label>
       </section>
       <div class="summary-metrics deduction-metrics">
-        <div class="metric-card metric-blue"><span>รายการรอหัก</span><strong>${rows.length.toLocaleString("th-TH")} รายการ</strong><small>${kindLabel}</small></div>
-        <div class="metric-card metric-green"><span>จำนวนพนักงาน</span><strong>${employeeCount.toLocaleString("th-TH")} คน</strong><small>ที่ยังมียอดคงเหลือ</small></div>
-        <div class="metric-card metric-orange"><span>ยอดคงเหลือทั้งหมด</span><strong>${money(remainingTotal)}</strong><small>ยังไม่กระทบยอดสุทธิจนกว่าจะยืนยัน</small></div>
+        <div class="metric-card metric-blue"><span>${showingApproved ? "รายการอนุมัติแล้ว" : "รายการรอหัก"}</span><strong>${(showingApproved ? approvedRows.length : rows.length).toLocaleString("th-TH")} รายการ</strong><small>${kindLabel}</small></div>
+        <div class="metric-card metric-green"><span>จำนวนพนักงาน</span><strong>${visibleEmployeeCount.toLocaleString("th-TH")} คน</strong><small>${showingApproved ? "ที่ถูกอนุมัติหักแล้ว" : "ที่ยังมียอดคงเหลือ"}</small></div>
+        <div class="metric-card metric-orange"><span>${showingApproved ? "ยอดที่อนุมัติหักแล้ว" : "ยอดคงเหลือทั้งหมด"}</span><strong>${money(showingApproved ? approvedTotal : remainingTotal)}</strong><small>${showingApproved ? "รวมจากประวัติที่ยืนยันแล้ว" : "ยังไม่กระทบยอดสุทธิจนกว่าจะยืนยัน"}</small></div>
       </div>
+      ${showingApproved ? `
+        <section class="table-card deduction-approval-table-card">
+          <div class="table-heading deduction-table-heading">
+            <div><strong>รายการอนุมัติแล้ว</strong><span>${kindLabel} แสดงตามวันที่อนุมัติล่าสุดก่อน</span></div>
+            <span class="deduction-table-total">รวม ${money(approvedTotal)}</span>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>วันที่อนุมัติ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>รายการ</th><th>ยอดตั้งต้น</th><th>ยอดที่อนุมัติหัก</th><th>คงเหลือ</th><th>ผู้อนุมัติ</th></tr></thead>
+              <tbody>
+                ${approvedRows.length ? approvedRows.map((row) => `
+                  <tr>
+                    <td><span class="deduction-date-cell">${escapeHtml(row.applied_date)}</span></td>
+                    <td><strong>${escapeHtml(row.emp_code)}</strong></td>
+                    <td>${escapeHtml(row.employee_name)}</td>
+                    <td>${escapeHtml(row.deduction_label)}</td>
+                    <td>${money(row.source_amount || 0)}</td>
+                    <td><strong>${money(row.amount || 0)}</strong></td>
+                    <td>${money(row.remaining_amount || 0)}</td>
+                    <td>${escapeHtml(row.created_by || "-")}</td>
+                  </tr>`).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มีรายการอนุมัติแล้วสำหรับ${kindLabel}</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ` : `
       <form id="deductionApprovalForm">
         <section class="table-card deduction-approval-table-card">
           <div class="table-heading deduction-table-heading">
@@ -6478,7 +6536,7 @@ function renderDeductionApproval(user, moduleItem) {
           <div><span>เลือกแล้ว</span><strong id="deductionApprovalSelectedCount">0 รายการ</strong><small id="deductionApprovalSelectedTotal">รวม ฿0</small></div>
           <button class="btn btn-primary deduction-submit-button" type="submit" ${rows.length ? "" : "disabled"}>ยืนยันหักเงินรอบนี้</button>
         </div>
-      </form>
+      </form>`}
     </section>`;
 }
 
@@ -6711,6 +6769,14 @@ function bindDeductionEvents(user) {
       } catch (error) {
         setDeductionMessage(`${error instanceof Error ? error.message : "โหลดรายการค้างไม่สำเร็จ"} กรุณารันไฟล์ migration ของระบบหักเงินใน Supabase`, "error");
       }
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-approval-view]").forEach((button) => {
+    button.addEventListener("click", () => {
+      deductionApprovalView = button.dataset.approvalView === "approved" ? "approved" : "pending";
+      setDeductionMessage("");
       render();
     });
   });

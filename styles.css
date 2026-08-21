@@ -7118,6 +7118,7 @@ tr:last-child td {
 .deduction-approval-toolbar {
   display: flex;
   align-items: end;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 20px;
   margin-bottom: 18px;
@@ -7125,6 +7126,16 @@ tr:last-child td {
 
 .deduction-approval-toolbar .deduction-kind-switch {
   margin: 0;
+}
+
+.deduction-approval-view-switch {
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.deduction-approval-view-switch button.active {
+  background: #2563eb;
 }
 
 .deduction-approval-date {
