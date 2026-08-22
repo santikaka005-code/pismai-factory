@@ -10081,6 +10081,32 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": body if status < 400 and isinstance(body, list) else [], "error": body if status >= 400 else None}, status)
             return
 
+        if parsed.path == "/api/issue-reports/notifications":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            if account_level_number(actor.get("level")) not in {6, 7}:
+                self.send_json({"error": "C6 or C7 access is required."}, 403)
+                return
+            try:
+                after_id = max(0, int(query.get("after_id", ["0"])[0]))
+            except (TypeError, ValueError):
+                after_id = 0
+            status, body = supabase_request(
+                "GET",
+                f"issue_reports?id=gt.{after_id}&select=id,created_at&order=id.desc&limit=1000",
+            )
+            if status >= 400:
+                self.send_json({"error": body}, status)
+                return
+            reports = body if isinstance(body, list) else []
+            self.send_json({"data": {
+                "unread_count": len(reports),
+                "latest_id": reports[0].get("id") if reports else after_id,
+            }})
+            return
+
         if parsed.path.startswith("/api/secret-room/"):
             actor = secret_room_actor(self)
             if not actor:

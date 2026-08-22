@@ -7400,6 +7400,35 @@ tr:last-child td {
   margin-top: auto;
 }
 
+.issue-notification-toast {
+  position: fixed;
+  z-index: 1300;
+  right: 22px;
+  bottom: 22px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  width: min(360px, calc(100vw - 28px));
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  padding: 14px 16px;
+  color: #172033;
+  background: #fff;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, .2);
+  text-align: left;
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity .2s ease, transform .2s ease;
+  cursor: pointer;
+}
+
+.issue-notification-toast.is-visible { opacity: 1; transform: translateY(0); }
+.issue-notification-toast > span:last-child { display: grid; gap: 3px; }
+.issue-notification-toast strong { font-size: 14px; }
+.issue-notification-toast small { color: #667085; font-size: 12px; }
+.issue-notification-dot { width: 11px; height: 11px; border-radius: 50%; background: #dc2626; box-shadow: 0 0 0 5px rgba(220, 38, 38, .12); }
+
 .issue-report-page {
   display: grid;
   gap: 16px;

@@ -581,6 +581,11 @@ let issueReportSearch = "";
 let issueReportStatusFilter = "all";
 let issueReportSelectedId = null;
 let issueReportAttachment = null;
+let issueNotificationTimer = null;
+let issueNotificationUsername = "";
+let issueNotificationInitialized = false;
+let issueNotificationUnreadCount = 0;
+let issueNotificationLatestId = 0;
 let homeStorageUsage = null;
 let homeStorageUsageLoaded = false;
 let homeStorageUsageLoading = false;
@@ -5537,6 +5542,7 @@ async function getPfComparisonDashboard(startDate, endDate) {
 function renderApp(user, route) {
   if (route !== "secret-room") window.SecretRoom?.stop?.();
   window.SecretRoom?.startNotifications?.();
+  startIssueNotifications();
   if (!liveStateCloudBootstrapped) {
     liveStateCloudBootstrapped = true;
     bootstrapLiveStateFromCloud().then(() => render()).catch((error) => {
@@ -5605,6 +5611,8 @@ function renderApp(user, route) {
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
   const secretUnreadCount = Number(window.SecretRoom?.getUnreadCount?.() || 0);
   const secretUnreadLabel = secretUnreadCount > 99 ? "99+" : String(secretUnreadCount);
+  const issueUnreadCount = canReceiveIssueNotifications(user) ? issueNotificationUnreadCount : 0;
+  const issueUnreadLabel = issueNotificationLabel(issueUnreadCount);
 
   app.innerHTML = `
     <main class="app-layout">
@@ -5650,13 +5658,14 @@ function renderApp(user, route) {
             ${visibleModules
               .map(
                 (item) => `
-                  <button class="nav-button ${item.id === route ? "active" : ""} ${item.locked ? "locked" : ""} ${item.id === "secret-room" && secretUnreadCount ? "has-notification" : ""}" data-route="${item.id}" type="button">
+                  <button class="nav-button ${item.id === route ? "active" : ""} ${item.locked ? "locked" : ""} ${(item.id === "secret-room" && secretUnreadCount) || (item.id === "record-report" && issueUnreadCount) ? "has-notification" : ""}" data-route="${item.id}" type="button">
                     <span class="nav-label">
                       <span class="nav-icon">${escapeHtml(item.icon || "•")}</span>
                       ${escapeHtml(item.label)}
                     </span>
                     ${item.locked ? `<span class="nav-lock">ล็อก</span>` : ""}
                     ${item.id === "secret-room" ? `<span class="nav-notification-badge" data-secret-unread-badge ${secretUnreadCount ? "" : "hidden"}>${escapeHtml(secretUnreadLabel)}</span>` : ""}
+                    ${item.id === "record-report" && canReceiveIssueNotifications(user) ? `<span class="nav-notification-badge" data-issue-unread-badge ${issueUnreadCount ? "" : "hidden"}>${escapeHtml(issueUnreadLabel)}</span>` : ""}
                   </button>
                 `
               )
@@ -5687,6 +5696,7 @@ function renderApp(user, route) {
 
   bindAppEvents(user, moduleItem);
   window.SecretRoom?.startNotifications?.();
+  startIssueNotifications();
 }
 function renderModuleContent(user, moduleItem) {
   const settingsSubpageIds = new Set(["employees", "production-employees", "time-employees", "wage-rates", "settings-pile-summary", "account-management", "audit-log", "backup"]);
@@ -5799,6 +5809,7 @@ function bindAppEvents(user, moduleItem) {
     issueReportAttachment = null;
     stopHomeStorageUsageRefresh();
     window.SecretRoom?.stopNotifications?.();
+    stopIssueNotifications();
     clearSession();
     onlineUserCount = 0;
     updateOnlineUserBadges();
@@ -5821,7 +5832,10 @@ function bindAppEvents(user, moduleItem) {
   if (moduleItem.id === "settings-pile-summary") bindSettingsPileSummaryEvents(user);
   if (moduleItem.id === "account-management") bindAccountManagementEvents(user);
   if (moduleItem.id === "backup") bindBackupEvents(user);
-  if (moduleItem.id === "record-report") bindIssueReportEvents(user);
+  if (moduleItem.id === "record-report") {
+    markIssueNotificationsRead();
+    bindIssueReportEvents(user);
+  }
   if (moduleItem.id === "dashboard") bindHomeStorageUsageEvents();
   if (moduleItem.id === "pile-management") bindPileManagementEvents(user);
   if (moduleItem.id === "audit-log") bindAuditLogPasswordEvents();
@@ -7232,6 +7246,92 @@ const issueReportPriorityLabels = {
 
 function canManageIssueReports(user) {
   return Number(String(getUserLevel(user)).replace(/\D/g, "") || 1) >= 5;
+}
+
+function canReceiveIssueNotifications(user) {
+  return ["C6", "C7"].includes(getUserLevel(user));
+}
+
+function issueNotificationStorageKey() {
+  return `pismai-issue-notification-last-read:${issueNotificationUsername}`;
+}
+
+function issueNotificationLabel(count) {
+  return count > 99 ? "99+" : String(count);
+}
+
+function publishIssueNotificationCount(value, { notify = false, latestId } = {}) {
+  const nextCount = Math.max(0, Number(value) || 0);
+  const previousCount = issueNotificationUnreadCount;
+  issueNotificationUnreadCount = nextCount;
+  if (latestId !== undefined) issueNotificationLatestId = Math.max(0, Number(latestId) || 0);
+  document.querySelectorAll("[data-issue-unread-badge]").forEach((badge) => {
+    badge.textContent = issueNotificationLabel(nextCount);
+    badge.hidden = nextCount === 0;
+    badge.closest(".nav-button")?.classList.toggle("has-notification", nextCount > 0);
+  });
+  if (notify && issueNotificationInitialized && nextCount > previousCount) {
+    document.querySelector("[data-issue-notification-toast]")?.remove();
+    const toast = document.createElement("button");
+    toast.type = "button";
+    toast.className = "issue-notification-toast";
+    toast.dataset.issueNotificationToast = "";
+    toast.innerHTML = `<span class="issue-notification-dot"></span><span><strong>มีการแจ้งปัญหาใหม่</strong><small>${issueNotificationLabel(nextCount)} รายการรอตรวจสอบ</small></span>`;
+    toast.addEventListener("click", () => {
+      toast.remove();
+      location.hash = "#/record-report";
+    });
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add("is-visible"));
+    window.setTimeout(() => {
+      toast.classList.remove("is-visible");
+      window.setTimeout(() => toast.remove(), 220);
+    }, 6500);
+  }
+  issueNotificationInitialized = true;
+}
+
+async function refreshIssueNotifications({ notify = true } = {}) {
+  const user = getSession()?.user;
+  if (!canReceiveIssueNotifications(user)) return;
+  const lastReadId = Math.max(0, Number(localStorage.getItem(issueNotificationStorageKey())) || 0);
+  try {
+    const response = await cloudApiRequest(`/api/issue-reports/notifications?after_id=${lastReadId}`, { timeoutMs: 12000 });
+    publishIssueNotificationCount(response?.data?.unread_count, { notify, latestId: response?.data?.latest_id });
+    if (location.hash.replace("#/", "") === "record-report") markIssueNotificationsRead();
+  } catch (error) {
+    if (error?.status === 401 || error?.status === 403) stopIssueNotifications();
+    else console.warn("Issue report notification refresh failed.", error);
+  }
+}
+
+function startIssueNotifications() {
+  const user = getSession()?.user;
+  const username = String(user?.username || "").toLowerCase();
+  if (!username || !canReceiveIssueNotifications(user)) return stopIssueNotifications();
+  if (issueNotificationUsername !== username) {
+    stopIssueNotifications();
+    issueNotificationUsername = username;
+  }
+  if (issueNotificationTimer) return publishIssueNotificationCount(issueNotificationUnreadCount);
+  refreshIssueNotifications({ notify: false });
+  issueNotificationTimer = window.setInterval(() => refreshIssueNotifications(), 15000);
+}
+
+function stopIssueNotifications() {
+  if (issueNotificationTimer) window.clearInterval(issueNotificationTimer);
+  issueNotificationTimer = null;
+  issueNotificationUsername = "";
+  issueNotificationInitialized = false;
+  issueNotificationLatestId = 0;
+  publishIssueNotificationCount(0);
+  document.querySelector("[data-issue-notification-toast]")?.remove();
+}
+
+function markIssueNotificationsRead() {
+  if (!issueNotificationUsername || !issueNotificationLatestId) return;
+  localStorage.setItem(issueNotificationStorageKey(), String(issueNotificationLatestId));
+  publishIssueNotificationCount(0);
 }
 
 function issueTicketNumber(report) {
