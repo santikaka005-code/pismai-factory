@@ -212,7 +212,7 @@
       const valueText = (value) => state.percentBasis === "money" ? money(value) : `${Number(value || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${unit}`;
       const baseTotal = selected.reduce((total, row) => total + basisValue(row), 0);
       const changeTotal = selected.reduce((total, row) => total + Math.round(basisValue(row) * percent * sign * 100) / 10000, 0);
-      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF PERCENT ADJUSTMENT</p><h1>ปรับยอดจ่ายด้วยเปอร์เซ็นต์</h1><span>เลือกกลุ่มเพื่อบวกหรือหักจากยอดสุทธิ โดยไม่แก้ข้อมูลค่าแรงต้นทาง</span></div><div class="acr-period-static">${escapeHtml(state.startDate)} ถึง ${escapeHtml(state.endDate)}</div></header>
+      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF PERCENT ADJUSTMENT</p><h1>ปรับยอดจ่ายด้วยเปอร์เซ็นต์</h1><span>เลือกกลุ่มเพื่อบวกหรือหักจากยอดสุทธิ โดยไม่แก้ข้อมูลค่าแรงต้นทาง</span></div><div class="acr-period"><label>เริ่มต้น<input type="date" data-percent-start-date value="${state.startDate}"></label><label>สิ้นสุด<input type="date" data-percent-end-date value="${state.endDate}"></label></div></header>
         <section class="acr-percent-basis"><button type="button" data-percent-basis="money" class="${state.percentBasis === "money" ? "active" : ""}">฿ ยอดเงินสุทธิ</button><button type="button" data-percent-basis="weight" class="${state.percentBasis === "weight" ? "active" : ""}">⚖ น้ำหนักผลผลิต</button><button type="button" data-percent-basis="hours" class="${state.percentBasis === "hours" ? "active" : ""}">◷ เวลาทำงาน</button></section><section class="acr-percent-form"><label>ประเภทพนักงาน<select data-percent-kind ${state.percentBasis !== "money" ? "disabled" : ""}><option value="production" ${state.percentKind === "production" ? "selected" : ""}>พนักงานเหมา</option><option value="time" ${state.percentKind === "time" ? "selected" : ""}>พนักงานเวลา</option></select></label><label>กลุ่ม<select data-percent-group><option value="all">ทุกกลุ่ม</option>${groups.map((group) => `<option value="${escapeHtml(group)}" ${state.percentGroup === group ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</select></label><label>รูปแบบ<select data-percent-mode><option value="add" ${state.percentMode === "add" ? "selected" : ""}>+ บวกเพิ่ม</option><option value="deduct" ${state.percentMode === "deduct" ? "selected" : ""}>− หักออก</option></select></label><label>เปอร์เซ็นต์<div class="acr-percent-input"><input data-percent-value type="number" min="0" max="1000" step="0.01" value="${percent}"><b>%</b></div></label></section>
         <div class="acr-metrics acr-percent-metrics"><article><span>${unit}ก่อนปรับ</span><strong>${valueText(baseTotal)}</strong><small>${selected.length} คน</small></article><article class="${sign > 0 ? "transfer" : "cash"}"><span>${sign > 0 ? "ยอดบวกเพิ่ม" : "ยอดหักออก"} ${percent}%</span><strong>${sign > 0 ? "+" : "−"}${valueText(Math.abs(changeTotal))}</strong><small>คำนวณแยกรายคน</small></article><article class="transfer"><span>${unit}หลังปรับ</span><strong>${valueText(Math.max(0, baseTotal + changeTotal))}</strong><small>ตัวอย่างผลการคำนวณ</small></article></div>
         ${state.percentBasis === "money" ? `<div class="acr-percent-actions"><button type="button" data-percent-clear>ล้างการปรับของกลุ่มนี้</button><button type="button" data-percent-apply ${!selected.length || percent <= 0 ? "disabled" : ""}>ยืนยัน${sign > 0 ? "บวก" : "หัก"} ${percent}% ให้ ${selected.length} คน</button></div>` : `<div class="acr-percent-info">น้ำหนักและเวลาใช้สำหรับวิเคราะห์เปอร์เซ็นต์เท่านั้น ระบบจะไม่แก้รายการงานต้นทางหรือเปลี่ยนยอดจ่าย</div>`}
@@ -289,6 +289,18 @@
         paint();
       }));
       root.querySelector("[data-percent-kind]")?.addEventListener("change", (event) => { state.percentKind = event.target.value === "time" ? "time" : "production"; state.percentGroup = "all"; paint(); });
+      root.querySelector("[data-percent-start-date]")?.addEventListener("change", (event) => {
+        state.startDate = event.target.value || state.startDate;
+        state.endDate = addDays(state.startDate, 6);
+        state.percentGroup = "all";
+        load();
+      });
+      root.querySelector("[data-percent-end-date]")?.addEventListener("change", (event) => {
+        state.endDate = event.target.value || state.endDate;
+        if (state.endDate < state.startDate) state.endDate = state.startDate;
+        state.percentGroup = "all";
+        load();
+      });
       root.querySelector("[data-percent-group]")?.addEventListener("change", (event) => { state.percentGroup = event.target.value || "all"; paint(); });
       root.querySelector("[data-percent-mode]")?.addEventListener("change", (event) => { state.percentMode = event.target.value === "deduct" ? "deduct" : "add"; paint(); });
       root.querySelector("[data-percent-value]")?.addEventListener("change", (event) => { state.percentValue = Math.min(1000, Math.max(0, Number(event.target.value || 0))); paint(); });
