@@ -5285,7 +5285,9 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
       bonus_amount: 0,
       deduction_amount: 0,
       withholding_tax_amount: 0,
-      net_amount: 0
+      net_amount: 0,
+      metric_weight: 0,
+      metric_hours: 0
     });
   });
 
@@ -5310,10 +5312,13 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
           bonus_amount: 0,
           deduction_amount: 0,
           withholding_tax_amount: 0,
-          net_amount: 0
+          net_amount: 0,
+          metric_weight: 0,
+          metric_hours: 0
         });
       }
       rows.get(employeeKey).gross_amount += Number(record.total_amount || record.grand_total || 0);
+      rows.get(employeeKey).metric_weight += Number(getRecordTotalWeight(record) || 0);
     });
 
   rows.forEach((row) => {
@@ -5347,7 +5352,9 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
       bonus_amount: 0,
       deduction_amount: 0,
       withholding_tax_amount: 0,
-      net_amount: 0
+      net_amount: 0,
+      metric_weight: 0,
+      metric_hours: 0
     });
   });
   const timeRecords = getTimeRecords().filter((record) => (record.record_date || "") >= range.startDate && (record.record_date || "") <= range.endDate);
@@ -5368,11 +5375,14 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
         bonus_amount: 0,
         deduction_amount: 0,
         withholding_tax_amount: 0,
-        net_amount: 0
+        net_amount: 0,
+        metric_weight: 0,
+        metric_hours: 0
       });
     }
     const receipt = getTimeReceiptRow({ ...record, daily_wage: Number(employee.daily_wage || record.daily_wage || type.dailyWage), ot_hourly_rate: Number(employee.ot_hourly_rate || record.ot_hourly_rate || TIME_OT_HOURLY_RATE) });
     rows.get(employeeKey).gross_amount += Number(receipt.totalAmount || 0);
+    rows.get(employeeKey).metric_hours += Number(receipt.normalHours || 0) + Number(receipt.otHours || 0);
   });
 
   rows.forEach((row) => {

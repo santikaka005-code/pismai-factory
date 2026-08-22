@@ -13,8 +13,15 @@ assert.match(controller, /data-percent-mode/);
 assert.match(controller, /data-percent-value/);
 assert.match(controller, /data-percent-apply/);
 assert.match(controller, /data-percent-clear/);
+assert.match(controller, /data-percent-basis="money"/);
+assert.match(controller, /data-percent-basis="weight"/);
+assert.match(controller, /data-percent-basis="hours"/);
+assert.match(controller, /row\.metric_weight/);
+assert.match(controller, /row\.metric_hours/);
 assert.match(controller, /net_amount: adjustedNet\(row\)/);
 assert.match(controller, /state\.view === "percentage" \? percentageMarkup\(\)/);
 assert.match(app, /payment_method: row\.payment_method, net_amount: Number\(row\.net_amount \|\| 0\)/);
+assert.match(app, /metric_weight \+= Number\(getRecordTotalWeight\(record\)/);
+assert.match(app, /metric_hours \+= Number\(receipt\.normalHours/);
 
 console.log("PF Accounting percentage adjustment tests passed.");
