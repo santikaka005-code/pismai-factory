@@ -12,9 +12,9 @@ const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
 const WITHHOLDING_TAX_GROUPS_KEY = "pismai_factory_withholding_tax_groups";
 const AUDIT_LOG_PASSWORD = "1150";
 const ONLINE_CLIENT_KEY = "pismai_online_client_id";
-const ONLINE_HEARTBEAT_INTERVAL_MS = 15000;
-const HOME_STORAGE_REFRESH_INTERVAL_MS = 30000;
-const LIVE_STATE_REFRESH_INTERVAL_MS = 60000;
+const ONLINE_HEARTBEAT_INTERVAL_MS = 60000;
+const HOME_STORAGE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const LIVE_STATE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const AUDIT_LOG_SYNC_DELAY_MS = 8000;
 const CLOUD_SAVE_TIMEOUT_MS = 15000;
 const CLOUD_SAVE_RETRY_DELAY_MS = 600;
@@ -756,6 +756,7 @@ const liveStateSyncInFlight = new Set();
 const liveStateSyncVersions = new Map();
 const liveStateSyncPending = new Set();
 let liveStateRefreshInFlight = false;
+let lastLiveStateFullRefreshAt = 0;
 let lastRenderedRoute = "";
 let batchEntryText = "";
 const DURIAN_GRADES = ["A", "B", "C", "D", "E"];
@@ -2243,7 +2244,7 @@ function isEditingFormField() {
   );
 }
 
-async function refreshLiveStateFromCloud({ renderWhenIdle = true } = {}) {
+async function refreshLiveStateFromCloud({ renderWhenIdle = true, force = false } = {}) {
   if (
     liveStateRefreshInFlight ||
     applyingCloudState ||
@@ -2252,6 +2253,10 @@ async function refreshLiveStateFromCloud({ renderWhenIdle = true } = {}) {
     liveStateSyncInFlight.size ||
     !getSession()
   ) return;
+  const now = Date.now();
+  if (!force && lastLiveStateFullRefreshAt && now - lastLiveStateFullRefreshAt < LIVE_STATE_REFRESH_INTERVAL_MS) {
+    return;
+  }
 
   const refreshVersionSignature = getLiveStateVersionSignature();
   liveStateRefreshInFlight = true;
@@ -2278,6 +2283,7 @@ async function refreshLiveStateFromCloud({ renderWhenIdle = true } = {}) {
   } catch (error) {
     console.warn("Live cloud refresh failed.", error);
   } finally {
+    lastLiveStateFullRefreshAt = Date.now();
     applyingCloudState = false;
     liveStateRefreshInFlight = false;
   }
@@ -2288,6 +2294,7 @@ async function refreshLiveStateFromCloud({ renderWhenIdle = true } = {}) {
 async function bootstrapLiveStateFromCloud() {
   const response = await cloudApiRequest("/api/state");
   const state = response.data || {};
+  lastLiveStateFullRefreshAt = Date.now();
   // Only the desktop file launcher owns legacy browser-only data. A phone or
   // iPad must only read cloud data, never upload its potentially stale cache.
   const needsMigration =
@@ -5651,6 +5658,7 @@ function renderApp(user, route) {
               <span>ออนไลน์</span>
               <strong data-online-user-count>${onlineUserCountText()}</strong>
             </div>
+            <button class="btn btn-small btn-outline" id="manualCloudRefresh" type="button" title="ดึงข้อมูลล่าสุดจาก Cloud แบบเต็ม">รีเฟรช Cloud</button>
             <div class="user-meta">
               <strong>${escapeHtml(user.fullname)}</strong>
               <span>${escapeHtml(user.role_label || user.role)}</span>
@@ -5808,6 +5816,16 @@ function bindAppEvents(user, moduleItem) {
   });
   document.querySelector("[data-close-drawer]")?.addEventListener("click", () => {
     document.body.classList.remove("drawer-open");
+  });
+  document.querySelector("#manualCloudRefresh")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    const oldText = button.textContent;
+    button.textContent = "กำลังรีเฟรช...";
+    await refreshLiveStateFromCloud({ renderWhenIdle: false, force: true });
+    button.textContent = oldText || "รีเฟรช Cloud";
+    button.disabled = false;
+    render();
   });
   document.querySelector("#logoutButton")?.addEventListener("click", () => {
     auditLogUnlocked = false;
@@ -7325,7 +7343,7 @@ function startIssueNotifications() {
   }
   if (issueNotificationTimer) return publishIssueNotificationCount(issueNotificationUnreadCount);
   refreshIssueNotifications({ notify: false });
-  issueNotificationTimer = window.setInterval(() => refreshIssueNotifications(), 15000);
+  issueNotificationTimer = window.setInterval(() => refreshIssueNotifications(), 60000);
 }
 
 function stopIssueNotifications() {
@@ -9874,7 +9892,7 @@ async function deleteProductionEditorRecord(user, formElement) {
       getProductionRecords().filter((record) => Number(record.id) !== Number(existingRecord.id))
     ));
     applyingCloudState = false;
-    await refreshLiveStateFromCloud({ renderWhenIdle: false });
+    await refreshLiveStateFromCloud({ renderWhenIdle: false, force: true });
     deletingProductionRecordId = null;
     productionEditorMessage = `ลบรายการ #${existingRecord.id} และบันทึก Audit Log แล้ว`;
     productionEditorMessageType = "success";
@@ -9969,7 +9987,7 @@ async function saveProductionEditorRecord(user, formElement) {
     applyingCloudState = true;
     localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
     applyingCloudState = false;
-    await refreshLiveStateFromCloud({ renderWhenIdle: false });
+    await refreshLiveStateFromCloud({ renderWhenIdle: false, force: true });
     productionEditorDate = getRecordDate(response.data);
     productionEditorFruit = productionFruitTypeForRecord(response.data);
     editingProductionRecordId = null;
@@ -10056,7 +10074,7 @@ async function saveProductionEditorBatchDate(user, formElement) {
     applyingCloudState = true;
     localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
     applyingCloudState = false;
-    await refreshLiveStateFromCloud({ renderWhenIdle: false });
+    await refreshLiveStateFromCloud({ renderWhenIdle: false, force: true });
     productionEditorSelectedIds = [];
     productionEditorDate = recordDate;
     productionEditorBatchDate = recordDate;
@@ -14507,7 +14525,7 @@ function renderHomeStorageUsage() {
       <div class="home-storage-head">
         <div class="home-storage-title">
           <span class="home-storage-mark" aria-hidden="true">DB</span>
-          <div><p>SUPABASE DATABASE</p><h3>พื้นที่จัดเก็บข้อมูล</h3><small>เทียบโควต้า 500 MB • อัปเดตอัตโนมัติทุก 30 วินาที</small></div>
+          <div><p>SUPABASE DATABASE</p><h3>พื้นที่จัดเก็บข้อมูล</h3><small>เทียบโควต้า 500 MB • โหมดประหยัด Bandwidth อัปเดตทุก 10 นาที</small></div>
         </div>
         <div class="home-storage-score"><strong>${homeStorageUsageLoading ? "..." : `${displayPercent}%`}</strong><span>${homeStorageUsageError ? "ยังอ่านข้อมูลไม่ได้" : statusText}</span></div>
       </div>
@@ -17937,16 +17955,15 @@ function bindInboundEvents(user, route) {
 window.addEventListener("hashchange", render);
 window.addEventListener("focus", () => {
   refreshOnlineUsers();
-  refreshLiveStateFromCloud();
+  refreshLiveStateFromCloud({ renderWhenIdle: true });
   window.SecretRoom?.refreshNotifications?.();
 });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     refreshOnlineUsers();
-    refreshLiveStateFromCloud();
+    refreshLiveStateFromCloud({ renderWhenIdle: true });
     window.SecretRoom?.refreshNotifications?.();
   }
 });
-window.setInterval(refreshLiveStateFromCloud, LIVE_STATE_REFRESH_INTERVAL_MS);
 startLiveClock();
 render();
