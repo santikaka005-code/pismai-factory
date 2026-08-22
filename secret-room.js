@@ -18,7 +18,8 @@ const SecretRoom = (() => {
     latestPostId: 0,
     lastReadPostId: 0,
     communityDraft: "",
-    messageDrafts: {}
+    messageDrafts: {},
+    messageAttachments: {}
   };
   const baseDocumentTitle = document.title.replace(/^\(\d+\+?\)\s*/, "");
 
@@ -42,6 +43,26 @@ const SecretRoom = (() => {
     return new Intl.DateTimeFormat("th-TH", {
       day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"
     }).format(date);
+  }
+
+  function formatFileSize(value) {
+    const bytes = Math.max(0, Number(value) || 0);
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function readMessageAttachment(file) {
+    return new Promise((resolve, reject) => {
+      if (!file) return resolve(null);
+      const allowedTypes = ["image/png", "image/jpeg", "image/webp", "application/pdf"];
+      if (!allowedTypes.includes(file.type)) return reject(new Error("รองรับเฉพาะไฟล์ PNG, JPG, WebP หรือ PDF"));
+      if (file.size > 5 * 1024 * 1024) return reject(new Error("ไฟล์แนบต้องมีขนาดไม่เกิน 5 MB"));
+      const reader = new FileReader();
+      reader.onload = () => resolve({ name: file.name, type: file.type, size: file.size, data: String(reader.result || "") });
+      reader.onerror = () => reject(new Error("ไม่สามารถอ่านไฟล์แนบได้"));
+      reader.readAsDataURL(file);
+    });
   }
 
   function unreadLabel(count) {
@@ -224,6 +245,7 @@ const SecretRoom = (() => {
     const active = state.activeUser;
     const draftKey = String(active?.username || "").toLowerCase();
     const messageDraft = state.messageDrafts[draftKey] || "";
+    const messageAttachment = state.messageAttachments[draftKey] || null;
     return `
       <div class="secret-chat-layout">
         <aside class="chat-list">
@@ -246,11 +268,21 @@ const SecretRoom = (() => {
             <div class="message-list" data-message-list>
               ${state.messages.length ? state.messages.map((message) => `
                 <div class="message-row ${message.is_mine ? "mine" : "theirs"}">
-                  <div class="message-bubble"><p>${escapeHtml(message.content).replace(/\n/g, "<br>")}</p><time>${escapeHtml(formatTime(message.created_at))}</time></div>
+                  <div class="message-bubble">
+                    ${message.content ? `<p>${escapeHtml(message.content).replace(/\n/g, "<br>")}</p>` : ""}
+                    ${message.attachment_url && String(message.attachment_type || "").startsWith("image/") ? `<a class="message-image-link" href="${escapeHtml(message.attachment_url)}" target="_blank" rel="noopener"><img class="message-attachment-image" src="${escapeHtml(message.attachment_url)}" alt="${escapeHtml(message.attachment_name || "รูปภาพแนบ")}" /></a>` : ""}
+                    ${message.attachment_url && message.attachment_type === "application/pdf" ? `<a class="message-file-card" href="${escapeHtml(message.attachment_url)}" target="_blank" rel="noopener"><strong>PDF</strong><span>${escapeHtml(message.attachment_name || "เอกสาร.pdf")}<small>${escapeHtml(formatFileSize(message.attachment_size))}</small></span></a>` : ""}
+                    ${message.attachment_name && !message.attachment_url ? `<span class="message-attachment-error">ไม่สามารถเปิดไฟล์แนบได้</span>` : ""}
+                    <time>${escapeHtml(formatTime(message.created_at))}</time>
+                  </div>
                 </div>`).join("") : `<div class="secret-empty"><strong>เริ่มบทสนทนา</strong><span>ข้อความนี้เห็นได้เฉพาะคุณและคู่สนทนา</span></div>`}
             </div>
             <form class="message-composer" data-message-form>
-              <textarea name="content" rows="1" maxlength="4000" placeholder="พิมพ์ข้อความ..." required>${escapeHtml(messageDraft)}</textarea>
+              <div class="message-compose-main">
+                <textarea name="content" rows="1" maxlength="3000" placeholder="พิมพ์ข้อความ...">${escapeHtml(messageDraft)}</textarea>
+                ${messageAttachment ? `<div class="message-attachment-preview"><span><strong>${escapeHtml(messageAttachment.name)}</strong><small>${escapeHtml(formatFileSize(messageAttachment.size))}</small></span><button type="button" data-remove-message-attachment aria-label="ลบไฟล์แนบ">×</button></div>` : ""}
+              </div>
+              <label class="message-attach-button" title="แนบรูปหรือ PDF"><input type="file" data-message-attachment accept="image/png,image/jpeg,image/webp,application/pdf" /><span aria-hidden="true">＋</span><b>แนบไฟล์</b></label>
               <button type="submit">ส่ง</button>
             </form>` : `<div class="chat-placeholder"><span class="chat-placeholder-icon">•••</span><strong>เลือกบทสนทนา</strong><p>เลือกจากประวัติด้านซ้าย หรือเริ่มแชทจากหน้าเพื่อนร่วมงาน</p></div>`}
         </section>
@@ -363,16 +395,40 @@ const SecretRoom = (() => {
       const draftKey = String(state.activeUser?.username || "").toLowerCase();
       if (draftKey) state.messageDrafts[draftKey] = event.currentTarget.value;
     });
+    document.querySelector("[data-message-attachment]")?.addEventListener("change", async (event) => {
+      const draftKey = String(state.activeUser?.username || "").toLowerCase();
+      try {
+        const attachment = await readMessageAttachment(event.currentTarget.files?.[0]);
+        if (draftKey && attachment) state.messageAttachments[draftKey] = attachment;
+        update();
+      } catch (error) {
+        event.currentTarget.value = "";
+        window.alert(error.message || "แนบไฟล์ไม่สำเร็จ");
+      }
+    });
+    document.querySelector("[data-remove-message-attachment]")?.addEventListener("click", () => {
+      const draftKey = String(state.activeUser?.username || "").toLowerCase();
+      if (draftKey) delete state.messageAttachments[draftKey];
+      update();
+    });
     document.querySelector("[data-message-form]")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
       const content = String(new FormData(form).get("content") || "").trim();
-      if (!content || !state.activeUser) return;
+      const draftKey = String(state.activeUser?.username || "").toLowerCase();
+      const attachment = state.messageAttachments[draftKey] || null;
+      if ((!content && !attachment) || !state.activeUser) return;
       const button = form.querySelector("button[type='submit']");
       button.disabled = true;
       try {
-        await api("/messages", { method: "POST", body: JSON.stringify({ recipient_username: state.activeUser.username, content }) });
-        delete state.messageDrafts[String(state.activeUser.username || "").toLowerCase()];
+        await api("/messages", { method: "POST", body: JSON.stringify({
+          recipient_username: state.activeUser.username,
+          content,
+          attachment_name: attachment?.name || "",
+          attachment_data: attachment?.data || ""
+        }) });
+        delete state.messageDrafts[draftKey];
+        delete state.messageAttachments[draftKey];
         form.reset();
         await openChat(state.activeUser.username);
         const chats = await api("/chats");

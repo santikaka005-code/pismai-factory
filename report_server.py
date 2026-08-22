@@ -113,6 +113,10 @@ MAIN_CLEAR_TABLES = [
     "time_save_queue",
 ]
 BACKUP_ARCHIVE_BUCKET = "pismai-backup-archives"
+SECRET_CHAT_ATTACHMENT_BUCKET = "secret-chat-attachments"
+SECRET_CHAT_ATTACHMENT_PREFIX = "__PISMAI_CHAT_ATTACHMENT_V1__"
+SECRET_CHAT_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+SECRET_CHAT_ATTACHMENT_TYPES = {"image/png", "image/jpeg", "image/webp", "application/pdf"}
 SUPABASE_FREE_DATABASE_BYTES = 500 * 1024 * 1024
 DATABASE_STORAGE_WARNING_PERCENT = 85
 LIVE_STATE_TABLES = {
@@ -2439,6 +2443,104 @@ def supabase_storage_request(
             return error.code, {"error": raw or str(error.reason)}
     except Exception as error:
         return 500, {"error": str(error)}
+
+
+def secret_chat_storage_request(
+    method: str,
+    endpoint: str,
+    content: bytes | None = None,
+    content_type: str = "application/json",
+    timeout_seconds: float = 30,
+) -> tuple[int, bytes | dict | str | None]:
+    if not supabase_configured():
+        return 503, {"error": "Supabase environment variables are not configured."}
+    url = f"{SUPABASE_URL}/storage/v1/{endpoint.lstrip('/')}"
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": content_type,
+    }
+    if method in {"POST", "PUT"} and endpoint.startswith("object/"):
+        headers["x-upsert"] = "false"
+    request = urllib.request.Request(url, data=content, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read()
+            if not raw:
+                return response.status, None
+            try:
+                return response.status, json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return response.status, raw
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8", errors="replace")
+        try:
+            return error.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return error.code, {"error": raw or str(error.reason)}
+    except Exception as error:
+        return 500, {"error": str(error)}
+
+
+def ensure_secret_chat_attachment_bucket() -> tuple[int, object]:
+    status, body = secret_chat_storage_request(
+        "POST",
+        "bucket",
+        json.dumps({"id": SECRET_CHAT_ATTACHMENT_BUCKET, "name": SECRET_CHAT_ATTACHMENT_BUCKET, "public": False}).encode("utf-8"),
+    )
+    if status < 400 or status == 409 or "already exists" in supabase_error_text(body).lower():
+        return 200, body
+    return status, body
+
+
+def parse_secret_chat_content(value: object) -> dict:
+    content = str(value or "")
+    if not content.startswith(SECRET_CHAT_ATTACHMENT_PREFIX):
+        return {"content": content}
+    try:
+        metadata = json.loads(content[len(SECRET_CHAT_ATTACHMENT_PREFIX):])
+    except (TypeError, json.JSONDecodeError):
+        return {"content": content}
+    if not isinstance(metadata, dict):
+        return {"content": content}
+    try:
+        attachment_size = max(0, int(metadata.get("size") or 0))
+    except (TypeError, ValueError):
+        attachment_size = 0
+    return {
+        "content": str(metadata.get("text") or ""),
+        "attachment_name": str(metadata.get("name") or "ไฟล์แนบ"),
+        "attachment_type": str(metadata.get("type") or "application/octet-stream"),
+        "attachment_size": attachment_size,
+        "attachment_path": str(metadata.get("path") or ""),
+    }
+
+
+def sign_secret_chat_attachment(path: str, expires_in: int = 3600) -> str:
+    if not path:
+        return ""
+    endpoint = f"object/sign/{SECRET_CHAT_ATTACHMENT_BUCKET}/{quote(path.strip('/'), safe='/')}"
+    status, body = secret_chat_storage_request(
+        "POST",
+        endpoint,
+        json.dumps({"expiresIn": expires_in}).encode("utf-8"),
+    )
+    if status >= 400 or not isinstance(body, dict):
+        return ""
+    signed_path = str(body.get("signedURL") or body.get("signedUrl") or "")
+    if not signed_path:
+        return ""
+    return signed_path if signed_path.startswith("http") else f"{SUPABASE_URL}/storage/v1{signed_path}"
+
+
+def secret_chat_message_to_client(message: dict) -> dict:
+    parsed = parse_secret_chat_content(message.get("content"))
+    result = {**message, **parsed}
+    attachment_path = str(parsed.get("attachment_path") or "")
+    if attachment_path:
+        result["attachment_url"] = sign_secret_chat_attachment(attachment_path)
+    result.pop("attachment_path", None)
+    return result
 
 
 def backup_snapshot_payload(scope: str, actor: str, data: dict) -> dict:
@@ -7508,11 +7610,13 @@ class ReportHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/secret-room/messages":
                 recipient = str(payload.get("recipient_username") or "").strip()
                 content = str(payload.get("content") or "").strip()
+                attachment_data = str(payload.get("attachment_data") or "").strip()
+                attachment_name = str(payload.get("attachment_name") or "").strip()
                 if not recipient or recipient.lower() == actor_username.lower():
                     self.send_json({"error": "Please choose another coworker."}, 400)
                     return
-                if not content or len(content) > 4000:
-                    self.send_json({"error": "Message must contain 1-4,000 characters."}, 400)
+                if (not content and not attachment_data) or len(content) > 3000:
+                    self.send_json({"error": "Message text must contain no more than 3,000 characters, or include an attachment."}, 400)
                     return
                 account_status, accounts = supabase_request(
                     "GET",
@@ -7524,12 +7628,59 @@ class ReportHandler(BaseHTTPRequestHandler):
                 if not isinstance(accounts, list) or not accounts:
                     self.send_json({"error": "Coworker account was not found."}, 404)
                     return
+                stored_attachment_path = ""
+                stored_content = content
+                if attachment_data:
+                    match = re.fullmatch(
+                        r"data:(image/(?:png|jpeg|webp)|application/pdf);base64,([A-Za-z0-9+/=]+)",
+                        attachment_data,
+                    )
+                    if not match or match.group(1) not in SECRET_CHAT_ATTACHMENT_TYPES:
+                        self.send_json({"error": "Only PNG, JPG, WebP, or PDF attachments are supported."}, 400)
+                        return
+                    try:
+                        attachment_bytes = base64.b64decode(match.group(2), validate=True)
+                    except (ValueError, TypeError):
+                        self.send_json({"error": "Attachment data is invalid."}, 400)
+                        return
+                    if not attachment_bytes or len(attachment_bytes) > SECRET_CHAT_ATTACHMENT_MAX_BYTES:
+                        self.send_json({"error": "Attachment must be no larger than 5 MB."}, 400)
+                        return
+                    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(attachment_name).name)[:120] or "attachment"
+                    stored_attachment_path = f"{actor_username.lower()}/{datetime.now(timezone.utc).strftime('%Y/%m')}/{secrets.token_urlsafe(18)}-{safe_name}"
+                    bucket_status, bucket_body = ensure_secret_chat_attachment_bucket()
+                    if bucket_status >= 400:
+                        self.send_json({"error": bucket_body}, bucket_status)
+                        return
+                    upload_status, upload_body = secret_chat_storage_request(
+                        "POST",
+                        f"object/{SECRET_CHAT_ATTACHMENT_BUCKET}/{quote(stored_attachment_path, safe='/')}",
+                        attachment_bytes,
+                        match.group(1),
+                    )
+                    if upload_status >= 400:
+                        self.send_json({"error": upload_body}, upload_status)
+                        return
+                    stored_content = SECRET_CHAT_ATTACHMENT_PREFIX + json.dumps({
+                        "text": content,
+                        "name": Path(attachment_name).name[:255] or safe_name,
+                        "type": match.group(1),
+                        "size": len(attachment_bytes),
+                        "path": stored_attachment_path,
+                    }, ensure_ascii=False, separators=(",", ":"))
+                if len(stored_content) > 4000:
+                    if stored_attachment_path:
+                        secret_chat_storage_request("DELETE", f"object/{SECRET_CHAT_ATTACHMENT_BUCKET}/{quote(stored_attachment_path, safe='/')}")
+                    self.send_json({"error": "Message and attachment metadata are too long."}, 400)
+                    return
                 status, body = supabase_request(
                     "POST",
                     "secret_messages",
-                    {"sender_username": actor_username, "recipient_username": recipient, "content": content},
+                    {"sender_username": actor_username, "recipient_username": recipient, "content": stored_content},
                     prefer="return=representation",
                 )
+                if status >= 400 and stored_attachment_path:
+                    secret_chat_storage_request("DELETE", f"object/{SECRET_CHAT_ATTACHMENT_BUCKET}/{quote(stored_attachment_path, safe='/')}")
                 self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
                 return
 
@@ -10192,7 +10343,10 @@ class ReportHandler(BaseHTTPRequestHandler):
                         self.send_json({"error": "with is required."}, 400)
                         return
                     selected = [
-                        {**message, "is_mine": str(message.get("sender_username", "")).lower() == actor_username.lower()}
+                        secret_chat_message_to_client({
+                            **message,
+                            "is_mine": str(message.get("sender_username", "")).lower() == actor_username.lower(),
+                        })
                         for message in messages
                         if {str(message.get("sender_username", "")).lower(), str(message.get("recipient_username", "")).lower()}
                         == {actor_username.lower(), peer.lower()}
@@ -10227,6 +10381,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                         }
                     ]
                     last = peer_messages[-1] if peer_messages else {}
+                    last_content = parse_secret_chat_content(last.get("content"))
                     unread = sum(
                         1 for message in peer_messages
                         if str(message.get("recipient_username", "")).lower() == actor_username.lower()
@@ -10236,7 +10391,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                     chats.append({
                         "username": peer,
                         "fullname": account.get("fullname") or peer,
-                        "last_message": last.get("content") or "",
+                        "last_message": last_content.get("content") or (f"📎 {last_content.get('attachment_name')}" if last_content.get("attachment_name") else ""),
                         "last_message_at": last.get("created_at"),
                         "unread_count": unread,
                         "is_online": peer.lower() in online_names,
