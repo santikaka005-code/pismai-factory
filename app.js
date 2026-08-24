@@ -2388,6 +2388,11 @@ async function loginWithCloud(username, password) {
   return normalizeCloudAccountUser({ ...(data.user || {}), auth_token: data.token || "" });
 }
 
+function cloudQuotaErrorMessage(error) {
+  if (Number(error?.status) !== 402) return "";
+  return "Supabase ใช้โควต้า Bandwidth หมดแล้ว ระบบ Cloud ถูกจำกัดชั่วคราว จึงยังเข้าสู่ระบบไม่ได้ กรุณาอัปเกรด Supabase Pro หรือรอ quota reset รอบถัดไป";
+}
+
 async function syncAccountsToCloud(accounts = getAccountUsers()) {
   const syncableAccounts = accounts.filter((accountUser) => {
     return accountUser.username && accountUser.password && !accountUser.is_system;
@@ -5230,6 +5235,11 @@ async function handleLogin(event) {
     }
     return;
   } catch (cloudError) {
+    const quotaMessage = cloudQuotaErrorMessage(cloudError);
+    if (quotaMessage) {
+      renderLogin(quotaMessage);
+      return;
+    }
     if (cloudError?.status && [401, 403, 404].includes(cloudError.status)) {
       renderLogin(cloudError.message || "ไม่พบบัญชีนี้ในฐานข้อมูลกลาง");
       return;
