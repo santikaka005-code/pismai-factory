@@ -38,6 +38,7 @@ create table if not exists public.time_employees (
   emp_code text not null unique,
   fullname text not null,
   employee_type text not null default 'normal_347',
+  recruitment_group text check (recruitment_group in ('factory', 'champ')),
   daily_wage numeric(12,2) not null default 347,
   ot_hourly_rate numeric(12,2) not null default 50,
   status text not null default 'Active',
@@ -235,6 +236,58 @@ create trigger trg_deduction_records_updated_at
 before update on public.deduction_records
 for each row execute function public.set_updated_at();
 
+-- Imported rows can leave the generated-ID counter behind existing IDs.
+-- Keep the counter repair and the original legacy backfill in one statement so
+-- all locks remain held, including when this file is run with autocommit.
+do $deduction_application_legacy_backfill$
+declare
+  sequence_name text;
+  sequence_increment bigint;
+  sequence_cache bigint;
+  sequence_max bigint;
+  sequence_cycles boolean;
+  sequence_last bigint;
+  sequence_called boolean;
+  maximum_id bigint;
+  current_next numeric;
+  required_next numeric;
+begin
+  perform set_config('lock_timeout', '15s', true);
+
+  -- Match apply_deduction_batch's record-before-application lock order.
+  lock table public.deduction_records in access exclusive mode;
+  lock table public.deduction_applications in access exclusive mode;
+  sequence_name := pg_get_serial_sequence('public.deduction_applications', 'id');
+  if sequence_name is null then
+    raise exception 'deduction_applications.id has no owned sequence; backfill cancelled';
+  end if;
+
+  select seqincrement, seqcache, seqmax, seqcycle
+  into sequence_increment, sequence_cache, sequence_max, sequence_cycles
+  from pg_sequence
+  where seqrelid = sequence_name::regclass;
+  if sequence_increment is null or sequence_increment <= 0 or sequence_cycles then
+    raise exception 'Expected a positive, non-cycling deduction application ID sequence; backfill cancelled';
+  end if;
+
+  -- A no-op CACHE alteration locks the sequence without resetting its state.
+  execute format('alter sequence %s cache %s', sequence_name, sequence_cache);
+  execute format('select last_value, is_called from %s', sequence_name)
+    into sequence_last, sequence_called;
+  select max(id) into maximum_id from public.deduction_applications;
+
+  if maximum_id is not null then
+    current_next := sequence_last::numeric
+      + case when sequence_called then sequence_increment else 0 end;
+    required_next := greatest(maximum_id::numeric + sequence_increment, current_next);
+    if required_next > sequence_max then
+      raise exception 'Deduction application ID sequence is exhausted; backfill cancelled';
+    end if;
+    -- Restart even when ahead to discard IDs cached by other connections.
+    -- Unlike setval, RESTART rolls back if this backfill fails.
+    execute format('alter sequence %s restart with %s', sequence_name, required_next);
+  end if;
+
 insert into public.deduction_applications (
   deduction_id, employee_kind, employee_id, emp_code, employee_name,
   applied_date, amount, note, created_by
@@ -258,6 +311,8 @@ where d.deduction_type <> 'attendance_bonus'
     select 1 from public.deduction_applications a
     where a.deduction_id = d.id and a.status = 'Applied'
   );
+end;
+$deduction_application_legacy_backfill$;
 
 create or replace function public.apply_deduction_batch(
   p_applied_date date,
@@ -332,4 +387,7 @@ grant select, insert, update, delete on public.deduction_records to service_role
 grant usage, select on sequence public.deduction_records_id_seq to service_role;
 grant select, insert, update, delete on public.deduction_applications to service_role;
 grant usage, select on sequence public.deduction_applications_id_seq to service_role;
+-- Only the web server may invoke this SECURITY DEFINER mutation. Session and
+-- employee-level permission checks run there before it uses the service role.
+revoke execute on function public.apply_deduction_batch(date, text, jsonb) from public, anon, authenticated;
 grant execute on function public.apply_deduction_batch(date, text, jsonb) to service_role;

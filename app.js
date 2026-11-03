@@ -1,34 +1,40 @@
-﻿const SESSION_KEY = "pismai_factory_session";
+const SESSION_KEY = "pismai_factory_session";
 const EMPLOYEES_KEY = "pismai_factory_employees";
 const TIME_EMPLOYEES_KEY = "pismai_factory_time_employees";
 const WAGE_RATES_KEY = "pismai_factory_wage_rates";
 const PRODUCTION_RECORDS_KEY = "pismai_factory_production_records";
+const PRODUCTION_INDEXED_DB_NAME = "pismai_factory_production_v1";
+const PRODUCTION_INDEXED_DB_VERSION = 1;
+const PRODUCTION_CACHE_REVISION = "recovery-sync-2026-09-18";
 const PRODUCTION_SESSIONS_KEY = "pismai_factory_production_sessions";
 const TIME_RECORDS_KEY = "pismai_factory_time_records";
+const TIME_SYNC_CURSOR_KEY = "pismai_factory_time_sync_cursor";
 const DEDUCTION_RECORDS_KEY = "pismai_factory_deduction_records";
 const AUDIT_LOG_KEY = "pismai_factory_audit_log";
+const AUDIT_SYNC_CURSOR_KEY = "pismai_factory_audit_sync_cursor";
 const CLOUD_MIGRATION_KEY = "pismai_factory_cloud_migration_v2";
 const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
 const WITHHOLDING_TAX_GROUPS_KEY = "pismai_factory_withholding_tax_groups";
+const FRUIT_PILES_KEY = "pismai_factory_fruit_piles";
 const AUDIT_LOG_PASSWORD = "1150";
 const ONLINE_CLIENT_KEY = "pismai_online_client_id";
 const ONLINE_HEARTBEAT_INTERVAL_MS = 60000;
 const HOME_STORAGE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
-const LIVE_STATE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const LIVE_STATE_REFRESH_INTERVAL_MS = 60 * 1000;
 const AUDIT_LOG_SYNC_DELAY_MS = 8000;
 const CLOUD_SAVE_TIMEOUT_MS = 15000;
 const CLOUD_SAVE_RETRY_DELAY_MS = 600;
 const PRODUCTION_QUEUE_ACCEPT_TIMEOUT_MS = 5000;
 const PRODUCTION_QUEUE_PRIMARY_TIMEOUT_MS = 3500;
 const PRODUCTION_QUEUE_POLL_INTERVAL_MS = 1200;
-const TIME_QUEUE_ACCEPT_TIMEOUT_MS = 5000;
-const TIME_QUEUE_PRIMARY_TIMEOUT_MS = 3500;
+const TIME_QUEUE_ACCEPT_TIMEOUT_MS = 3000;
+const TIME_QUEUE_PRIMARY_TIMEOUT_MS = 2000;
 const TIME_QUEUE_POLL_INTERVAL_MS = 1000;
 const REPORT_API_BASE =
   // The desktop launcher opens index.html directly. It must use the same
   // cloud API as the hosted app, otherwise its browser-only data can never
   // reach iPad or other devices.
-  location.protocol === "file:" ? "https://pismai-factory-test.onrender.com" : location.origin;
+  location.protocol === "file:" ? "https://pf-systempro-factory.onrender.com" : location.origin;
 let onlineUserCount = 0;
 let onlineHeartbeatTimer = null;
 const TIME_DAILY_WAGE = 347;
@@ -36,11 +42,22 @@ const TIME_SPECIAL_DAILY_WAGE = 365;
 const TIME_STANDARD_HOURS = 8;
 const TIME_NORMAL_HOURLY_RATE = TIME_DAILY_WAGE / TIME_STANDARD_HOURS;
 const TIME_OT_HOURLY_RATE = 50;
+const timeRecruitmentGroupOptions = [
+  { id: "factory", label: "กลุ่มโรงงาน" },
+  { id: "champ", label: "กลุ่มแชมป์" }
+];
+
+function normalizeTimeRecruitmentGroup(value) {
+  return timeRecruitmentGroupOptions.some((option) => option.id === value) ? value : null;
+}
+
 const timeEmployeeTypeOptions = [
   { id: "normal_347", label: "กลุ่มปกติ - 347 บาท/วัน", shortLabel: "กลุ่มปกติ-347", category: "normal", dailyWage: 347 },
   { id: "special_365", label: "กลุ่มพิเศษ - 365 บาท/วัน", shortLabel: "กลุ่มพิเศษ-365", category: "special", dailyWage: 365 },
   { id: "special_347", label: "กลุ่มพิเศษ - 347 บาท/วัน", shortLabel: "กลุ่มพิเศษ-347", category: "special", dailyWage: 347 },
-  { id: "special_500", label: "กลุ่มพิเศษ - 500 บาท/วัน", shortLabel: "กลุ่มพิเศษ-500", category: "special", dailyWage: 500 }
+  { id: "special_500", label: "กลุ่มพิเศษ - 500 บาท/วัน", shortLabel: "กลุ่มพิเศษ-500", category: "special", dailyWage: 500 },
+  { id: "education_347", label: "กลุ่ม Education - 347 บาท/วัน", shortLabel: "Education-347", category: "special", dailyWage: 347 },
+  { id: "office_347", label: "กลุ่ม Office", shortLabel: "Office", category: "office", dailyWage: 0 }
 ];
 const TIME_SPECIAL_WAGE_TABLE = {
   2: 91,
@@ -64,9 +81,19 @@ const deductionTypeOptions = [
   { id: "advance", label: "ค่าเบิกเงินล่วงหน้า" },
   { id: "social_security", label: "ค่าประกันสังคม" },
   { id: "tax", label: "ค่าภาษี" },
-  { id: "room", label: "ค่าห้องพัก" }
+  { id: "room", label: "ค่าห้องพัก" },
+  { id: "other", label: "อื่นๆ" }
 ];
 const ATTENDANCE_BONUS_TYPE = "attendance_bonus";
+const DAILY_OT_OVERRIDE_TYPE = "daily_ot_override";
+const defaultFruitPiles = [
+  { number: 1, name: "กอง 1", color: "#1d4ed8", visible: true },
+  { number: 2, name: "กอง 2", color: "#dc2626", visible: true },
+  { number: 3, name: "กอง 3", color: "#111111", visible: true },
+  { number: 4, name: "กอง 4", color: "#7e22ce", visible: true },
+  { number: 5, name: "กอง 5", color: "#15803d", visible: true },
+  { number: 6, name: "กอง 6", color: "#92400e", visible: true }
+];
 
 const users = [
   {
@@ -238,10 +265,46 @@ modules.splice(
   },
   {
     id: "inbound",
-    label: "รับเข้า",
+    label: "Stock ผลไม้",
     roles: ["admin", "hr", "operator", "supervisor"],
     description: "บันทึกรับซื้อผลไม้และต้นทุนจริงรายรายการ",
-    icon: "⇩"
+    icon: "⇩",
+    hidden: true
+  },
+  {
+    id: "stock",
+    label: "Stock",
+    roles: ["admin", "hr", "operator", "supervisor"],
+    description: "Stock ผลไม้ ห้องเย็น บรรจุภัณฑ์ เบ็ดเตล็ด และสำนักงาน",
+    icon: "▦"
+  },
+  {
+    id: "stock-cold-room",
+    label: "Stock ห้องเย็น",
+    roles: ["admin", "hr", "operator", "supervisor"],
+    description: "สินค้าแปรรูป พาเลต กล่อง และสินค้าฝากแช่ในห้องเย็น",
+    hidden: true
+  },
+  {
+    id: "stock-packaging",
+    label: "Stock บรรจุภัณฑ์",
+    roles: ["admin", "hr", "operator", "supervisor"],
+    description: "รับเข้าและเบิกบรรจุภัณฑ์ พร้อมขนาด ราคา และเลขใบส่งของ",
+    hidden: true
+  },
+  {
+    id: "stock-supplies",
+    label: "Stock เบ็ดเตล็ด",
+    roles: ["admin", "hr", "operator", "supervisor"],
+    description: "รับเข้าและเบิกของใช้โรงงาน ถุงมือ น้ำยา และสารเคมี",
+    hidden: true
+  },
+  {
+    id: "stock-office",
+    label: "Stock สำนักงาน",
+    roles: ["admin", "hr", "operator", "supervisor"],
+    description: "รับเข้าและเบิกวัสดุสำนักงาน หมึก และอุปกรณ์ Office",
+    hidden: true
   },
   {
     id: "inbound-fruits",
@@ -311,7 +374,8 @@ modules.splice(
     label: "บันทึกหักเงิน/เบี้ยขยัน",
     roles: ["admin", "hr"],
     description: "บันทึกรายการหักเงินและเบี้ยขยันสำหรับพนักงานเหมาน้ำหนักและพนักงานเหมาเวลา",
-    icon: "−"
+    icon: "−",
+    hidden: true
   },
   {
     id: "employees",
@@ -347,7 +411,7 @@ modules.splice(
   },
   {
     id: "settings-pile-summary",
-    label: "สรุปตามกอง",
+    label: "กองผลไม้",
     roles: ["admin"],
     description: "ตรวจสอบน้ำหนักและยอดเงินแยกตามกอง พร้อม Export PDF และ Excel",
     icon: "▦",
@@ -416,6 +480,13 @@ modules.splice(
     roles: ["admin"],
     description: "Local data backup tools.",
     hidden: true
+  },
+  {
+    id: "pf-desktop-app",
+    label: "PF DesktopApp",
+    roles: ["admin"],
+    description: "รับข้อมูลชั่งจาก Desktop app และส่งข้อมูลหลักกลับไปใช้งาน",
+    hidden: true
   }
 );
 
@@ -435,7 +506,8 @@ const adminSettingsModuleIds = new Set([
   "settings-pile-summary",
   "account-management",
   "audit-log",
-  "backup"
+  "backup",
+  "pf-desktop-app"
 ]);
 
 modules.forEach((moduleItem) => {
@@ -445,12 +517,20 @@ modules.forEach((moduleItem) => {
 });
 
 const levelRouteAccess = {
-  C1: ["dashboard", "production", "secret-room", "record-report"],
-  C2: ["dashboard", "production", "summary-person", "secret-room", "record-report"],
-  C3: ["dashboard", "production", "summary-all", "summary-main", "compare-data", "time-report", "secret-room", "record-report"],
+  C1: ["dashboard", "production"],
+  C2: ["dashboard", "production"],
+  C3: ["dashboard", "production", "secret-room", "record-report"],
   C4: [
     "dashboard",
     "production",
+    "stock",
+    "stock-cold-room",
+    "stock-packaging",
+    "stock-supplies",
+    "stock-office",
+    "inbound",
+    "inbound-fruits",
+    "inbound-history",
     "summary-all",
     "summary-main",
     "summary-export",
@@ -467,10 +547,12 @@ const levelRouteAccess = {
     "wage-rates",
     "settings-pile-summary",
     "accounting-control",
+    "pf-desktop-app",
+    "pile-management",
     "secret-room",
     "record-report"
   ],
-  C5: modules.map((item) => item.id).filter((id) => id !== "audit-log"),
+  C5: modules.map((item) => item.id).filter((id) => id !== "backup"),
   C6: modules.map((item) => item.id),
   C7: modules.map((item) => item.id)
 };
@@ -547,10 +629,12 @@ const productionRows = [];
 const app = document.querySelector("#app");
 let employeeSearch = "";
 let editingEmployeeId = null;
+let employeePageMode = "list";
 let employeeMessage = "";
 let employeeMessageType = "success";
 let timeEmployeeSearch = "";
 let editingTimeEmployeeId = null;
+let timeEmployeePageMode = "list";
 let timeEmployeeMessage = "";
 let timeEmployeeMessageType = "success";
 let accountSearch = "";
@@ -560,6 +644,10 @@ let accountMessage = "";
 let accountMessageType = "success";
 let backupMessage = "";
 let backupMessageType = "success";
+let desktopImportPreview = null;
+let desktopImportMessage = "";
+let desktopImportMessageType = "success";
+let desktopImportBusy = false;
 let backupUnlocked = false;
 let backupAccessCode = "";
 let backupActiveTab = "backup";
@@ -593,14 +681,16 @@ let homeStorageUsageError = "";
 let homeStorageUsageTimer = null;
 let homeStorageUsageSetupMissing = false;
 let wageRateFilter = "all";
-let currentRateDate = new Date().toISOString().slice(0, 10);
+let currentRateDate = localDateInputValue();
 let editingWageRateId = null;
 let pileManagementMessage = "";
 let pileManagementMessageType = "success";
-let settingsPileSummaryDate = new Date().toISOString().slice(0, 10);
+let settingsPileSummaryDate = localDateInputValue();
 let settingsPileSummaryFruit = "all";
 let settingsPileSummaryMessage = "";
 let settingsPileSummaryMessageType = "success";
+let editingFruitPileNumber = null;
+let fruitPileFormOpen = false;
 let summaryDate = "";
 let summaryExportStartDate = "";
 let summaryExportEndDate = "";
@@ -645,14 +735,14 @@ let summaryExportFields = {
 let summaryExportMessage = "";
 let summaryExportMessageType = "success";
 let summaryMainExportMenuOpen = false;
-let summaryReportExportStartDate = new Date().toISOString().slice(0, 10);
-let summaryReportExportEndDate = new Date().toISOString().slice(0, 10);
+let summaryReportExportStartDate = localDateInputValue();
+let summaryReportExportEndDate = localDateInputValue();
 let summaryReportExportProduct = "all";
 let summaryReportExportProductType = "ทั้งหมด";
 let summaryReportExportMessage = "";
 let summaryReportExportMessageType = "success";
-let groupReportStartDate = new Date().toISOString().slice(0, 10);
-let groupReportEndDate = new Date().toISOString().slice(0, 10);
+let groupReportStartDate = localDateInputValue();
+let groupReportEndDate = localDateInputValue();
 let groupReportMode = "production";
 let groupReportGroup = "all";
 let groupReportFruit = "all";
@@ -666,30 +756,29 @@ let groupReportExportOptions = {
   employees: true,
   details: false
 };
-let reportDate = new Date().toISOString().slice(0, 10);
+let reportDate = localDateInputValue();
 let selectedReportEmployeeIds = [];
 let reportMessage = "";
 let reportMessageType = "success";
 let personalReportEmployeeId = "";
-let personalReportStartDate = new Date().toISOString().slice(0, 10);
-let personalReportEndDate = new Date().toISOString().slice(0, 10);
+let personalReportStartDate = localDateInputValue();
+let personalReportEndDate = localDateInputValue();
 let personalReportMessage = "";
 let personalReportMessageType = "success";
 let personalReportActiveTab = "production";
 let personalReportExportMenuOpen = false;
 let personalReportFruitFilter = "mangosteen";
-let timeRecordDate = new Date().toISOString().slice(0, 10);
-let timeSummaryStartDate = new Date().toISOString().slice(0, 10);
-let timeSummaryEndDate = new Date().toISOString().slice(0, 10);
+let timeRecordDate = localDateInputValue();
+let timeSummaryStartDate = localDateInputValue();
+let timeSummaryEndDate = localDateInputValue();
 let timeSummaryDepartment = "all";
 let timeSummaryMessage = "";
 let timeSummaryMessageType = "success";
 let timeSummaryExportMenuOpen = false;
-let timeEntryMode = "daily";
+let timeEntryMode = "weekly";
 let timeView = "entry";
 let timeRecordMessage = "";
 let timeRecordMessageType = "success";
-let timeEntryEmployeeCode = "";
 let weeklyTimeEmployeeCode = "";
 let weeklyTimeDraft = Array.from({ length: 7 }, () => ({ clock_in: "", clock_out: "" }));
 let editingTimeRecordId = null;
@@ -708,15 +797,15 @@ let deductionApprovalEmployeeKind = "production";
 let deductionApprovalView = "pending";
 let deductionApplications = [];
 let editingApprovedDeductionApplicationId = null;
-let deductionStartDate = new Date().toISOString().slice(0, 10);
-let deductionEndDate = new Date().toISOString().slice(0, 10);
+let deductionStartDate = localDateInputValue();
+let deductionEndDate = localDateInputValue();
 let deductionEmployeeId = "";
 let deductionMessage = "";
 let deductionMessageType = "success";
 let editingDeductionId = null;
 let productionView = "fast-entry";
 let selectedProductionFruit = "";
-let productionRecordDate = new Date().toISOString().slice(0, 10);
+let productionRecordDate = localDateInputValue();
 let productionMessage = "";
 let productionMessageType = "success";
 let productionSaving = false;
@@ -729,9 +818,12 @@ let productionQueueSearch = "";
 let productionQueuePage = 1;
 let productionQueuePollTimer = null;
 let productionQueueActionId = null;
+let productionRecordsMemory = null;
+let productionSyncCursor = "";
 const productionQueueTrackers = new Map();
 let productionEditorOpen = false;
-let productionEditorDate = new Date().toISOString().slice(0, 10);
+let productionFruitCreatorOpen = false;
+let productionEditorDate = localDateInputValue();
 let productionEditorFruit = "mangosteen";
 let productionEditorEmployeeSearch = "";
 let productionEditorSelectedIds = [];
@@ -760,7 +852,7 @@ let lastLiveStateFullRefreshAt = 0;
 let lastRenderedRoute = "";
 let batchEntryText = "";
 const DURIAN_GRADES = ["A", "B", "C", "D", "E"];
-const BATCH_WEIGHT_INPUT_COUNT = 40;
+const BATCH_WEIGHT_INPUT_COUNT = 60;
 let batchGridState = {
   emp_code: "",
   employee: null,
@@ -806,14 +898,26 @@ const productionFruitOptions = [
     description: "ใช้หน้าบันทึกผลผลิตสำหรับมะม่วงฝาและมะม่วงหั่นเต๋า"
   },
   {
+    id: "pomelo",
+    label: "ส้มโอ",
+    status: "พร้อมใช้งาน",
+    description: "บันทึกน้ำหนักส้มโอรวมแบบน้ำหนักเดียวและแยกกอง"
+  },
+  {
     id: "coconut",
     label: "มะพร้าว",
-    status: "เตรียมไว้ก่อน",
-    description: "พื้นที่สำหรับฟอร์มบันทึกข้อมูลมะพร้าว"
+    status: "พร้อมใช้งาน",
+    description: "บันทึกน้ำหนักมะพร้าวแบบน้ำหนักเดียวและแยกกอง"
   }
 ];
 
 const productionFruitFieldLabels = {
+  coconut: {
+    mode: "single",
+    weight: "น้ำหนักมะพร้าว",
+    weightShort: "มะพร้าว",
+    description: "กรอกกอง รหัสพนักงาน และน้ำหนักมะพร้าว"
+  },
   mangosteen: {
     water: "น้ำหนักน้ำ",
     flower: "น้ำหนักดอก",
@@ -827,6 +931,12 @@ const productionFruitFieldLabels = {
     weightShort: "ทุเรียน",
     description: "กรอกกอง รหัสพนักงาน และน้ำหนักทุเรียน"
   },
+  pomelo: {
+    mode: "single",
+    weight: "น้ำหนักส้มโอ",
+    weightShort: "ส้มโอ",
+    description: "กรอกกอง รหัสพนักงาน และน้ำหนักส้มโอ"
+  },
   mango: {
     water: "มะม่วงฝา",
     flower: "มะม่วงหั่นเต๋า",
@@ -835,6 +945,53 @@ const productionFruitFieldLabels = {
     description: "กรอกกอง รหัสพนักงาน มะม่วงฝา และมะม่วงหั่นเต๋าสำหรับงานมะม่วง"
   }
 };
+
+const CUSTOM_PRODUCTION_FRUITS_KEY = "pf_custom_production_fruits_v1";
+
+function registerCustomProductionFruit(config) {
+  if (!config?.id || !config?.label || productionFruitFieldLabels[config.id]) return;
+  const single = config.mode === "single";
+  productionFruitOptions.push({
+    id: config.id,
+    label: config.label,
+    status: "พร้อมใช้งาน",
+    description: single
+      ? `บันทึก${config.weight || `น้ำหนัก${config.label}`}แบบน้ำหนักเดียวและแยกกอง`
+      : `บันทึก${config.water || "ประเภท 1"}และ${config.flower || "ประเภท 2"}แยกกอง`
+  });
+  productionFruitFieldLabels[config.id] = single
+    ? {
+        mode: "single",
+        weight: config.weight || `น้ำหนัก${config.label}`,
+        weightShort: config.label,
+        description: `กรอกกอง รหัสพนักงาน และ${config.weight || `น้ำหนัก${config.label}`}`
+      }
+    : {
+        water: config.water || "น้ำหนักประเภท 1",
+        flower: config.flower || "น้ำหนักประเภท 2",
+        waterShort: config.water || "ประเภท 1",
+        flowerShort: config.flower || "ประเภท 2",
+        description: `กรอกกอง รหัสพนักงาน ${config.water || "ประเภท 1"} และ${config.flower || "ประเภท 2"}`
+      };
+}
+
+function loadCustomProductionFruits() {
+  try {
+    const configs = JSON.parse(localStorage.getItem(CUSTOM_PRODUCTION_FRUITS_KEY) || "[]");
+    if (Array.isArray(configs)) configs.forEach(registerCustomProductionFruit);
+  } catch (_) {
+    localStorage.removeItem(CUSTOM_PRODUCTION_FRUITS_KEY);
+  }
+}
+
+function saveCustomProductionFruit(config) {
+  const configs = JSON.parse(localStorage.getItem(CUSTOM_PRODUCTION_FRUITS_KEY) || "[]");
+  configs.push(config);
+  localStorage.setItem(CUSTOM_PRODUCTION_FRUITS_KEY, JSON.stringify(configs));
+  registerCustomProductionFruit(config);
+}
+
+loadCustomProductionFruits();
 
 function wageRateItemTypeForFruitField(fruitId, fieldKey) {
   const normalizedFruitId = fruitId || "mangosteen";
@@ -850,7 +1007,7 @@ function getWageRateTypeOptions() {
       if (labels.mode === "single") {
         return [{
           value: wageRateItemTypeForFruitField(fruit.id, "weight"),
-          label: `${fruit.label} - น้ำหนักทุเรียน`,
+          label: `${fruit.label} - ${labels.weight}`,
           fruitId: fruit.id,
           fieldKey: "weight"
         }];
@@ -877,7 +1034,7 @@ function wageRateTypeLabel(itemType) {
 }
 
 function productionFruitTypeForRecord(record) {
-  return record.fruit_type || "mangosteen";
+  return record?.fruit_type || "mangosteen";
 }
 
 function filterProductionRecordsByFruit(records, fruitId = "all") {
@@ -936,6 +1093,10 @@ function isDurianFruit(fruitId = getSelectedProductionFruitId()) {
   return fruitId === "durian";
 }
 
+function isSingleWeightFruit(fruitId = getSelectedProductionFruitId()) {
+  return getProductionFieldLabels(fruitId).mode === "single";
+}
+
 function getRecordGradeWeights(record) {
   if (record?.grades && typeof record.grades === "object") {
     return normalizeDurianGradeWeights(record.grades);
@@ -951,7 +1112,7 @@ function getDurianGradeTotal(value) {
 }
 
 function getRecordDurianWeight(record) {
-  if (!isDurianFruit(productionFruitTypeForRecord(record))) return 0;
+  if (!isSingleWeightFruit(productionFruitTypeForRecord(record))) return 0;
   const directWeight = Number(record?.durian_weight);
   if (Number.isFinite(directWeight) && directWeight > 0) return directWeight;
   const totalWeight = Number(record?.total_weight);
@@ -960,7 +1121,7 @@ function getRecordDurianWeight(record) {
 }
 
 function getRecordTotalWeight(record) {
-  if (isDurianFruit(productionFruitTypeForRecord(record))) return getRecordDurianWeight(record);
+  if (isSingleWeightFruit(productionFruitTypeForRecord(record))) return getRecordDurianWeight(record);
   return Number(record.water_weight || record.water || 0) + Number(record.flower_weight || record.flower || 0);
 }
 
@@ -1028,8 +1189,158 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function localDateInputValue(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function normalizeFruitPile(pile) {
+  const number = Number(pile?.number);
+  if (!Number.isInteger(number) || number < 1 || number > 99) return null;
+  const fallback = defaultFruitPiles.find((item) => item.number === number);
+  const color = /^#[0-9a-f]{6}$/i.test(String(pile?.color || ""))
+    ? String(pile.color).toLowerCase()
+    : fallback?.color || "#0f766e";
+  return {
+    number,
+    name: String(pile?.name || fallback?.name || `กอง ${number}`).trim().slice(0, 40) || `กอง ${number}`,
+    color,
+    visible: pile?.visible !== false
+  };
+}
+
+function getFruitPiles() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FRUIT_PILES_KEY) || "null");
+    if (!Array.isArray(parsed)) return defaultFruitPiles.map((pile) => ({ ...pile }));
+    return parsed.map(normalizeFruitPile).filter(Boolean).sort((a, b) => a.number - b.number);
+  } catch (_error) {
+    return defaultFruitPiles.map((pile) => ({ ...pile }));
+  }
+}
+
+function saveFruitPiles(piles) {
+  const normalized = (piles || []).map(normalizeFruitPile).filter(Boolean).sort((a, b) => a.number - b.number);
+  localStorage.setItem(FRUIT_PILES_KEY, JSON.stringify(normalized));
+}
+
+let fruitPileRefreshAt = 0;
+let fruitPileSyncBusy = false;
+const FRUIT_PILES_MIGRATED_KEY = "pismai_fruit_piles_shared_v1";
+const FRUIT_PILES_LEGACY_KEY = "pismai_fruit_piles_before_shared_v1";
+
+function applySharedFruitPiles(data) {
+  if (!Array.isArray(data?.piles)) return;
+  if (!localStorage.getItem(FRUIT_PILES_MIGRATED_KEY) && !localStorage.getItem(FRUIT_PILES_LEGACY_KEY)) {
+    const legacy = localStorage.getItem(FRUIT_PILES_KEY);
+    if (legacy) localStorage.setItem(FRUIT_PILES_LEGACY_KEY, legacy);
+  }
+  saveFruitPiles(data.piles);
+  // Replace only selector options so active weight inputs and cursor survive.
+  for (const [id, state, field] of [
+    ["fastPileNo", fastInputState, "pile_no"],
+    ["batchFlowerPile", batchGridState, "flower_pile_no"],
+    ["batchWaterPile", batchGridState, "water_pile_no"],
+    ["batchDurianPile", batchGridState, "durian_pile_no"]
+  ]) {
+    const select = document.getElementById(id);
+    if (!select) continue;
+    state[field] = effectiveVisibleFruitPileNumber(state[field]);
+    select.innerHTML = fruitPileOptionMarkup(state[field]);
+    applyProductionPileTone(select.closest(".batch-side, form") || select, state[field]);
+  }
+}
+
+async function migrateLocalFruitPiles() {
+  if (localStorage.getItem(FRUIT_PILES_MIGRATED_KEY) || !canManageAllProductionRecords(getSession()?.user)) return;
+  const legacy = localStorage.getItem(FRUIT_PILES_LEGACY_KEY) || localStorage.getItem(FRUIT_PILES_KEY);
+  if (legacy) {
+    const response = await cloudApiRequest("/api/fruit-piles", {
+      method: "POST", body: JSON.stringify({action: "migrate", piles: JSON.parse(legacy)})
+    });
+    if (!Array.isArray(response.data?.piles)) throw new Error("ยังย้ายรายการกองขึ้นฐานกลางไม่สำเร็จ");
+  }
+  localStorage.setItem(FRUIT_PILES_MIGRATED_KEY, "1");
+}
+
+async function refreshSharedFruitPiles() {
+  if (!getSession() || fruitPileSyncBusy || Date.now() - fruitPileRefreshAt < 60000) return;
+  fruitPileSyncBusy = true;
+  try {
+    await migrateLocalFruitPiles();
+    const response = await cloudApiRequest("/api/fruit-piles");
+    const before = JSON.stringify(getFruitPiles());
+    applySharedFruitPiles(response.data);
+    fruitPileRefreshAt = Date.now();
+    if (before !== JSON.stringify(getFruitPiles()) && location.hash === "#/settings-pile-summary" && !isEditingFormField()) render();
+  } catch (error) {
+    console.warn("Fruit pile sync failed", error);
+  } finally { fruitPileSyncBusy = false; }
+}
+
+async function saveSharedFruitPiles(next) {
+  if (fruitPileSyncBusy) {
+    settingsPileSummaryMessage = "กำลังซิงก์รายการกอง กรุณาลองอีกครั้ง";
+    settingsPileSummaryMessageType = "error";
+    render();
+    return false;
+  }
+  fruitPileSyncBusy = true;
+  try {
+    const previous = getFruitPiles();
+    await migrateLocalFruitPiles();
+    const response = await cloudApiRequest("/api/fruit-piles", {
+      method: "POST", body: JSON.stringify({action: "update",
+        piles: next.filter(p => JSON.stringify(previous.find(old => old.number === p.number)) !== JSON.stringify(p)),
+        deleted: previous.filter(p => !next.some(n => n.number === p.number)).map(p => p.number)
+      })
+    });
+    if (!Array.isArray(response.data?.piles)) throw new Error("ฐานกลางยังไม่ยืนยันรายการกอง");
+    applySharedFruitPiles(response.data);
+    fruitPileRefreshAt = Date.now();
+    return true;
+  } catch (error) {
+    settingsPileSummaryMessage = `บันทึกกองไม่สำเร็จ: ${error.message}`;
+    settingsPileSummaryMessageType = "error";
+    render();
+    return false;
+  } finally { fruitPileSyncBusy = false; }
+}
+
+function getVisibleFruitPiles() {
+  const visible = getFruitPiles().filter((pile) => pile.visible);
+  return visible.length ? visible : [];
+}
+
+function effectiveVisibleFruitPileNumber(pileNo) {
+  const visiblePiles = getVisibleFruitPiles();
+  const selected = visiblePiles.find((pile) => pile.number === Number(pileNo));
+  return String(selected?.number ?? visiblePiles[0]?.number ?? "");
+}
+
+function fruitPileByNumber(pileNo) {
+  return getFruitPiles().find((pile) => pile.number === Number(pileNo)) || null;
+}
+
+function fruitPileOptionMarkup(selectedPile) {
+  return getVisibleFruitPiles().map((pile) => `<option value="${pile.number}" style="color:${pile.color}" ${String(selectedPile) === String(pile.number) ? "selected" : ""}>${escapeHtml(pile.name)}</option>`).join("");
+}
+
+function fruitPileToneStyle(pileNo) {
+  const pile = fruitPileByNumber(pileNo);
+  return pile ? `style="--production-pile-color:${pile.color}"` : "";
+}
+
+function isConfiguredFruitPile(pileNo, visibleOnly = false) {
+  const pile = fruitPileByNumber(pileNo);
+  return Boolean(pile && (!visibleOnly || pile.visible));
+}
+
 function createBatchPileWeightMap() {
-  return [1, 2, 3, 4, 5].reduce((weightsByPile, pileNo) => {
+  return getFruitPiles().reduce((weightsByPile, pile) => {
+    const pileNo = pile.number;
     weightsByPile[String(pileNo)] = Array(BATCH_WEIGHT_INPUT_COUNT).fill("");
     return weightsByPile;
   }, {});
@@ -1081,15 +1392,17 @@ function getBatchPileWeights(type, pileNo = null) {
 
 function productionPileToneClass(pileNo) {
   const normalized = Number(pileNo);
-  return Number.isInteger(normalized) && normalized >= 1 && normalized <= 5
+  return Number.isInteger(normalized) && normalized >= 1 && normalized <= 6
     ? `production-pile-tone-${normalized}`
     : "production-pile-tone-1";
 }
 
 function applyProductionPileTone(element, pileNo) {
   if (!element) return;
-  element.classList.remove(...[1, 2, 3, 4, 5].map((value) => `production-pile-tone-${value}`));
+  element.classList.remove(...[1, 2, 3, 4, 5, 6].map((value) => `production-pile-tone-${value}`));
   element.classList.add(productionPileToneClass(pileNo));
+  const pile = fruitPileByNumber(pileNo);
+  if (pile) element.style.setProperty("--production-pile-color", pile.color);
 }
 
 function isBatchProductionSaveShortcut(event) {
@@ -1188,7 +1501,21 @@ function getAllowedRoutesForUser(user) {
     return modules.map((item) => item.id);
   }
 
-  return levelRouteAccess[getUserLevel(user)] || [];
+  const routes = levelRouteAccess[getUserLevel(user)] || [];
+  return canManageAccountUsers(user) ? [...new Set([...routes, "account-management"])] : routes;
+}
+
+function canManageAccountUsers(user) {
+  if (!user || user.isActive === false) return false;
+  return Boolean(isTopLevelUser(user));
+}
+
+function canWriteStock(user) {
+  return Boolean(user && user.isActive !== false && (Number(getUserLevel(user).slice(1)) >= 4 || isTopLevelUser(user)));
+}
+
+function canImportDesktopWeighing(user) {
+  return Boolean(user && user.isActive !== false && Number(getUserLevel(user).slice(1)) >= 6);
 }
 
 function getDefaultRouteForUser(user) {
@@ -1198,20 +1525,23 @@ function getDefaultRouteForUser(user) {
 }
 
 function visibleNavModulesForUser(user) {
-  const navRouteIds = ["dashboard", "production", "inbound", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "record-report", "settings"];
+  const navRouteIds = ["dashboard", "production", "stock", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "record-report", "settings"];
   return navRouteIds
     .map((routeId) => modules.find((item) => item.id === routeId))
     .filter((item) => item && !item.hidden)
     .filter((item) => item.id !== "inbound" || canOpen(user, "inbound"))
-    .filter((item) => item.id !== "accounting-control" || ["C4", "C5", "C6", "C7"].includes(getUserLevel(user)))
+    .filter((item) => item.id !== "stock" || canOpen(user, "stock"))
+    .filter((item) => item.id !== "accounting-control" || canOpen(user, "accounting-control") || canOpen(user, "compare-data"))
+    .map((item) => item.id === "accounting-control" && !canOpen(user, "accounting-control") && canOpen(user, "compare-data") ? { ...item, id: "compare-data" } : item)
     .map((item) => ({ ...item, locked: !canOpen(user, item.id) }));
 }
 
 function canOpen(user, moduleId) {
   const moduleItem = modules.find((item) => item.id === moduleId);
-  if (!moduleItem || !user) return false;
-  if (moduleId === "secret-room") return true;
-  if (moduleId === "audit-log" && !["C6", "C7"].includes(getUserLevel(user))) return false;
+  if (!moduleItem || !user || user.isActive === false) return false;
+  if (moduleId === "account-management") return canManageAccountUsers(user);
+  if (moduleId === "backup") return ["C6", "C7"].includes(getUserLevel(user));
+  if (moduleId === "audit-log") return ["C5", "C6", "C7"].includes(getUserLevel(user));
   if (isTopLevelUser(user)) return true;
   return getAllowedRoutesForUser(user).includes(moduleId);
 }
@@ -1225,7 +1555,7 @@ function canDeleteEmployees(user) {
 }
 
 function canEditProductionRecords(user) {
-  return Boolean(user);
+  return Boolean(user && user.isActive !== false && Number(getUserLevel(user).slice(1)) >= 3);
 }
 
 function canManageAllProductionRecords(user) {
@@ -1298,7 +1628,7 @@ function getProductionRecordEditRemainingMs(record, nowMs = Date.now()) {
 }
 
 function canEditProductionRecord(user, record, nowMs = Date.now()) {
-  if (!user || !record) return false;
+  if (!user || !record || Number(getUserLevel(user).slice(1)) < 3) return false;
   if (canManageAllProductionRecords(user)) return true;
   return isProductionRecordOwnedByUser(record, user) &&
     getProductionRecordEditRemainingMs(record, nowMs) >= 0;
@@ -1478,15 +1808,21 @@ async function cloudApiRequest(path, options = {}) {
     ? window.setTimeout(() => timeoutController.abort(), timeoutMs)
     : null;
   let response;
+  let data;
   try {
     response = await fetch(`${REPORT_API_BASE}${path}`, {
       ...fetchOptions,
+      cache: fetchOptions.cache || "no-store",
       ...(timeoutController ? { signal: timeoutController.signal } : {}),
       headers: {
         "Content-Type": "application/json",
         ...(sessionToken ? { "X-Session-Token": sessionToken } : {}),
         ...(fetchOptions.headers || {})
       }
+    });
+    data = await response.json().catch((error) => {
+      if (timeoutController?.signal.aborted) throw error;
+      return {};
     });
   } catch (error) {
     if (timeoutController?.signal.aborted) {
@@ -1502,7 +1838,6 @@ async function cloudApiRequest(path, options = {}) {
   } finally {
     if (timeoutId !== null) window.clearTimeout(timeoutId);
   }
-  const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message =
       typeof data.error === "string"
@@ -1568,7 +1903,12 @@ async function refreshOnlineUsers() {
 function startOnlineUserHeartbeat() {
   if (onlineHeartbeatTimer) return;
   refreshOnlineUsers();
-  onlineHeartbeatTimer = window.setInterval(refreshOnlineUsers, ONLINE_HEARTBEAT_INTERVAL_MS);
+  refreshSharedFruitPiles();
+  onlineHeartbeatTimer = window.setInterval(() => {
+    refreshOnlineUsers();
+    refreshSharedFruitPiles();
+    refreshLiveStateFromCloud({ renderWhenIdle: true });
+  }, ONLINE_HEARTBEAT_INTERVAL_MS);
 }
 
 const liveStateConfig = {
@@ -1577,6 +1917,129 @@ const liveStateConfig = {
   time_records: { key: TIME_RECORDS_KEY, read: getTimeRecords },
   audit_logs: { key: AUDIT_LOG_KEY, read: getAuditLogs }
 };
+
+const LOCAL_AUDIT_LOG_LIMIT = 250;
+const LOCAL_PRODUCTION_RECORD_LIMIT = 750;
+
+function openProductionIndexedDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return resolve(null);
+    const request = window.indexedDB.open(PRODUCTION_INDEXED_DB_NAME, PRODUCTION_INDEXED_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("records")) db.createObjectStore("records", { keyPath: "id" });
+      if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "key" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function readProductionIndexedDb() {
+  const db = await openProductionIndexedDb();
+  if (!db) return { records: [], cursor: "" };
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(["records", "meta"], "readonly");
+    const recordsRequest = transaction.objectStore("records").getAll();
+    const cursorRequest = transaction.objectStore("meta").get("cursor");
+    const revisionRequest = transaction.objectStore("meta").get("snapshot_revision");
+    transaction.oncomplete = () => resolve({
+      records: Array.isArray(recordsRequest.result) ? recordsRequest.result.sort((a, b) => Number(a.id) - Number(b.id)) : [],
+      // Keep cached rows available offline, but fetch a complete snapshot once
+      // after recovery-sync fixes, even when today's data advanced the old cursor.
+      cursor: revisionRequest.result?.value === PRODUCTION_CACHE_REVISION
+        ? String(cursorRequest.result?.value || "") : ""
+    });
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+async function replaceProductionIndexedDb(records, cursor) {
+  const db = await openProductionIndexedDb();
+  if (!db) return;
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(["records", "meta"], "readwrite");
+    const store = transaction.objectStore("records");
+    store.clear();
+    records.forEach((record) => store.put(record));
+    transaction.objectStore("meta").put({ key: "cursor", value: cursor || "" });
+    transaction.objectStore("meta").put({ key: "snapshot_revision", value: PRODUCTION_CACHE_REVISION });
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+async function persistProductionDeltaIndexedDb(records, deletedIds, cursor) {
+  const db = await openProductionIndexedDb();
+  if (!db) return;
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(["records", "meta"], "readwrite");
+    const store = transaction.objectStore("records");
+    (deletedIds || []).forEach((id) => store.delete(Number(id)));
+    (records || []).forEach((record) => store.put(record));
+    transaction.objectStore("meta").put({ key: "cursor", value: cursor || "" });
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+async function applyProductionDelta(records, deletedIds, cursor) {
+  if (!(records || []).length && !(deletedIds || []).length) {
+    productionSyncCursor = cursor || productionSyncCursor;
+    return getProductionRecords();
+  }
+  const current = new Map(getProductionRecords().map((record) => [Number(record.id), record]));
+  (deletedIds || []).forEach((id) => current.delete(Number(id)));
+  (records || []).forEach((record) => current.set(Number(record.id), record));
+  const merged = Array.from(current.values()).sort((a, b) => Number(a.id) - Number(b.id));
+  productionSyncCursor = cursor || productionSyncCursor;
+  writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY, merged);
+  await persistProductionDeltaIndexedDb(records, deletedIds, productionSyncCursor);
+  return merged;
+}
+
+function applyTimeDelta(records, deletedIds, cursor) {
+  const current = new Map(getTimeRecords().map((record) => [Number(record.id), record]));
+  (deletedIds || []).forEach((id) => current.delete(Number(id)));
+  (records || []).forEach((record) => {
+    if (isCurrentTimeVersion(current.get(Number(record.id)), record)) current.set(Number(record.id), record);
+  });
+  const merged = Array.from(current.values()).sort((a, b) => Number(a.id) - Number(b.id));
+  writeLiveStateRowsToStorage("time_records", TIME_RECORDS_KEY, merged);
+  if (cursor && cursor > (localStorage.getItem(TIME_SYNC_CURSOR_KEY) || "")) localStorage.setItem(TIME_SYNC_CURSOR_KEY, cursor);
+  return merged;
+}
+
+function applyAuditDelta(records, cursor) {
+  const current = new Map(getAuditLogs().map((record) => [Number(record.id), record]));
+  (records || []).forEach((record) => current.set(Number(record.id), record));
+  const merged = Array.from(current.values()).sort((a, b) => Number(a.id) - Number(b.id));
+  writeLiveStateRowsToStorage("audit_logs", AUDIT_LOG_KEY, merged);
+  if (cursor) localStorage.setItem(AUDIT_SYNC_CURSOR_KEY, String(cursor));
+  return merged;
+}
+
+function writeLiveStateRowsToStorage(table, key, rows) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  if (table === "production_records") productionRecordsMemory = sourceRows;
+  const localRows = table === "audit_logs"
+    ? sourceRows.slice(-LOCAL_AUDIT_LOG_LIMIT)
+    : table === "production_records"
+      ? sourceRows.slice(-LOCAL_PRODUCTION_RECORD_LIMIT)
+      : sourceRows;
+  const serialized = JSON.stringify(localRows);
+  if (localStorage.getItem(key) === serialized) return false;
+  try {
+    localStorage.setItem(key, serialized);
+  } catch (error) {
+    if (error?.name !== "QuotaExceededError") throw error;
+    // Audit history remains complete in Supabase. Remove only the browser cache
+    // so production and time data can continue hydrating on every device.
+    localStorage.removeItem(AUDIT_LOG_KEY);
+    localStorage.setItem(key, serialized);
+  }
+  return true;
+}
 
 function getLiveStateSyncVersion(table) {
   return liveStateSyncVersions.get(table) || 0;
@@ -1604,7 +2067,7 @@ function mergeProductionCloudRows(cloudRows) {
       merged.push(cloudRow);
     }
   });
-  localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
+  writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY, merged);
 }
 
 function getProductionClientUid(record) {
@@ -1637,12 +2100,9 @@ function assertProductionCloudRowMatches(expected, actual) {
     throw new Error("Cloud ตรวจกลับมาไม่ตรง: เลขกองไม่ตรง กรุณาตรวจสอบก่อนบันทึกใหม่");
   }
 
-  if (isDurianFruit(productionFruitTypeForRecord(expected))) {
-    const expectedGrades = getRecordGradeWeights(expected);
-    const actualGrades = getRecordGradeWeights(actual);
-    const gradeMismatch = DURIAN_GRADES.some((grade) => Math.abs(expectedGrades[grade] - actualGrades[grade]) > 0.05);
-    if (gradeMismatch) {
-      throw new Error("Cloud ตรวจกลับมาไม่ตรง: น้ำหนักทุเรียนไม่ตรง กรุณาตรวจสอบก่อนบันทึกใหม่");
+  if (isSingleWeightFruit(productionFruitTypeForRecord(expected))) {
+    if (Math.abs(getRecordDurianWeight(expected) - getRecordDurianWeight(actual)) > 0.05) {
+      throw new Error("Cloud ตรวจกลับมาไม่ตรง: น้ำหนักผลไม้ไม่ตรง กรุณาตรวจสอบก่อนบันทึกใหม่");
     }
     return;
   }
@@ -1817,7 +2277,7 @@ function acceptProductionQueueResult(item) {
   return item;
 }
 
-async function enqueueProductionRows(records, { onStatus } = {}) {
+async function enqueueProductionRows(records, { onStatus, source = "manual" } = {}) {
   const rows = (Array.isArray(records) ? records : [records]).filter(Boolean);
   if (!rows.length) throw new Error("ไม่มีข้อมูลผลผลิตสำหรับเข้าคิว");
   const queueUid = createProductionQueueUid(rows);
@@ -1825,7 +2285,7 @@ async function enqueueProductionRows(records, { onStatus } = {}) {
   try {
     const response = await cloudApiRequest("/api/production-save-queue/enqueue", {
       method: "POST",
-      body: JSON.stringify({ queue_uid: queueUid, records: rows }),
+      body: JSON.stringify({ queue_uid: queueUid, records: rows, source }),
       timeoutMs: PRODUCTION_QUEUE_PRIMARY_TIMEOUT_MS
     });
     const item = acceptProductionQueueResult(response.data);
@@ -1882,13 +2342,12 @@ function trackProductionQueueItem(queueId, attempt = 0) {
     } catch (error) {
       console.warn(`Queue ${id} status refresh failed.`, error);
     }
-    if (attempt < 20) {
-      const timer = window.setTimeout(() => {
-        productionQueueTrackers.delete(id);
-        trackProductionQueueItem(id, attempt + 1);
-      }, PRODUCTION_QUEUE_POLL_INTERVAL_MS);
-      productionQueueTrackers.set(id, timer);
-    }
+    const retryDelay = Math.min(PRODUCTION_QUEUE_POLL_INTERVAL_MS * Math.max(1, attempt + 1), 15000);
+    const timer = window.setTimeout(() => {
+      productionQueueTrackers.delete(id);
+      trackProductionQueueItem(id, attempt + 1);
+    }, retryDelay);
+    productionQueueTrackers.set(id, timer);
   };
   const timer = window.setTimeout(poll, attempt === 0 ? 350 : PRODUCTION_QUEUE_POLL_INTERVAL_MS);
   productionQueueTrackers.set(id, timer);
@@ -1902,7 +2361,11 @@ async function refreshProductionQueue({ renderAfter = true } = {}) {
       timeoutMs: 7000
     });
     productionQueueItems = Array.isArray(response.data) ? response.data : [];
-    productionQueueItems.forEach((item) => acceptProductionQueueResult(item));
+    productionQueueItems.forEach((item) => {
+      acceptProductionQueueResult(item);
+      if (["queued", "processing"].includes(item.status)) trackProductionQueueItem(item.id);
+      else stopProductionQueueTracker(item.id);
+    });
     productionQueueMessage = "";
     productionQueueMessageType = "success";
   } catch (error) {
@@ -1915,6 +2378,9 @@ async function refreshProductionQueue({ renderAfter = true } = {}) {
 }
 
 function createTimeQueueUid(operation, records) {
+  if (operation === "insert" && records.length === 1 && records[0]?.scanner_import?.submission_uid) {
+    return `time-queue:scanner:${records[0].scanner_import.submission_uid}`;
+  }
   const seed = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const recordId = operation === "update" ? `:${records[0]?.id || ""}` : "";
   return `time-queue:${operation}${recordId}:${seed}`;
@@ -1931,9 +2397,8 @@ function mergeTimeQueueItem(item) {
   if (index >= 0) timeQueueItems[index] = { ...timeQueueItems[index], ...item };
   else timeQueueItems.unshift(item);
   timeQueueItems.sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
-  if (item.status === "succeeded" && Array.isArray(item.result_payload)) {
-    mergeTimeCloudRows(item.result_payload);
-  }
+  // Queue results are historical receipts, not the current database state.
+  // Replaying them can undo newer edits or resurrect deleted records.
   return item;
 }
 
@@ -1983,7 +2448,12 @@ function trackTimeQueueItem(queueId, attempt = 0) {
       const response = await cloudApiRequest(`/api/time-save-queue/${id}`, { timeoutMs: TIME_QUEUE_ACCEPT_TIMEOUT_MS });
       const item = mergeTimeQueueItem(response.data);
       if (["succeeded", "needs_review", "failed"].includes(item?.status)) {
-        if (location.hash === "#/time-records") render();
+        timeRecordMessageType = item.status === "succeeded" ? "success" : "error";
+        timeRecordMessage = item.status === "succeeded"
+          ? `${timeQueueNumber(item)} ฐานข้อมูลยืนยันบันทึกแล้ว`
+          : `${timeQueueNumber(item)} ยังบันทึกไม่สำเร็จ: ${item.error_message || "กรุณาตรวจสอบในคิวบันทึกเวลา"}`;
+        await refreshConfirmedTimeRecords();
+        if (location.hash === "#/time-report" && !isEditingFormField()) render();
         return;
       }
     } catch (error) {
@@ -2018,7 +2488,7 @@ async function refreshTimeQueue({ renderAfter = false } = {}) {
   } finally {
     timeQueueLoading = false;
     timeQueueLoadedOnce = true;
-    if (renderAfter && location.hash === "#/time-records") render();
+    if (renderAfter && location.hash === "#/time-report") render();
   }
 }
 
@@ -2070,6 +2540,7 @@ async function runProductionQueueAction(queueId, action, payload = {}) {
     const item = acceptProductionQueueResult(response.data);
     productionQueueMessage = action === "verify"
       ? item?.status === "succeeded" ? "ตรวจสอบแล้ว พบข้อมูลในฐานและเชื่อมรายการเรียบร้อย" : item?.error_message || "ตรวจสอบรายการแล้ว"
+      : action === "confirm-save" ? "ยืนยันตรวจสอบและบันทึกข้อมูลลงฐานเรียบร้อยแล้ว"
       : action === "retry" ? "ส่งข้อมูลต้นฉบับเดิมกลับเข้าคิวแล้ว"
       : action === "cancel" ? "ยกเลิกคิวแล้ว โดยยังเก็บประวัติไว้"
       : "เชื่อมรายการเดิมเรียบร้อยแล้ว";
@@ -2085,6 +2556,65 @@ async function runProductionQueueAction(queueId, action, payload = {}) {
   }
 }
 
+function isCurrentTimeVersion(existing, incoming) {
+  if (!existing?.server_updated_at) return true;
+  if (!incoming?.server_updated_at) return false;
+  return Date.parse(incoming.server_updated_at) >= Date.parse(existing.server_updated_at);
+}
+
+let timeChangeWatchStarted = false;
+let confirmedTimeRefresh = null;
+let timeRenderPending = false;
+
+function renderConfirmedTimeChange() {
+  timeRenderPending = true;
+  if (!isEditingFormField()) {
+    timeRenderPending = false;
+    render();
+  }
+}
+
+async function refreshConfirmedTimeRecords() {
+  if (confirmedTimeRefresh) return confirmedTimeRefresh;
+  if (liveStateRefreshInFlight || applyingCloudState) throw new Error("Time snapshot is still loading; retry delta afterwards.");
+  confirmedTimeRefresh = (async () => {
+    const token = getSession()?.token;
+    const cursor = localStorage.getItem(TIME_SYNC_CURSOR_KEY) || "";
+    const response = await cloudApiRequest(`/api/time-records/delta?cursor=${encodeURIComponent(cursor)}`, { timeoutMs: 15000 });
+    if (!token || getSession()?.token !== token) throw new Error("Time sync session changed.");
+    const delta = response.data || {};
+    applyTimeDelta(delta.records || [], delta.deleted_ids || [], delta.cursor || cursor);
+    if ((delta.records || []).length || (delta.deleted_ids || []).length) renderConfirmedTimeChange();
+  })();
+  try { await confirmedTimeRefresh; } finally { confirmedTimeRefresh = null; }
+}
+
+function startTimeChangeWatch() {
+  if (timeChangeWatchStarted) return;
+  timeChangeWatchStarted = true;
+  let revision = "";
+  let sessionToken = "";
+  const watch = async () => {
+    let retryMs = 100;
+    try {
+      const session = getSession();
+      if (!session || document.hidden || !lastLiveStateFullRefreshAt) { retryMs = 1000; return; }
+      if (sessionToken !== session.token) { sessionToken = session.token; revision = ""; }
+      const response = await cloudApiRequest(`/api/time-records/changes?revision=${encodeURIComponent(revision)}`, { timeoutMs: 25000 });
+      if (getSession()?.token !== sessionToken) { revision = ""; return; }
+      const next = response.data?.revision;
+      if (next && next !== revision) {
+        await refreshConfirmedTimeRecords();
+        revision = next;
+      }
+    } catch (error) {
+      console.warn("Time change notification disconnected; retrying.", error);
+      retryMs = 5000;
+    } finally { window.setTimeout(watch, retryMs); }
+  };
+  watch();
+}
+
 function mergeTimeCloudRows(cloudRows) {
   if (!Array.isArray(cloudRows) || !cloudRows.length) return;
   const records = getTimeRecords();
@@ -2092,7 +2622,7 @@ function mergeTimeCloudRows(cloudRows) {
   cloudRows.forEach((cloudRow) => {
     const existingIndex = merged.findIndex((record) => Number(record.id) === Number(cloudRow.id));
     if (existingIndex >= 0) {
-      merged[existingIndex] = { ...merged[existingIndex], ...cloudRow };
+      if (isCurrentTimeVersion(merged[existingIndex], cloudRow)) merged[existingIndex] = { ...merged[existingIndex], ...cloudRow };
     } else {
       merged.push(cloudRow);
     }
@@ -2171,7 +2701,7 @@ async function syncLiveStateNow(table, { renderOnSuccess = true } = {}) {
     });
     if (Array.isArray(response.data) && getLiveStateSyncVersion(table) === requestVersion) {
       applyingCloudState = true;
-      localStorage.setItem(config.key, JSON.stringify(response.data));
+      writeLiveStateRowsToStorage(table, config.key, response.data);
       receivedMergedRows = true;
     } else {
       liveStateSyncPending.add(table);
@@ -2246,6 +2776,7 @@ function isEditingFormField() {
 
 async function refreshLiveStateFromCloud({ renderWhenIdle = true, force = false } = {}) {
   if (
+    confirmedTimeRefresh ||
     liveStateRefreshInFlight ||
     applyingCloudState ||
     productionSaving ||
@@ -2262,7 +2793,21 @@ async function refreshLiveStateFromCloud({ renderWhenIdle = true, force = false 
   liveStateRefreshInFlight = true;
   let changed = false;
   try {
-    const response = await cloudApiRequest("/api/state");
+    const timeSyncCursor = String(localStorage.getItem(TIME_SYNC_CURSOR_KEY) || "");
+    const auditSyncCursor = String(localStorage.getItem(AUDIT_SYNC_CURSOR_KEY) || "");
+    const canReadAudit = canOpen(getSession()?.user, "audit-log");
+    const [response, productionResponse, timeResponse, auditResponse] = await Promise.all([
+      cloudApiRequest("/api/state?exclude=production_records,time_records,audit_logs"),
+      productionSyncCursor
+        ? cloudApiRequest(`/api/production-records/delta?cursor=${encodeURIComponent(productionSyncCursor)}`)
+        : cloudApiRequest("/api/production-records/snapshot"),
+      timeSyncCursor && getTimeRecords().length
+        ? cloudApiRequest(`/api/time-records/delta?cursor=${encodeURIComponent(timeSyncCursor)}`)
+        : cloudApiRequest("/api/time-records/snapshot"),
+      !canReadAudit ? Promise.resolve(null) : auditSyncCursor && getAuditLogs().length
+        ? cloudApiRequest(`/api/audit-logs/delta?cursor=${encodeURIComponent(auditSyncCursor)}`)
+        : cloudApiRequest("/api/audit-logs/snapshot")
+    ]);
     const state = response.data || {};
     if (
       refreshVersionSignature !== getLiveStateVersionSignature() ||
@@ -2273,12 +2818,40 @@ async function refreshLiveStateFromCloud({ renderWhenIdle = true, force = false 
     }
     applyingCloudState = true;
     for (const [table, config] of Object.entries(liveStateConfig)) {
+      if (["production_records", "time_records", "audit_logs"].includes(table)) continue;
       const cloudRows = Array.isArray(state[table]) ? state[table] : [];
-      const serialized = JSON.stringify(cloudRows);
-      if (localStorage.getItem(config.key) !== serialized) {
-        localStorage.setItem(config.key, serialized);
-        changed = true;
-      }
+      if (writeLiveStateRowsToStorage(table, config.key, cloudRows)) changed = true;
+    }
+    if (productionSyncCursor) {
+      const delta = productionResponse.data || {};
+      if ((delta.records || []).length || (delta.deleted_ids || []).length) changed = true;
+      await applyProductionDelta(delta.records || [], delta.deleted_ids || [], delta.cursor || productionSyncCursor);
+    } else {
+      const rows = Array.isArray(productionResponse.data) ? productionResponse.data : [];
+      productionSyncCursor = String(productionResponse.cursor || "");
+      writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY, rows);
+      await replaceProductionIndexedDb(rows, productionSyncCursor);
+      changed = true;
+    }
+    if (auditResponse && auditSyncCursor && getAuditLogs().length) {
+      const delta = auditResponse.data || {};
+      if ((delta.records || []).length) changed = true;
+      applyAuditDelta(delta.records || [], delta.cursor || auditSyncCursor);
+    } else if (auditResponse) {
+      const rows = Array.isArray(auditResponse.data) ? auditResponse.data : [];
+      writeLiveStateRowsToStorage("audit_logs", AUDIT_LOG_KEY, rows);
+      if (auditResponse.cursor) localStorage.setItem(AUDIT_SYNC_CURSOR_KEY, String(auditResponse.cursor));
+      changed = true;
+    }
+    if (timeSyncCursor && getTimeRecords().length) {
+      const delta = timeResponse.data || {};
+      if ((delta.records || []).length || (delta.deleted_ids || []).length) changed = true;
+      applyTimeDelta(delta.records || [], delta.deleted_ids || [], delta.cursor || timeSyncCursor);
+    } else {
+      const rows = Array.isArray(timeResponse.data) ? timeResponse.data : [];
+      writeLiveStateRowsToStorage("time_records", TIME_RECORDS_KEY, rows);
+      if (timeResponse.cursor) localStorage.setItem(TIME_SYNC_CURSOR_KEY, String(timeResponse.cursor));
+      changed = true;
     }
   } catch (error) {
     console.warn("Live cloud refresh failed.", error);
@@ -2292,7 +2865,28 @@ async function refreshLiveStateFromCloud({ renderWhenIdle = true, force = false 
 }
 
 async function bootstrapLiveStateFromCloud() {
-  const response = await cloudApiRequest("/api/state");
+  const indexedProduction = await readProductionIndexedDb().catch(() => ({ records: [], cursor: "" }));
+  if (indexedProduction.records.length) {
+    productionSyncCursor = indexedProduction.cursor;
+    writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY, indexedProduction.records);
+  }
+  const timeSyncCursor = String(localStorage.getItem(TIME_SYNC_CURSOR_KEY) || "");
+  const auditSyncCursor = String(localStorage.getItem(AUDIT_SYNC_CURSOR_KEY) || "");
+  const localTimeRecords = getTimeRecords();
+  const localAuditLogs = getAuditLogs();
+  const canReadAudit = canOpen(getSession()?.user, "audit-log");
+  const [response, productionResponse, timeResponse, auditResponse] = await Promise.all([
+    cloudApiRequest("/api/state?exclude=production_records,time_records,audit_logs"),
+    indexedProduction.records.length && indexedProduction.cursor
+      ? cloudApiRequest(`/api/production-records/delta?cursor=${encodeURIComponent(indexedProduction.cursor)}`)
+      : cloudApiRequest("/api/production-records/snapshot"),
+    timeSyncCursor && localTimeRecords.length
+      ? cloudApiRequest(`/api/time-records/delta?cursor=${encodeURIComponent(timeSyncCursor)}`)
+      : cloudApiRequest("/api/time-records/snapshot"),
+    !canReadAudit ? Promise.resolve(null) : auditSyncCursor && localAuditLogs.length
+      ? cloudApiRequest(`/api/audit-logs/delta?cursor=${encodeURIComponent(auditSyncCursor)}`)
+      : cloudApiRequest("/api/audit-logs/snapshot")
+  ]);
   const state = response.data || {};
   lastLiveStateFullRefreshAt = Date.now();
   // Only the desktop file launcher owns legacy browser-only data. A phone or
@@ -2303,6 +2897,7 @@ async function bootstrapLiveStateFromCloud() {
   applyingCloudState = true;
   try {
     for (const [table, config] of Object.entries(liveStateConfig)) {
+      if (["production_records", "time_records", "audit_logs"].includes(table)) continue;
       const cloudRows = Array.isArray(state[table]) ? state[table] : [];
       const localRows = config.read();
       if (needsMigration && localRows.length) {
@@ -2332,10 +2927,35 @@ async function bootstrapLiveStateFromCloud() {
           method: "POST",
           body: JSON.stringify({ table, rows: merged })
         });
-        localStorage.setItem(config.key, JSON.stringify(merged));
+        writeLiveStateRowsToStorage(table, config.key, merged);
       } else {
-        localStorage.setItem(config.key, JSON.stringify(cloudRows));
+        writeLiveStateRowsToStorage(table, config.key, cloudRows);
       }
+    }
+    if (indexedProduction.records.length && indexedProduction.cursor) {
+      const delta = productionResponse.data || {};
+      await applyProductionDelta(delta.records || [], delta.deleted_ids || [], delta.cursor || indexedProduction.cursor);
+    } else {
+      const rows = Array.isArray(productionResponse.data) ? productionResponse.data : [];
+      productionSyncCursor = String(productionResponse.cursor || "");
+      writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY, rows);
+      await replaceProductionIndexedDb(rows, productionSyncCursor);
+    }
+    if (timeSyncCursor && localTimeRecords.length) {
+      const delta = timeResponse.data || {};
+      applyTimeDelta(delta.records || [], delta.deleted_ids || [], delta.cursor || timeSyncCursor);
+    } else {
+      const rows = Array.isArray(timeResponse.data) ? timeResponse.data : [];
+      writeLiveStateRowsToStorage("time_records", TIME_RECORDS_KEY, rows);
+      if (timeResponse.cursor) localStorage.setItem(TIME_SYNC_CURSOR_KEY, String(timeResponse.cursor));
+    }
+    if (auditResponse && auditSyncCursor && localAuditLogs.length) {
+      const delta = auditResponse.data || {};
+      applyAuditDelta(delta.records || [], delta.cursor || auditSyncCursor);
+    } else if (auditResponse) {
+      const rows = Array.isArray(auditResponse.data) ? auditResponse.data : [];
+      writeLiveStateRowsToStorage("audit_logs", AUDIT_LOG_KEY, rows);
+      if (auditResponse.cursor) localStorage.setItem(AUDIT_SYNC_CURSOR_KEY, String(auditResponse.cursor));
     }
     if (needsMigration) {
       await migrateRemainingLocalDataToCloud();
@@ -2394,6 +3014,7 @@ function cloudQuotaErrorMessage(error) {
 }
 
 async function syncAccountsToCloud(accounts = getAccountUsers()) {
+  if (!canManageAccountUsers(getSession()?.user)) return [];
   const syncableAccounts = accounts.filter((accountUser) => {
     return accountUser.username && accountUser.password && !accountUser.is_system;
   });
@@ -2479,6 +3100,7 @@ function normalizeCloudTimeEmployee(employee) {
     emp_code: employee.emp_code,
     fullname: employee.fullname,
     employee_type: employee.employee_type,
+    recruitment_group: employee.recruitment_group,
     daily_wage: employee.daily_wage,
     ot_hourly_rate: employee.ot_hourly_rate,
     status: employee.status || "Active",
@@ -2603,6 +3225,7 @@ async function deleteCloudTimeEmployee(id) {
 
 function getDeductionTypeLabel(typeId) {
   if (typeId === ATTENDANCE_BONUS_TYPE) return "เบี้ยขยัน";
+  if (typeId === DAILY_OT_OVERRIDE_TYPE) return "ปรับ OT รายวัน";
   return deductionTypeOptions.find((item) => item.id === typeId)?.label || typeId || "-";
 }
 
@@ -2612,7 +3235,7 @@ function normalizeDeductionKind(value) {
 
 function normalizeDeductionRecord(record) {
   const now = new Date().toISOString();
-  const startDate = String(record?.start_date || record?.deduction_date || new Date().toISOString().slice(0, 10));
+  const startDate = String(record?.start_date || record?.deduction_date || localDateInputValue());
   const endDate = String(record?.end_date || startDate);
   const amount = Number(record?.amount || 0);
   return {
@@ -2792,29 +3415,43 @@ function isAttendanceBonusRecord(record) {
   return String(record?.deduction_type || "") === ATTENDANCE_BONUS_TYPE;
 }
 
+function isDailyOtOverrideRecord(record) {
+  return String(record?.deduction_type || "") === DAILY_OT_OVERRIDE_TYPE;
+}
+
+function employeeReferenceMatches(record, employee) {
+  if (!record || !employee) return false;
+  const recordId = String(record.employee_id || "");
+  const employeeId = String(employee.id || employee.employee_id || "");
+  if (recordId && employeeId) return recordId === employeeId;
+  return Boolean(record.emp_code && employee.emp_code) && String(record.emp_code) === String(employee.emp_code);
+}
+
+function getDailyOtOverride(employee, recordDate) {
+  if (!employee || !recordDate) return null;
+  const match = getDeductionRecords().filter((record) => (
+    isDailyOtOverrideRecord(record) && record.status === "Active" &&
+    record.start_date <= recordDate && (record.end_date || record.start_date) >= recordDate &&
+    employeeReferenceMatches(record, employee)
+  )).sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")))[0];
+  return match ? Number(match.amount) || null : null;
+}
+
 function getAdjustmentRecordsForRange(kind, startDate, endDate, employee = null) {
   const normalizedKind = normalizeDeductionKind(kind);
-  const employeeId = employee?.id ? String(employee.id) : "";
-  const empCode = employee?.emp_code ? String(employee.emp_code) : "";
   const bonuses = getDeductionRecords().filter((record) => {
     if (!isAttendanceBonusRecord(record) || record.status !== "Active") return false;
     if (record.employee_kind !== normalizedKind) return false;
     if (!deductionRangesOverlap(record, startDate, endDate)) return false;
     if (!employee) return true;
-    return (
-      (employeeId && String(record.employee_id) === employeeId) ||
-      (empCode && String(record.emp_code) === empCode)
-    );
+    return employeeReferenceMatches(record, employee);
   });
   const appliedDeductions = deductionApplications
     .filter((application) => {
       if (application.status !== "Applied" || application.employee_kind !== normalizedKind) return false;
       if (application.applied_date < startDate || application.applied_date > endDate) return false;
       if (!employee) return true;
-      return (
-        (employeeId && String(application.employee_id) === employeeId) ||
-        (empCode && String(application.emp_code) === empCode)
-      );
+      return employeeReferenceMatches(application, employee);
     })
     .map((application) => {
       const obligation = getDeductionRecords().find((record) => Number(record.id) === Number(application.deduction_id));
@@ -2834,6 +3471,7 @@ function getAdjustmentRecordsForRange(kind, startDate, endDate, employee = null)
 
 function getReportAdjustmentRecords() {
   const bonuses = getDeductionRecords().filter((record) => isAttendanceBonusRecord(record) && record.status === "Active");
+  const dailyOtOverrides = getDeductionRecords().filter((record) => isDailyOtOverrideRecord(record) && record.status === "Active");
   const deductions = deductionApplications
     .filter((application) => application.status === "Applied")
     .map((application) => {
@@ -2849,7 +3487,7 @@ function getReportAdjustmentRecords() {
         created_by: application.created_by || obligation?.created_by || ""
       });
     });
-  return [...bonuses, ...deductions];
+  return [...bonuses, ...dailyOtOverrides, ...deductions];
 }
 
 function getAppliedTotalForDeduction(deductionId) {
@@ -2937,7 +3575,7 @@ async function apiDeleteApprovedDeductionApplication(id, actor) {
 }
 
 function getDeductionsForRange(kind, startDate, endDate, employee = null) {
-  return getAdjustmentRecordsForRange(kind, startDate, endDate, employee).filter((record) => !isAttendanceBonusRecord(record));
+  return getAdjustmentRecordsForRange(kind, startDate, endDate, employee).filter((record) => !isAttendanceBonusRecord(record) && !isDailyOtOverrideRecord(record));
 }
 
 function getBonusesForRange(kind, startDate, endDate, employee = null) {
@@ -2970,6 +3608,7 @@ function findDeductionEmployee(kind, employeeId) {
 async function apiCreateDeduction(payload, actor) {
   const kind = normalizeDeductionKind(payload.employee_kind);
   const bonusMode = payload.deduction_type === ATTENDANCE_BONUS_TYPE;
+  const otOverrideMode = payload.deduction_type === DAILY_OT_OVERRIDE_TYPE;
   const employee = findDeductionEmployee(kind, payload.employee_id);
   const amount = Number(payload.amount || 0);
   if (!employee) throw new Error("กรุณาเลือกพนักงาน");
@@ -2987,7 +3626,7 @@ async function apiCreateDeduction(payload, actor) {
     amount,
     note: payload.note,
     client_uid: payload.client_uid || createProductionClientUid(),
-    status: bonusMode ? "Active" : "Pending",
+    status: bonusMode || otOverrideMode ? "Active" : "Pending",
     created_by: actor?.fullname || ""
   });
   const created = await createCloudDeduction(baseRecord);
@@ -2999,7 +3638,7 @@ async function apiCreateDeduction(payload, actor) {
   } else {
     saveDeductionRecords([...existingRecords, created]);
   }
-  addAuditLog(actor, bonusMode ? "CREATE_ATTENDANCE_BONUS" : "CREATE_DEDUCTION", `Added ${created.deduction_label} ${created.emp_code} ${created.amount}`);
+  addAuditLog(actor, bonusMode ? "CREATE_ATTENDANCE_BONUS" : otOverrideMode ? "CREATE_DAILY_OT_OVERRIDE" : "CREATE_DEDUCTION", `Added ${created.deduction_label} ${created.emp_code} ${created.amount}`);
   return created;
 }
 
@@ -3012,7 +3651,7 @@ async function apiUpdateDeduction(id, payload, actor) {
   const amount = Number(payload.amount || 0);
   if (!employee) throw new Error("กรุณาเลือกพนักงาน");
   if (amount <= 0) throw new Error("กรุณากรอกจำนวนเงินมากกว่า 0");
-  const appliedTotal = isAttendanceBonusRecord(existing) ? 0 : getAppliedTotalForDeduction(id);
+  const appliedTotal = isAttendanceBonusRecord(existing) || isDailyOtOverrideRecord(existing) ? 0 : getAppliedTotalForDeduction(id);
   if (amount < appliedTotal) throw new Error(`ยอดตั้งต้นต้องไม่น้อยกว่ายอดที่หักไปแล้ว ${money(appliedTotal)}`);
   if (appliedTotal > 0 && (
     amount !== Number(existing.amount) ||
@@ -3034,7 +3673,7 @@ async function apiUpdateDeduction(id, payload, actor) {
     deduction_label: getDeductionTypeLabel(payload.deduction_type),
     amount,
     note: payload.note,
-    status: isAttendanceBonusRecord(existing) ? "Active" : (amount <= appliedTotal ? "Completed" : "Pending"),
+    status: isAttendanceBonusRecord(existing) || isDailyOtOverrideRecord(existing) ? "Active" : (amount <= appliedTotal ? "Completed" : "Pending"),
     updated_by: actor?.fullname || "",
     updated_at: new Date().toISOString()
   });
@@ -3173,6 +3812,7 @@ function validateAccountPayload(payload, existingId = null) {
 }
 
 async function apiCreateAccountUser(payload, actor) {
+  if (!canManageAccountUsers(actor)) throw new Error("สร้างบัญชีได้เฉพาะ HR ระดับ C4 ขึ้นไป หรือผู้ดูแลระบบ");
   const accountUsers = getAccountUsers();
   const cleanPayload = validateAccountPayload(payload);
   const now = new Date().toISOString();
@@ -3200,6 +3840,7 @@ async function apiCreateAccountUser(payload, actor) {
 }
 
 async function apiUpdateAccountUser(id, payload, actor) {
+  if (!canManageAccountUsers(actor)) throw new Error("แก้ไขบัญชีได้เฉพาะ HR ระดับ C4 ขึ้นไป หรือผู้ดูแลระบบ");
   const accountUsers = getAccountUsers();
   const existing = accountUsers.find((accountUser) => accountUser.id === id);
   if (!existing) {
@@ -3240,6 +3881,7 @@ async function apiUpdateAccountUser(id, payload, actor) {
 }
 
 async function apiDeleteAccountUser(id, actor) {
+  if (!isTopLevelUser(actor)) throw new Error("ลบบัญชีได้เฉพาะผู้ดูแลระบบ");
   if (id === actor.id) {
     throw new Error("ไม่สามารถลบบัญชีที่กำลังใช้งานอยู่");
   }
@@ -3453,6 +4095,7 @@ function isSpecialTimeEmployeeType(value) {
 
 function getTimeReportGroupLabel(value) {
   const typeOption = getTimeEmployeeTypeOption(value);
+  if (typeOption.category === "office") return "กลุ่ม Office";
   return typeOption.category === "special" ? "กลุ่มพิเศษ" : "กลุ่มปกติ-347";
 }
 
@@ -3478,8 +4121,9 @@ function normalizeTimeEmployee(employee) {
     emp_code: normalizeTimeEmployeeCodeInput(employee?.emp_code || ""),
     fullname: String(employee?.fullname || "").trim(),
     employee_type: typeOption.id,
+    recruitment_group: normalizeTimeRecruitmentGroup(employee?.recruitment_group),
     daily_wage: typeOption.dailyWage,
-    ot_hourly_rate: Number.isFinite(otHourlyRate) && otHourlyRate > 0 ? otHourlyRate : TIME_OT_HOURLY_RATE,
+    ot_hourly_rate: typeOption.category === "office" ? 0 : Number.isFinite(otHourlyRate) && otHourlyRate > 0 ? otHourlyRate : TIME_OT_HOURLY_RATE,
     status: employee?.status || "Active",
     created_at: employee?.created_at || new Date().toISOString(),
     updated_at: employee?.updated_at || employee?.created_at || new Date().toISOString()
@@ -3595,6 +4239,7 @@ async function apiCreateTimeEmployee(payload) {
     emp_code: empCode,
     fullname: String(payload.fullname || "").trim(),
     employee_type: typeOption.id,
+    recruitment_group: normalizeTimeRecruitmentGroup(payload.recruitment_group),
     daily_wage: typeOption.dailyWage,
     ot_hourly_rate: otHourlyRate,
     status: "Active"
@@ -3622,6 +4267,9 @@ async function apiUpdateTimeEmployee(id, payload) {
     emp_code: empCode,
     fullname: String(payload.fullname || "").trim(),
     employee_type: typeOption.id,
+    recruitment_group: normalizeTimeRecruitmentGroup(payload.recruitment_group === undefined
+      ? employees.find((employee) => employee.id === id)?.recruitment_group
+      : payload.recruitment_group),
     daily_wage: typeOption.dailyWage,
     ot_hourly_rate: otHourlyRate,
     status: "Active"
@@ -3630,6 +4278,51 @@ async function apiUpdateTimeEmployee(id, payload) {
   saveTimeEmployees(
     employees.map((employee) => (employee.id === id ? updatedEmployee : employee))
   );
+}
+
+let timeEmployeeManageGroup = "";
+
+function timeEmployeeNumberGroup(employee) {
+  const code = String(employee.emp_code);
+  const prefix = code.length > 2 ? code.slice(0, -2) : "";
+  return { key: `${normalizeTimeEmployeeType(employee.employee_type)}:${prefix}`, prefix };
+}
+
+function buildTimeEmployeeRenumberPlan(selectedIds) {
+  const selectedIdSet = new Set(selectedIds.map(Number));
+  const selectedEmployees = getTimeEmployees()
+    .filter((employee) => selectedIdSet.has(employee.id))
+    .sort((a, b) => Number(a.emp_code) - Number(b.emp_code));
+  if (selectedEmployees.length < 2) throw new Error("เลือกพนักงานอย่างน้อย 2 คนเพื่อจัดลำดับเลข");
+  if (selectedEmployees.some((employee) => !/^\d+$/.test(employee.emp_code))) {
+    throw new Error("กลุ่มที่เลือกมีหมายเลขพนักงานที่ไม่ใช่ตัวเลข");
+  }
+  const groups = new Set(selectedEmployees.map((employee) => timeEmployeeNumberGroup(employee).key));
+  if (groups.size !== 1) throw new Error("เลือกพนักงานประเภทเดียวกันและชุดรหัสเดียวกันเท่านั้น เพื่อไม่ให้เลขข้ามกลุ่ม");
+  const startNumber = Number(selectedEmployees[0].emp_code);
+  const codeWidth = Math.max(2, selectedEmployees[0].emp_code.length);
+  const plan = selectedEmployees.map((employee, index) => ({
+    employee,
+    oldCode: employee.emp_code,
+    newCode: String(startNumber + index).padStart(codeWidth, "0")
+  }));
+  const occupiedOutsideSelection = new Set(
+    getTimeEmployees().filter((employee) => !selectedIdSet.has(employee.id)).map((employee) => employee.emp_code)
+  );
+  const conflictingCode = plan.find((item) => occupiedOutsideSelection.has(item.newCode))?.newCode;
+  if (conflictingCode) {
+    throw new Error(`ไม่สามารถจัดลำดับได้ เพราะหมายเลข ${conflictingCode} ถูกใช้โดยพนักงานนอกกลุ่มที่เลือก`);
+  }
+  return plan;
+}
+
+async function apiRenumberTimeEmployees(plan) {
+  const changedItems = plan.filter((item) => item.oldCode !== item.newCode);
+  for (const item of changedItems) {
+    const employee = getTimeEmployees().find((candidate) => candidate.id === item.employee.id) || item.employee;
+    await apiUpdateTimeEmployee(employee.id, { ...employee, emp_code: item.newCode });
+  }
+  return changedItems.length;
 }
 
 async function apiDeleteTimeEmployee(id) {
@@ -3943,7 +4636,7 @@ function getLatestDashboardRecordDate() {
 }
 
 function getSelectedSummaryDate() {
-  return summaryDate || new Date().toISOString().slice(0, 10);
+  return summaryDate || localDateInputValue();
 }
 
 function getSummaryExportRange() {
@@ -3977,6 +4670,216 @@ function downloadTextFile(filename, content, type = "text/csv;charset=utf-8") {
   link.click();
   link.remove();
   URL.revokeObjectURL(objectUrl);
+}
+
+async function exportScaleEmployeeFile(rosterKind = "production") {
+  // Fetch the complete central roster, independent of search and browser cache.
+  const requestedRosters = rosterKind === "all"
+    ? [["production", "/api/employees"], ["time", "/api/time-employees"]]
+    : [[rosterKind, rosterKind === "time" ? "/api/time-employees" : "/api/employees"]];
+  const responses = await Promise.all(requestedRosters.map(async ([kind, endpoint]) => ({
+    kind,
+    response: await cloudApiRequest(endpoint)
+  })));
+  if (responses.some(({ response }) => response.error || !Array.isArray(response.data))) {
+    throw new Error('ไม่มีรายชื่อจากฐานกลางให้ส่งออก กรุณาตรวจการเชื่อมต่อ');
+  }
+  const rosterRows = responses.flatMap(({ kind, response }) => response.data.map((employee) => ({ kind, employee })));
+  if (!rosterRows.length) throw new Error('ไม่มีรายชื่อจากฐานกลางให้ส่งออก กรุณาตรวจการเชื่อมต่อ');
+  const ids = new Set();
+  const codes = new Set();
+  const employees = rosterRows.map(({ kind, employee }) => {
+    const isTimeRoster = kind === "time";
+    const rawId = String(employee.id ?? '').trim();
+    const id = isTimeRoster ? `time-${rawId}` : rawId;
+    const emp_code = String(employee.emp_code ?? '').trim();
+    const fullname = String(employee.fullname ?? '').trim();
+    if (!id || !emp_code || !fullname || ids.has(id) || codes.has(emp_code) ||
+        !rawId || (typeof employee.id === 'number' && !Number.isSafeInteger(employee.id))) {
+      throw new Error('รายชื่อสองฐานมีรหัสซ้ำ หรือมีข้อมูลไม่ครบ กรุณาตรวจรายชื่อก่อนดาวน์โหลด');
+    }
+    ids.add(id); codes.add(emp_code);
+    return { id, emp_code, fullname, status: employee.status || 'Active' };
+  });
+  const exported_at = new Date().toISOString();
+  const rosterLabel = rosterKind === "all" ? "all-employees" : rosterKind === "time" ? "time-employees" : "weight-employees";
+  downloadTextFile(`Pff-${rosterLabel}-${exported_at.slice(0,10)}.json`, JSON.stringify({
+    schema: 'pff.employees.v1', complete: true, exported_at,
+    source: REPORT_API_BASE, roster_kind: rosterKind, employees
+  }, null, 2), 'application/json;charset=utf-8');
+  return employees.length;
+}
+
+async function exportTimeEmployeeXml() {
+  return HipRoster.open({
+    load: async () => {
+      const response = await cloudApiRequest('/api/time-employees');
+      if (response.error || !Array.isArray(response.data)) throw Error('โหลดรายชื่อรายวันล่าสุดไม่สำเร็จ');
+      return response.data;
+    },
+    map: ScannerImport.rosterMap
+  });
+}
+
+function getDesktopCatalogPayload() {
+  const fruits = productionFruitOptions
+    .filter((fruit) => productionFruitFieldLabels[fruit.id])
+    .map((fruit) => ({ id: fruit.id, name: fruit.label, active: true }));
+  const weighing_types = fruits.flatMap((fruit) => {
+    const labels = getProductionFieldLabels(fruit.id);
+    if (labels.mode === "single") {
+      return [{ id: `${fruit.id}:weight`, fruit_id: fruit.id, name: labels.weight, active: true, unit: "kg", color: "green", position: 0 }];
+    }
+    return [
+      { id: `${fruit.id}:water`, fruit_id: fruit.id, name: labels.water, active: true, unit: "kg", color: "blue", position: 0 },
+      { id: `${fruit.id}:flower`, fruit_id: fruit.id, name: labels.flower, active: true, unit: "kg", color: "purple", position: 1 }
+    ];
+  });
+  const piles = getFruitPiles().map((pile) => ({
+    number: pile.number,
+    name: pile.name,
+    active: pile.visible,
+    color: pile.color
+  }));
+  return { schema: "pff.catalog.v1", exported_at: new Date().toISOString(), source: REPORT_API_BASE, fruits, weighing_types, piles };
+}
+
+function exportDesktopCatalogFile() {
+  const payload = getDesktopCatalogPayload();
+  downloadTextFile(`Pff-catalog-${payload.exported_at.slice(0, 10)}.json`, JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
+  return payload;
+}
+
+function desktopKindField(record, fruitId) {
+  const labels = getProductionFieldLabels(fruitId);
+  const kindId = String(record.kind_id || "").trim();
+  const kindName = String(record.kind_name || "").trim();
+  const compactKind = kindName.replaceAll("น้ำหนัก", "").replaceAll("มะม่วง", "").trim();
+  if (labels.mode === "single") {
+    const compactWeight = String(labels.weight || "").replaceAll("น้ำหนัก", "").trim();
+    return kindId === `${fruitId}:weight` || kindName === labels.weight || compactKind === compactWeight || compactKind === productionFruitOptions.find((fruit) => fruit.id === fruitId)?.label ? "weight" : "";
+  }
+  const compactWater = String(labels.water || "").replaceAll("น้ำหนัก", "").replaceAll("มะม่วง", "").trim();
+  const compactFlower = String(labels.flower || "").replaceAll("น้ำหนัก", "").replaceAll("มะม่วง", "").trim();
+  if (kindId === `${fruitId}:water` || kindName === labels.water || compactKind === compactWater || (fruitId === "mango" && compactKind === "หั่นฝา")) return "water";
+  if (kindId === `${fruitId}:flower` || kindName === labels.flower || compactKind === compactFlower) return "flower";
+  return "";
+}
+
+function prepareDesktopWeighingImport(payload) {
+  if (!payload || payload.schema !== "pff.weighing.v1" || !Array.isArray(payload.records)) {
+    throw new Error("ไฟล์ต้องเป็น pff.weighing.v1 และมีรายการ records");
+  }
+  if (payload.simulated === true) throw new Error("ไม่รับไฟล์จากโหมดจำลอง (simulation)");
+  if (!payload.records.length) throw new Error("ไฟล์นี้ไม่มีรายการชั่ง");
+  if (payload.records.length > 5000) throw new Error("หนึ่งไฟล์รองรับไม่เกิน 5,000 รายการ");
+
+  const accepted = [];
+  const rejected = [];
+  payload.records.forEach((source, index) => {
+    const rowNo = index + 1;
+    try {
+      if (!source || typeof source !== "object") throw new Error("รูปแบบรายการไม่ถูกต้อง");
+      const recordId = String(source.id || "").trim();
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(recordId)) throw new Error("รหัสรายการว่างหรือไม่ถูกต้อง");
+      if (source.simulated === true || Number(source.simulated) === 1) throw new Error("เป็นข้อมูลจากโหมดจำลอง");
+      if (source.void_at || source.void_reason) throw new Error("รายการถูกยกเลิก ต้องตรวจสอบแยกก่อนนำเข้า");
+      const sourceFruitId = String(source.fruit_id || "").trim();
+      const fruitId = productionFruitFieldLabels[sourceFruitId]
+        ? sourceFruitId
+        : productionFruitOptions.find((fruit) => fruit.label === String(source.fruit_name || "").trim() && productionFruitFieldLabels[fruit.id])?.id;
+      if (!fruitId) throw new Error(`ไม่พบผลไม้ ${source.fruit_name || sourceFruitId || "-"} ในเว็บ`);
+      const field = desktopKindField(source, fruitId);
+      if (!field) throw new Error(`ประเภทน้ำหนัก ${source.kind_name || source.kind_id || "-"} ไม่ตรงกับผลไม้ในเว็บ`);
+      const employeeCode = String(source.employee_code || "").trim();
+      const employee = getEmployees().find((item) => item.status === "Active" && String(item.emp_code) === employeeCode);
+      if (!employee) throw new Error(`ไม่พบพนักงานรหัส ${employeeCode || "-"} หรือพนักงานไม่ได้ใช้งาน`);
+      if (String(source.employee_id || "") && String(source.employee_id) !== String(employee.id)) throw new Error("รหัสอ้างอิงพนักงานไม่ตรงกับฐานเว็บ");
+      const recordDate = String(source.record_date || "").trim();
+      if (!isValidProductionRecordDate(recordDate)) throw new Error("วันที่ชั่งไม่ถูกต้องหรือเป็นวันที่อนาคต");
+      const recordedAt = new Date(source.recorded_at);
+      if (!source.recorded_at || Number.isNaN(recordedAt.getTime()) || String(source.recorded_at).slice(0, 10) !== recordDate) throw new Error("เวลาและวันที่ชั่งไม่สอดคล้องกัน");
+      const tenths = Number(source.tenths);
+      const weight = Number(source.weight_kg);
+      if (!Number.isSafeInteger(tenths) || tenths <= 0 || !Number.isFinite(weight) || Math.abs(weight - tenths / 10) > 0.0001) throw new Error("น้ำหนักไม่ตรงกับหน่วยทศนิยมของเครื่องชั่ง");
+      const rawKg = Number(source.raw_kg);
+      if (!Number.isFinite(rawKg) || Math.trunc((rawKg + Number.EPSILON) * 10) !== tenths) throw new Error("น้ำหนักดิบไม่สอดคล้องกับน้ำหนักที่ส่งมาคิดเงิน");
+      const pileNo = normalizeProductionPileNumber(source.pile_no ?? source.pile);
+      if (!pileNo || !isConfiguredFruitPile(pileNo, true)) throw new Error(`ไม่พบกอง ${source.pile_no ?? source.pile ?? "-"} หรือกองไม่ได้เปิดใช้งานในเว็บ`);
+      const recordTime = recordedAt.toLocaleTimeString("en-GB", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Asia/Bangkok" });
+      const basePayload = { employee, fruit_type: fruitId, pile_no: pileNo, record_date: recordDate, entry_mode: "desktop-import" };
+      if (field === "weight") basePayload.durian_weight = weight;
+      else {
+        basePayload.water_weight = field === "water" ? weight : 0;
+        basePayload.flower_weight = field === "flower" ? weight : 0;
+      }
+      const built = buildProductionRecord(basePayload, { fullname: "Import" });
+      accepted.push({
+        ...built,
+        client_uid: `pff:${recordId}`,
+        batch_uid: `pff-export:${String(payload.export_id || "unknown").slice(0, 120)}`,
+        record_time: recordTime,
+        created_by: "Import",
+        updated_by: "Import",
+        desktop_import: {
+          schema: payload.schema, export_id: payload.export_id || "", station_id: payload.station_id || "",
+          record_id: recordId, capture_id: source.capture_id || "", recorded_at: source.recorded_at,
+          raw_kg: source.raw_kg, tenths, device: source.device || "", raw_frame: source.raw_frame || "", stability: source.stability || ""
+        }
+      });
+    } catch (error) {
+      rejected.push({ row: rowNo, id: String(source?.id || "-"), reason: error.message });
+    }
+  });
+  return { payload, accepted, rejected };
+}
+
+async function submitDesktopWeighingImport(user, confirmOverlap = false) {
+  if (!canImportDesktopWeighing(getSession()?.user)) {
+    desktopImportPreview = null;
+    desktopImportMessage = "การนำเข้าข้อมูลชั่งใช้สิทธิ์ C6 ขึ้นไป บัญชี C4–C5 ดูและส่งออกข้อมูลหลักได้";
+    desktopImportMessageType = "error";
+    render();
+    return;
+  }
+  if (!desktopImportPreview?.accepted.length || desktopImportBusy) return;
+  desktopImportBusy = true;
+  desktopImportMessage = "กำลังส่งรายการเข้าคิวฐานข้อมูลกลาง...";
+  desktopImportMessageType = "success";
+  render();
+  try {
+    const response = await cloudApiRequest("/api/desktop-import/enqueue-file", {
+      method: "POST",
+      body: JSON.stringify({
+        file_name: desktopImportPreview.fileName,
+        records: desktopImportPreview.accepted,
+        ...(confirmOverlap ? { review_token: desktopImportPreview.review?.review_token } : {})
+      }),
+      timeoutMs: 60000
+    });
+    const queues = response.queues || [];
+    if (!response.accepted || !queues.length) throw new Error("ฐานกลางยังไม่ยืนยันการรับไฟล์");
+    for (const queue of queues) {
+      const item = acceptProductionQueueResult(queue);
+      if (item?.id) trackProductionQueueItem(item.id);
+    }
+    addAuditLog(user, "IMPORT_DESKTOP_WEIGHING", `Accepted file ${desktopImportPreview.fileName}: ${response.record_count} records into ${queues.length} queues`);
+    desktopImportMessage = `รับไฟล์เข้าคิวแล้ว ${response.record_count.toLocaleString("th-TH")} รายการ · ${queues.length.toLocaleString("th-TH")} คิว รอฐานข้อมูลยืนยันการบันทึกครบ น้ำหนักเท่ากันคนละรอบจะไม่ถูกตัดทิ้ง`;
+    desktopImportMessageType = "success";
+    desktopImportPreview = null;
+  } catch (error) {
+    if (error.data?.code === "desktop_file_review") {
+      desktopImportPreview.review = error.data;
+    } else if (error.data?.code === "desktop_file_duplicate") {
+      desktopImportPreview.review = null;
+      desktopImportPreview.blocked = true;
+    }
+    desktopImportMessage = `นำเข้าไม่สำเร็จ: ${error.message}`;
+    desktopImportMessageType = "error";
+  } finally {
+    desktopImportBusy = false;
+    render();
+  }
 }
 
 function getPileSummaries(records) {
@@ -4147,20 +5050,23 @@ function exportSummaryData() {
 }
 
 function getProductionRecords() {
+  if (Array.isArray(productionRecordsMemory)) return productionRecordsMemory;
   const raw = localStorage.getItem(PRODUCTION_RECORDS_KEY);
   if (!raw) return [];
 
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    productionRecordsMemory = Array.isArray(parsed) ? parsed : [];
+    return productionRecordsMemory;
   } catch {
     localStorage.removeItem(PRODUCTION_RECORDS_KEY);
+    productionRecordsMemory = [];
     return [];
   }
 }
 
 function saveProductionRecords(records, options = {}) {
-  localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(records));
+  writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY, records);
   if (options.sync !== false) queueLiveStateSync("production_records");
 }
 
@@ -4174,6 +5080,16 @@ function normalizeTimeRecordWage(record) {
   };
 }
 
+function resolveTimeRecordEmployee(record, employees) {
+  // Employee numbers can change or be reused; the permanent id is authoritative.
+  const employee = record.employee_id
+    ? employees.find((item) => String(item.id) === String(record.employee_id))
+    : employees.find((item) => String(item.emp_code).trim() === String(record.emp_code || "").trim());
+  if (!employee) return record;
+  return { ...record, recorded_emp_code: record.recorded_emp_code || record.emp_code,
+    emp_code: String(employee.emp_code), fullname: employee.fullname || record.fullname };
+}
+
 function getTimeRecords() {
   const raw = localStorage.getItem(TIME_RECORDS_KEY);
   if (!raw) return [];
@@ -4182,8 +5098,9 @@ function getTimeRecords() {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
 
+    const employees = getTimeEmployees();
     return parsed.map((record) => {
-      const wageNormalizedRecord = normalizeTimeRecordWage(record);
+      const wageNormalizedRecord = normalizeTimeRecordWage(resolveTimeRecordEmployee(record, employees));
       if (!wageNormalizedRecord?.clock_in || !wageNormalizedRecord?.clock_out) return wageNormalizedRecord;
       try {
         return { ...wageNormalizedRecord, ...calculateWorkMinutes(wageNormalizedRecord.clock_in, wageNormalizedRecord.clock_out) };
@@ -4204,6 +5121,35 @@ function saveTimeRecords(records) {
 
 function saveTimeRecordsLocal(records) {
   localStorage.setItem(TIME_RECORDS_KEY, JSON.stringify(records));
+}
+
+async function refreshSavedRecordView(mode = "time") {
+  if (liveStateRefreshInFlight || liveStateSyncInFlight.size || liveStateSyncTimers.size || timeRecordSaving) {
+    throw new Error("กำลังซิงก์หรือบันทึกข้อมูล กรุณารอสักครู่แล้วรีเฟรชอีกครั้ง");
+  }
+  liveStateRefreshInFlight = true;
+  const version = getLiveStateVersionSignature();
+  try {
+    const table = mode === "time" ? "time" : "production";
+    const [response] = await Promise.all([
+      cloudApiRequest(`/api/${table}-records/snapshot`),
+      table === "time" ? hydrateTimeEmployeesFromCloud() : hydrateEmployeesFromCloud()
+    ]);
+    if (!Array.isArray(response.data)) throw new Error("ข้อมูลจากฐานกลางไม่สมบูรณ์ กรุณาลองใหม่");
+    if (version !== getLiveStateVersionSignature() || liveStateSyncInFlight.size || liveStateSyncTimers.size || timeRecordSaving) {
+      throw new Error("มีการบันทึกระหว่างรีเฟรช กรุณาลองอีกครั้ง");
+    }
+    if (table === "time") {
+      saveTimeRecordsLocal(response.data);
+      localStorage.setItem(TIME_SYNC_CURSOR_KEY, String(response.cursor || ""));
+    } else {
+      await replaceProductionIndexedDb(response.data, response.cursor || "");
+      writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY, response.data);
+      productionSyncCursor = String(response.cursor || "");
+    }
+  } finally {
+    liveStateRefreshInFlight = false;
+  }
 }
 
 function nextLocalEmployeeId(...groups) {
@@ -4398,9 +5344,9 @@ function buildTimeRecord(payload, user) {
     department: employee.department || "",
     employee_type: employee.employee_type || "normal",
     employee_type_label: getTimeEmployeeTypeOption(employee.employee_type).label,
-    daily_wage: employee.daily_wage || TIME_DAILY_WAGE,
-    normal_hourly_rate: (employee.daily_wage || TIME_DAILY_WAGE) / TIME_STANDARD_HOURS,
-    ot_hourly_rate: Number(employee.ot_hourly_rate) || TIME_OT_HOURLY_RATE,
+    daily_wage: employee.employee_type === "office_347" ? 0 : employee.daily_wage || TIME_DAILY_WAGE,
+    normal_hourly_rate: employee.employee_type === "office_347" ? 0 : (employee.daily_wage || TIME_DAILY_WAGE) / TIME_STANDARD_HOURS,
+    ot_hourly_rate: employee.employee_type === "office_347" ? 0 : Number(employee.ot_hourly_rate) || TIME_OT_HOURLY_RATE,
     clock_in: clockIn,
     clock_out: clockOut,
     ...calculation,
@@ -4576,17 +5522,10 @@ function formatWeeklyDateLabel(dateValue) {
 
 function renderTimeModeSelector() {
   const options = [
-    {
-      id: "daily",
-      label: "บันทึกรายวัน",
-      description: "กรอกเวลารายการเดียวหรือรายการรายวัน"
-    },
-    {
-      id: "weekly",
-      label: "บันทึกรายสัปดาห์",
-      description: "เลือกพนักงานและกรอกเวลาแบบ 7 วัน"
-    }
+    { id: "weekly", label: "บันทึกรายสัปดาห์", description: "เลือกพนักงานและกรอกเวลาแบบ 7 วัน" },
+    { id: "data", label: "รายการข้อมูล", description: "นำเข้าข้อมูลจากเครื่องสแกนและตรวจรายการเวลา" }
   ];
+
 
   return `
     <section class="time-mode-switch">
@@ -4605,7 +5544,7 @@ function renderTimeModeSelector() {
 }
 
 function apiGetLatestProductionRecords(limit = 10) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateInputValue();
   return getProductionRecords()
     .filter((record) => record.record_date === today)
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
@@ -4637,8 +5576,11 @@ function apiCheckProductionDuplicate(
 function getProductionPayloadPileSummary(payload) {
   const pile = String(normalizeProductionPileNumber(payload.pile_no ?? payload.pile) || "");
   const fruitId = payload.fruit_type || getSelectedProductionFruitId();
-  if (isDurianFruit(fruitId)) {
-    const total = getDurianGradeTotal(payload.grade_weights || {});
+  if (isSingleWeightFruit(fruitId)) {
+    const directWeight = Number(payload.durian_weight ?? payload.total_weight);
+    const total = Number.isFinite(directWeight) && directWeight > 0
+      ? directWeight
+      : getDurianGradeTotal(payload.grade_weights || {});
     return { pile, water: 0, flower: 0, total };
   }
   const water = Number(payload.water_weight ?? payload.water ?? 0) || 0;
@@ -4688,6 +5630,11 @@ function productionSimilarityRatio(a, b) {
   return Math.min(Math.abs(a), Math.abs(b)) / larger;
 }
 
+function productionDuplicateWeightChannels(group, fruitId) {
+  if (isSingleWeightFruit(fruitId)) return group.total > 0 ? ["total"] : [];
+  return ["water", "flower"].filter((channel) => Number(group[channel] || 0) > 0);
+}
+
 function getPotentialProductionDuplicateWarning(employee, payloads, recordDate, fruitId) {
   const incomingGroups = summarizeProductionPayloadGroups(payloads);
   const existingGroups = summarizeExistingProductionGroups(employee, recordDate, fruitId);
@@ -4696,14 +5643,27 @@ function getPotentialProductionDuplicateWarning(employee, payloads, recordDate, 
   const existingByPile = new Map(existingGroups.map((group) => [group.pile, group]));
   if (!incomingGroups.every((group) => existingByPile.has(group.pile))) return "";
 
-  const incomingTotal = incomingGroups.reduce((sum, group) => sum + group.total, 0);
-  const existingTotal = existingGroups.reduce((sum, group) => sum + group.total, 0);
+  const comparisons = incomingGroups.map((group) => ({
+    group,
+    existing: existingByPile.get(group.pile),
+    channels: productionDuplicateWeightChannels(group, fruitId)
+  }));
+  // Water and flower are separate production types. Only compare the type
+  // being entered with the same type already stored for that pile.
+  if (comparisons.some(({ existing, channels }) =>
+    !channels.length || channels.some((channel) => Number(existing?.[channel] || 0) <= 0)
+  )) return "";
+
+  const incomingTotal = comparisons.reduce((sum, item) =>
+    sum + item.channels.reduce((channelSum, channel) => channelSum + Number(item.group[channel] || 0), 0), 0
+  );
+  const existingTotal = comparisons.reduce((sum, item) =>
+    sum + item.channels.reduce((channelSum, channel) => channelSum + Number(item.existing[channel] || 0), 0), 0
+  );
   const sameExact = incomingGroups.every((group) => {
     const existing = existingByPile.get(group.pile);
-    return (
-      Math.abs(group.water - existing.water) < 0.05 &&
-      Math.abs(group.flower - existing.flower) < 0.05 &&
-      Math.abs(group.total - existing.total) < 0.05
+    return productionDuplicateWeightChannels(group, fruitId).every(
+      (channel) => Math.abs(Number(group[channel] || 0) - Number(existing[channel] || 0)) < 0.05
     );
   });
   const totalSimilarity = productionSimilarityRatio(incomingTotal, existingTotal);
@@ -4712,7 +5672,10 @@ function getPotentialProductionDuplicateWarning(employee, payloads, recordDate, 
   const labels = getProductionFieldLabels(fruitId);
   const incomingLines = incomingGroups.map((group) => {
     const existing = existingByPile.get(group.pile);
-    return `กอง ${group.pile}: กำลังกรอก ${numberText(group.total)} กก. / มีอยู่แล้ว ${numberText(existing.total)} กก.`;
+    const channels = productionDuplicateWeightChannels(group, fruitId);
+    const incomingWeight = channels.reduce((sum, channel) => sum + Number(group[channel] || 0), 0);
+    const existingWeight = channels.reduce((sum, channel) => sum + Number(existing[channel] || 0), 0);
+    return `กอง ${group.pile}: กำลังกรอก ${numberText(incomingWeight)} กก. / มีประเภทเดียวกันอยู่แล้ว ${numberText(existingWeight)} กก.`;
   });
   return [
     `อาจมีข้อมูลซ้ำของรหัส ${employee.emp_code} วันที่ ${recordDate}`,
@@ -4721,7 +5684,7 @@ function getPotentialProductionDuplicateWarning(employee, payloads, recordDate, 
     "",
     `กด OK/ยืนยัน เพื่อบันทึกต่อ`,
     `กด Cancel/ยกเลิก เพื่อกลับไปตรวจสอบ โดยข้อมูลที่กรอกไว้จะยังอยู่`,
-    labels.mode === "grades" ? "" : `ตรวจจาก${labels.waterShort || labels.water} + ${labels.flowerShort || labels.flower}`
+    labels.mode === "grades" ? "" : "ตรวจแยกประเภทน้ำหนัก ไม่เปรียบเทียบน้ำกับดอกข้ามกัน"
   ].filter((line) => line !== "").join("\n");
 }
 
@@ -4737,12 +5700,12 @@ function createProductionBatchUid() {
 
 function isValidProductionRecordDate(value) {
   const date = String(value || "");
-  return /^\d{4}-\d{2}-\d{2}$/.test(date) && date <= new Date().toISOString().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) && date <= localDateInputValue();
 }
 
 function buildProductionRecord(payload, user, existingRecord = null) {
   const now = new Date();
-  const recordDate = payload.record_date || existingRecord?.record_date || now.toISOString().slice(0, 10);
+  const recordDate = payload.record_date || existingRecord?.record_date || localDateInputValue(now);
   const recordTime = existingRecord?.record_time || now.toTimeString().slice(0, 8);
   const fruitType = payload.fruit_type || existingRecord?.fruit_type || "mangosteen";
   const labels = getProductionFieldLabels(fruitType);
@@ -4750,7 +5713,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
   const pileNo = normalizeProductionPileNumber(payload.pile_no ?? existingRecord?.pile_no);
   if (pileNo === null) throw new Error("เลขกองต้องเป็นจำนวนเต็มตั้งแต่ 1 ขึ้นไป");
 
-  if (isDurianFruit(fruitType)) {
+  if (isSingleWeightFruit(fruitType)) {
     const legacyWeights = normalizeDurianGradeWeights(payload.grade_weights || existingRecord?.grade_weights);
     const durianWeight = Number(
       payload.durian_weight ?? (payload.grade_weights ? getDurianGradeTotal(payload.grade_weights) : getRecordDurianWeight(existingRecord))
@@ -4763,19 +5726,21 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       ? Number(existingRecord?.total_amount || existingRecord?.grand_total || 0) / existingTotalWeight
       : 0;
     const preservedRate = Number(existingRecord?.durian_rate || derivedExistingRate || existingRecord?.grade_rates?.A);
-    const durianRate = rateRecord ? Number(rateRecord.rate) : preservedRate;
+    const rateMayBePending = fruitType === "pomelo" || fruitType === "coconut";
+    const durianRate = rateRecord ? Number(rateRecord.rate) : (Number.isFinite(preservedRate) ? preservedRate : 0);
     if (!Number.isFinite(durianWeight) || durianWeight <= 0) {
-      throw new Error("กรุณากรอกน้ำหนักทุเรียนมากกว่า 0");
+      throw new Error(`กรุณากรอก${labels.weight}มากกว่า 0`);
     }
-    if (!Number.isFinite(durianRate) || durianRate <= 0) {
+    if ((!Number.isFinite(durianRate) || durianRate <= 0) && !rateMayBePending) {
       throw new Error(
-        `ยังไม่ได้ตั้งอัตราค่าจ้างสำหรับน้ำหนักทุเรียน ` +
+        `ยังไม่ได้ตั้งอัตราค่าจ้างสำหรับ${labels.weight} ` +
         `(วันที่เริ่มใช้ต้องไม่เกิน ${recordDate}) ตั้งเพียงครั้งเดียวแล้วระบบจะใช้ต่อเนื่องจนกว่าจะเปลี่ยนเรท`
       );
     }
     const gradeWeights = { ...legacyWeights, A: durianWeight, B: 0, C: 0, D: 0, E: 0 };
-    const gradeRates = { A: durianRate, B: 0, C: 0, D: 0, E: 0 };
-    const totalAmount = durianWeight * durianRate;
+    const effectiveRate = Number.isFinite(durianRate) && durianRate > 0 ? durianRate : 0;
+    const gradeRates = { A: effectiveRate, B: 0, C: 0, D: 0, E: 0 };
+    const totalAmount = durianWeight * effectiveRate;
     const gradeAmounts = { A: totalAmount, B: 0, C: 0, D: 0, E: 0 };
     return {
       ...base,
@@ -4784,6 +5749,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       batch_uid: existingRecord?.batch_uid || payload.batch_uid || createProductionBatchUid(),
       session_id: payload.session_id || existingRecord?.session_id || 0,
       fruit_type: fruitType,
+      production_mode: "single",
       employee_id: payload.employee.id,
       emp_code: payload.employee.emp_code,
       employee_name: payload.employee.fullname,
@@ -4796,7 +5762,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       record_time: recordTime,
       shift: payload.shift || existingRecord?.shift || "",
       durian_weight: durianWeight,
-      durian_rate: durianRate,
+      durian_rate: effectiveRate,
       durian_amount: totalAmount,
       grade_weights: gradeWeights,
       grade_rates: gradeRates,
@@ -4814,6 +5780,8 @@ function buildProductionRecord(payload, user, existingRecord = null) {
       flower_total: 0,
       total_amount: totalAmount,
       grand_total: totalAmount,
+      entry_mode: payload.entry_mode || existingRecord?.entry_mode || "single",
+      raw_weight_entries: payload.raw_weight_entries || existingRecord?.raw_weight_entries || [],
       created_by: existingRecord?.created_by || user.fullname,
       updated_by: user.fullname,
       status: existingRecord?.status || "Draft",
@@ -4854,6 +5822,7 @@ function buildProductionRecord(payload, user, existingRecord = null) {
     batch_uid: existingRecord?.batch_uid || payload.batch_uid || createProductionBatchUid(),
     session_id: payload.session_id || existingRecord?.session_id || 0,
     fruit_type: fruitType,
+    production_mode: "dual",
     employee_id: payload.employee.id,
     emp_code: payload.employee.emp_code,
     employee_name: payload.employee.fullname,
@@ -4876,6 +5845,8 @@ function buildProductionRecord(payload, user, existingRecord = null) {
     total_weight: totalWeight,
     total_amount: waterAmount + flowerAmount,
     grand_total: waterAmount + flowerAmount,
+    entry_mode: payload.entry_mode || existingRecord?.entry_mode || "single",
+    raw_weight_entries: payload.raw_weight_entries || existingRecord?.raw_weight_entries || [],
     record_date: recordDate,
     record_time: recordTime,
     created_by: existingRecord?.created_by || user.fullname,
@@ -4953,6 +5924,15 @@ function apiUpdateProductionRecord(id, payload, user, options = {}) {
   return updatedRecord;
 }
 
+function rateMoney(value) {
+  return new Intl.NumberFormat("th-TH", {
+    style: "currency",
+    currency: "THB",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(value);
+}
+
 function money(value) {
   return new Intl.NumberFormat("th-TH", {
     style: "currency",
@@ -5012,6 +5992,7 @@ function buildFullExportPayload(user, rangeOverride = null, departmentOverride =
     printed_by: user?.fullname || "System Admin",
     printed_by_position: getExportPositionLabel(user),
     employees: getEmployees(),
+    time_employees: getTimeEmployees(),
     production_records: getProductionRecords(),
     time_records: getTimeRecords(),
     deduction_records: getReportAdjustmentRecords()
@@ -5021,7 +6002,7 @@ function buildFullExportPayload(user, rangeOverride = null, departmentOverride =
 async function syncReportData() {
   const response = await fetch(`${REPORT_API_BASE}/reports/sync`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Session-Token": getSession()?.token || "" },
     body: JSON.stringify(buildReportPayload())
   });
 
@@ -5032,14 +6013,28 @@ async function syncReportData() {
 
 async function downloadReport(url, options = {}) {
   let response;
+  const headers = new Headers(options.headers || {});
+  headers.set("X-Session-Token", getSession()?.token || "");
   try {
-    response = await fetch(url, options);
+    response = await fetch(url, { ...options, headers });
   } catch (error) {
-    throw new Error(`ไม่สามารถเชื่อมต่อ Report Server ได้ กรุณาเปิด start_report_server.bat หรือ start_pismai_system.bat ก่อน Export`);
+    throw new Error("เชื่อมต่อระบบรายงานไม่สำเร็จ กรุณาลอง Export อีกครั้งเมื่อเครือข่ายพร้อม");
   }
 
   if (!response.ok) {
-    throw new Error("Report export failed.");
+    let detail = "";
+    if ((response.headers.get("Content-Type") || "").includes("application/json")) {
+      const body = await response.json().catch(() => ({}));
+      if (typeof body.error === "string") detail = body.error.slice(0, 500);
+    }
+    const messages = {
+      401: "เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่แล้ว Export อีกครั้ง",
+      403: "บัญชีนี้ไม่มีสิทธิ์ส่งออกรายงานที่เลือก",
+      413: "ข้อมูลรายงานเกินขนาดที่รองรับ กรุณาลดช่วงวันที่แล้ว Export อีกครั้ง",
+      502: "ระบบรายงานยังไม่พร้อม กรุณาลองอีกครั้ง",
+      503: "ระบบรายงานกำลังเริ่มทำงาน กรุณาลองอีกครั้ง"
+    };
+    throw new Error(`${messages[response.status] || detail || "สร้างรายงานไม่สำเร็จ"} (HTTP ${response.status})`);
   }
 
   const blob = await response.blob();
@@ -5061,10 +6056,30 @@ function setReportMessage(message, type = "success") {
   reportMessageType = type;
 }
 
-function render() {
+function render(force = false) {
   const session = getSession();
   const route = location.hash.replace("#/", "") || "login";
+  const stockMountKey = `${session?.user?.username || ""}:${canWriteStock(session?.user)}`;
+  if (stockLedgerController && (stockLedgerMountedRoute !== route || stockLedgerMountKey !== stockMountKey || !session || !canOpen(session.user, route))) {
+    stockLedgerController.destroy();
+    stockLedgerController = null;
+    stockLedgerMountedRoute = "";
+  }
   const routeChanged = Boolean(lastRenderedRoute && lastRenderedRoute !== route);
+  const personalFilter = document.activeElement;
+  if (force !== true && session && !routeChanged && route === "summary-person" &&
+      personalFilter?.matches?.("#personalReportForm select, #personalReportForm input")) {
+    // Bootstrap and notification callbacks must not replace an open native picker.
+    if (!personalFilter.dataset.pendingReportRender) {
+      personalFilter.dataset.pendingReportRender = "1";
+      personalFilter.addEventListener("blur", () => {
+        window.setTimeout(() => {
+          if (location.hash === "#/summary-person") render();
+        }, 0);
+      }, {once: true});
+    }
+    return;
+  }
 
   if (route !== "dashboard") stopHomeStorageUsageRefresh();
 
@@ -5141,78 +6156,58 @@ function startLiveClock() {
 
 function renderLogin(errorMessage = "") {
   app.innerHTML = `
-    <main class="page login-page">
-      <section class="login-shell">
-        <div class="login-intro">
-          <div class="brand-mark" aria-label="Pitsamai Frozen Fruits">
-            <img class="brand-logo" src="assets/pitsamai-logo.png" alt="Pitsamai Frozen Fruits" />
-          </div>
-
-          <div class="login-copy">
-            <p class="eyebrow">Pitsamai Frozen Fruits</p>
-            <h1>System<span>Pro</span></h1>
-            <p class="brand-subtitle">by Pitsamai Frozen Fruits</p>
-            <div class="login-divider"></div>
-            <p class="intro-text">
-              ระบบบันทึกผลผลิตและคำนวณค่าจ้างรายบุคคลสำหรับโรงงานพิสมัยผลไม้แช่แข็ง
-            </p>
-          </div>
-
-          <div class="login-feature-row" aria-label="System highlights">
-            <div><span>Production</span><strong>บันทึกผลผลิต</strong></div>
-            <div><span>Wage</span><strong>คำนวณค่าจ้าง</strong></div>
-            <div><span>Report</span><strong>รายงานสรุป</strong></div>
-          </div>
+    <main class="fresh-login">
+      <header class="fresh-login-header">
+        <div class="fresh-login-brand">
+          <img src="assets/pitsamai-logo.png" alt="พิสมัยผลไม้แช่แข็ง" width="64" height="64" />
+          <div><strong>SystemPro</strong><small>PITSAMAI FROZEN FRUITS</small></div>
         </div>
-
-        <div class="login-panel">
-          <form class="login-card" id="loginForm">
-            <div class="login-lock" aria-hidden="true">
-              <span></span>
-            </div>
-            <h2>เข้าสู่ระบบ</h2>
-            <p class="hint">กรุณาเข้าสู่ระบบเพื่อใช้งาน</p>
-            ${errorMessage ? `<div class="alert alert-error">${errorMessage}</div>` : ""}
-
-            <label class="field">
-              <span>ชื่อผู้ใช้งาน</span>
-              <input id="username" name="username" autocomplete="username" placeholder="กรอกชื่อผู้ใช้งาน" required />
-            </label>
-
-            <label class="field">
-              <span>รหัสผ่าน</span>
+      </header>
+      <div class="fresh-login-main">
+        <section class="fresh-login-copy" aria-labelledby="loginWelcome">
+          <h1 id="loginWelcome">เริ่มต้นวันดี ๆ<br />ไปด้วยกัน</h1>
+          <p>บันทึกผลผลิตและดูแลทุกค่าจ้าง<br />ให้เป็นเรื่องง่ายในทุกวัน</p>
+          <div class="fresh-login-art" aria-hidden="true"><img src="assets/login-fruits.png" alt="" width="1536" height="1024" /></div>
+        </section>
+        <form class="fresh-login-form" id="loginForm" aria-labelledby="loginHeading">
+          <h2 id="loginHeading">เข้าสู่ระบบ</h2>
+          <p class="fresh-login-hint">ใช้บัญชีพนักงานของคุณเพื่อเริ่มทำงาน</p>
+          ${errorMessage ? `<div class="fresh-login-error" role="alert">${escapeHtml(errorMessage)}</div>` : ""}
+          <label class="fresh-login-field" for="username"><span>ชื่อผู้ใช้งาน</span>
+            <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="กรอกชื่อผู้ใช้งาน" required />
+          </label>
+          <div class="fresh-login-field">
+            <label for="password" style="display:block;margin-bottom:10px">รหัสผ่าน</label>
+            <div class="fresh-login-password">
               <input id="password" name="password" type="password" autocomplete="current-password" placeholder="กรอกรหัสผ่าน" required />
-            </label>
-
-            <div class="login-options">
-              <label class="remember-check">
-                <input name="remember_session" type="checkbox" />
-                <span>จดจำการเข้าสู่ระบบ</span>
-              </label>
-              <button class="forgot-button" type="button">ลืมรหัสผ่าน?</button>
+              <button class="fresh-login-reveal" id="toggleLoginPassword" type="button" aria-label="แสดงรหัสผ่าน" aria-controls="password" aria-pressed="false">แสดง</button>
             </div>
-
-            <button class="btn btn-primary login-submit" type="submit">
-              <span class="login-arrow" aria-hidden="true"></span>
-              เข้าสู่ระบบ
-            </button>
-
-            <div class="login-separator"><span>หรือ</span></div>
-
-            <p class="demo-note secure-note">
-              ระบบปลอดภัย ได้รับการป้องกันข้อมูล กรุณาอย่าเปิดเผยข้อมูลการเข้าสู่ระบบ
-            </p>
-          </form>
-        </div>
-      </section>
-      <footer class="login-footer">
-        <span>© 2026 Pitsamai Frozen Fruits Co., Ltd. สงวนลิขสิทธิ์ทุกประการ</span>
-      </footer>
+          </div>
+          <label class="fresh-login-remember"><input name="remember_session" type="checkbox" /><span>จดจำการเข้าสู่ระบบ</span></label>
+          <button class="fresh-login-submit" type="submit">เข้าสู่ระบบ</button>
+          <button class="fresh-login-help" id="loginHelp" type="button" aria-expanded="false" aria-controls="loginHelpMessage">ลืมรหัสผ่าน? ติดต่อผู้ดูแลระบบ</button>
+          <p class="fresh-login-feedback" id="loginHelpMessage" role="status" hidden>กรุณาติดต่อผู้ดูแลบัญชีของโรงงาน พร้อมแจ้งชื่อผู้ใช้งาน เพื่อขอตั้งรหัสผ่านใหม่</p>
+        </form>
+      </div>
+      <footer class="fresh-login-footer">© 2026 Pitsamai Frozen Fruits Co., Ltd.</footer>
     </main>
   `;
-
   document.querySelector("#loginForm")?.addEventListener("submit", handleLogin);
+  document.querySelector("#toggleLoginPassword")?.addEventListener("click", (event) => {
+    const password = document.querySelector("#password");
+    const showPassword = password.type === "password";
+    password.type = showPassword ? "text" : "password";
+    event.currentTarget.textContent = showPassword ? "ซ่อน" : "แสดง";
+    event.currentTarget.setAttribute("aria-label", showPassword ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน");
+    event.currentTarget.setAttribute("aria-pressed", String(showPassword));
+  });
+  document.querySelector("#loginHelp")?.addEventListener("click", (event) => {
+    const message = document.querySelector("#loginHelpMessage");
+    message.hidden = !message.hidden;
+    event.currentTarget.setAttribute("aria-expanded", String(!message.hidden));
+  });
 }
+
 
 async function handleLogin(event) {
   event.preventDefault();
@@ -5240,7 +6235,7 @@ async function handleLogin(event) {
       renderLogin(quotaMessage);
       return;
     }
-    if (cloudError?.status && [401, 403, 404].includes(cloudError.status)) {
+    if ((cloudError?.status >= 400 && cloudError?.status < 500) || location.protocol !== "file:") {
       renderLogin(cloudError.message || "ไม่พบบัญชีนี้ในฐานข้อมูลกลาง");
       return;
     }
@@ -5376,7 +6371,7 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
   });
   const timeRecords = getTimeRecords().filter((record) => (record.record_date || "") >= range.startDate && (record.record_date || "") <= range.endDate);
   combineTimeRecordsByEmployeeDate(timeRecords).forEach((record) => {
-    const employee = timeById.get(String(record.employee_id || "")) || timeByCode.get(String(record.emp_code || ""));
+    const employee = record.employee_id ? timeById.get(String(record.employee_id)) : timeByCode.get(String(record.emp_code || ""));
     if (!employee) return;
     const type = getTimeEmployeeTypeOption(employee.employee_type || record.employee_type);
     const employeeKey = `time:${employee.id || employee.emp_code}`;
@@ -5387,7 +6382,7 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
         employee_id: employee.id,
         emp_code: employee.emp_code || "-",
         fullname: employee.fullname || "-",
-        group_label: type.category === "special" ? "กลุ่มพิเศษ" : "กลุ่มปกติ",
+        group_label: type.category === "office" ? "กลุ่ม Office" : type.category === "special" ? "กลุ่มพิเศษ" : "กลุ่มปกติ",
         gross_amount: 0,
         bonus_amount: 0,
         deduction_amount: 0,
@@ -5404,7 +6399,12 @@ function getPfAccountingWeeklyRows(startDate, endDate) {
 
   rows.forEach((row) => {
     if (row.employee_kind !== "time") return;
-    const employee = timeById.get(String(row.employee_id || "")) || timeByCode.get(String(row.emp_code || ""));
+    const employee = row.employee_id ? timeById.get(String(row.employee_id)) : timeByCode.get(String(row.emp_code || ""));
+    if (employee?.employee_type === "office_347") {
+      row.gross_amount = 0;
+      row.net_amount = 0;
+      return;
+    }
     const bonusRecords = getBonusesForRange("time", range.startDate, range.endDate, employee || row);
     const deductionRecords = getDeductionsForRange("time", range.startDate, range.endDate, employee || row);
     row.bonus_items = bonusRecords.map((record) => ({ label: record.deduction_label || "เงินเพิ่ม", amount: Number(record.amount || 0), note: record.note || "", start_date: record.start_date || "", end_date: record.end_date || record.start_date || "", created_by: record.created_by || "" }));
@@ -5515,7 +6515,7 @@ async function getPfComparisonDashboard(startDate, endDate) {
   const timeByCode = new Map(timeEmployees.map((employee) => [String(employee.emp_code), employee]));
   const hourGroups = new Map();
   combineTimeRecordsByEmployeeDate(getTimeRecords().filter((record) => (record.record_date || "") >= range.startDate && (record.record_date || "") <= range.endDate)).forEach((record) => {
-    const employee = timeById.get(String(record.employee_id || "")) || timeByCode.get(String(record.emp_code || ""));
+    const employee = record.employee_id ? timeById.get(String(record.employee_id)) : timeByCode.get(String(record.emp_code || ""));
     const type = getTimeEmployeeTypeOption(employee?.employee_type || record.employee_type);
     const label = type.category === "special" ? "กลุ่มพิเศษ" : "กลุ่มปกติ";
     const receipt = getTimeReceiptRow(record);
@@ -5566,6 +6566,12 @@ async function getPfComparisonDashboard(startDate, endDate) {
   };
 }
 
+let stockLedgerController = null;
+let stockLedgerMountedRoute = "";
+let stockLedgerMountKey = "";
+
+let pfAccountingInitialView = "allocation";
+
 function renderApp(user, route) {
   if (route !== "secret-room") window.SecretRoom?.stop?.();
   window.SecretRoom?.startNotifications?.();
@@ -5613,14 +6619,29 @@ function renderApp(user, route) {
     });
   }
 
+  if (route === "compare-data") {
+    const sidebarScroll = app.querySelector(".acr-stable-rail")?.scrollTop || 0;
+    const deductionModule = modules.find((item) => item.id === "compare-data");
+    app.innerHTML = `<main class="acr-shell" data-pf-deductions>${window.AccountingControl.sidebar({ user, deductionTab: deductionActiveTab, accounting: canOpen(user, "accounting-control") })}<div class="acr-workspace">${renderDeductionEntry(user, deductionModule)}</div></main>`;
+    app.querySelector(".acr-stable-rail").scrollTop = sidebarScroll;
+    window.AccountingControl.bindSidebar(app);
+    app.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => { pfAccountingInitialView = button.dataset.view; location.hash = "#/accounting-control"; }));
+    app.querySelector("[data-ac-exit]")?.addEventListener("click", () => { location.hash = "#/dashboard"; });
+    bindDeductionEvents(user);
+    return;
+  }
+
   if (route === "accounting-control" && window.AccountingControl) {
     // Background bootstrap tasks can call render() several seconds after this
     // workspace opens. Keep the mounted controller so its selected view,
     // filters and scroll position are not reset to their initial values.
-    if (app.querySelector(".acr-shell")) return;
+    if (app.querySelector(".acr-shell:not([data-pf-deductions])")) return;
     window.AccountingControl.render(app, user, {
       onExit: () => { location.hash = "#/dashboard"; },
       onAudit: (action, description) => addAuditLog(user, action, description),
+      initialView: pfAccountingInitialView,
+      stockRequest: (path, settings = {}) => cloudApiRequest(path, { ...settings, ...(settings.body ? { body: JSON.stringify(settings.body) } : {}) }),
+      onOpenDeductions: canOpen(user, "compare-data") ? (tab) => { deductionActiveTab = tab || "production"; editingDeductionId = null; location.hash = "#/compare-data"; } : null,
       getWeeklyRows: getPfAccountingWeeklyRows,
       loadAllocations: getPfPaymentAllocations,
       saveAllocations: savePfPaymentAllocations,
@@ -5631,9 +6652,13 @@ function renderApp(user, route) {
     return;
   }
 
+  // Keep the cold-room prototype mounted across background cloud renders.
+  // Leaving this route still unmounts its explicitly temporary sample data.
+  if (route === "stock-cold-room" && app.querySelector("[data-stock-cold-workspace]")?.dataset.stockWrite === String(canWriteStock(user))) return;
+  if (stockCategoryForRoute(route) && stockLedgerController && stockLedgerMountedRoute === route && app.querySelector("[data-stock-ledger-workspace]")) return;
   const moduleItem = modules.find((item) => item.id === route) || modules[0];
   const visibleModules = visibleNavModulesForUser(user);
-  const navOrder = ["dashboard", "production", "inbound", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "record-report", "settings"];
+  const navOrder = ["dashboard", "production", "stock", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "record-report", "settings"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
   const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
   const secretUnreadCount = Number(window.SecretRoom?.getUnreadCount?.() || 0);
@@ -5686,7 +6711,7 @@ function renderApp(user, route) {
             ${visibleModules
               .map(
                 (item) => `
-                  <button class="nav-button ${item.id === route ? "active" : ""} ${item.locked ? "locked" : ""} ${(item.id === "secret-room" && secretUnreadCount) || (item.id === "record-report" && issueUnreadCount) ? "has-notification" : ""}" data-route="${item.id}" type="button">
+                  <button class="nav-button ${item.id === route || (item.id === "stock" && isStockRoute(route)) ? "active" : ""} ${item.locked ? "locked" : ""} ${(item.id === "secret-room" && secretUnreadCount) || (item.id === "record-report" && issueUnreadCount) ? "has-notification" : ""}" data-route="${item.id}" type="button">
                     <span class="nav-label">
                       <span class="nav-icon">${escapeHtml(item.icon || "•")}</span>
                       ${escapeHtml(item.label)}
@@ -5726,8 +6751,52 @@ function renderApp(user, route) {
   window.SecretRoom?.startNotifications?.();
   startIssueNotifications();
 }
+function isStockRoute(route) {
+  return ["stock", "inbound", "inbound-fruits", "inbound-history", "stock-cold-room", "stock-packaging", "stock-supplies", "stock-office"].includes(route);
+}
+
+function stockCategoryForRoute(route) {
+  return ({"stock-packaging": "packaging", "stock-supplies": "supplies", "stock-office": "office"})[route] || "";
+}
+
+function renderStockNavigation(active = "home") {
+  return `<nav class="stock-section-nav" aria-label="หมวด Stock">
+    <button type="button" data-route="stock" class="${active === "home" ? "is-active" : ""}" ${active === "home" ? 'aria-current="page"' : ""}>Stock ทั้งหมด</button>
+    <button type="button" data-route="inbound" class="${active === "general" ? "is-active" : ""}" ${active === "general" ? 'aria-current="page"' : ""}>Stock ผลไม้</button>
+    <button type="button" data-route="stock-cold-room" class="${active === "cold" ? "is-active" : ""}" ${active === "cold" ? 'aria-current="page"' : ""}>Stock ห้องเย็น</button>
+    ${[["packaging", "บรรจุภัณฑ์"], ["supplies", "เบ็ดเตล็ด"], ["office", "สำนักงาน"]].map(([category, label]) => `<button type="button" data-route="stock-${category}" class="${active === category ? "is-active" : ""}" ${active === category ? 'aria-current="page"' : ""}>Stock ${label}</button>`).join("")}
+  </nav>`;
+}
+
+function renderStockHub() {
+  return `${renderStockNavigation()}<section class="stock-hub">
+    <p class="eyebrow">PF STOCK MANAGEMENT</p><h2>Stock</h2>
+    <p>เลือกส่วนงานที่ต้องการจัดการ แยกผลไม้ ห้องเย็น บรรจุภัณฑ์ ของใช้โรงงาน และวัสดุสำนักงาน</p>
+    <div class="stock-choice-grid">
+      <button class="stock-choice" data-route="inbound" type="button">
+        <span class="stock-choice-icon" aria-hidden="true">⇩</span><span class="stock-choice-status">ใช้งานข้อมูลรับเข้าเดิม</span>
+        <strong>Stock ผลไม้</strong><p>รับเข้าผลไม้จากผู้ส่ง บันทึกน้ำหนัก ราคาซื้อจริง และต้นทุนของแต่ละรายการ</p>
+        <ul><li>บันทึกรับเข้าผลไม้</li><li>จัดการชนิดผลไม้และราคาแนะนำ</li><li>ประวัติรับเข้า พิมพ์ และส่งออก Excel / PDF</li><li>จัดการข้อมูลสินค้าและผู้ส่ง</li></ul>
+        <span class="stock-choice-cta">เปิด Stock ผลไม้ →</span>
+      </button>
+      <button class="stock-choice is-cold" data-route="stock-cold-room" type="button">
+        <span class="stock-choice-icon" aria-hidden="true">❄</span><span class="stock-choice-status">รับเข้า · ย้าย · จ่ายออก · ข้อมูลจริง</span>
+        <strong>Stock ห้องเย็น</strong><p>ตรวจรับสินค้าที่แปรรูปแล้วเข้าห้องเย็น 2 ห้อง จัดเก็บเป็นพาเลตและกล่องรอส่งลูกค้า</p>
+        <ul><li>ผังห้องเย็น 2D มองจากด้านบน</li><li>กล่องละ 20 กก. ปรับจำนวนกล่องต่อพาเลตได้</li><li>แยกสีสินค้าของเราและสินค้าฝากแช่ พร้อมชื่อเจ้าของ</li><li>รับเข้า ย้ายตำแหน่ง จ่ายออก และดูยอดสรุป</li></ul>
+        <span class="stock-choice-cta">เปิด Stock ห้องเย็น →</span>
+      </button>
+      ${[
+        {id: "packaging", label: "บรรจุภัณฑ์", icon: "▧", description: "กล่อง ถุง และบรรจุภัณฑ์ แยกตามชนิด ขนาด และหน่วยนับ", details: ["รับเข้าพร้อมราคาต่อหน่วยและเลขใบส่งของ", "เบิกใช้พร้อมผู้รับและหมายเหตุ", "ยอดคงเหลือและประวัติรับเข้า–เบิกออก"]},
+        {id: "supplies", label: "เบ็ดเตล็ด", icon: "⚒", description: "ของใช้ในโรงงาน เช่น ถุงมือยาง ถุงมือผ้า น้ำยา และสารเคมี", details: ["แยกรายการ ขนาด/รุ่น และหน่วยนับ", "บันทึกรับเข้าและเบิกของใช้โรงงาน", "ตรวจยอดคงเหลือและประวัติย้อนหลัง"]},
+        {id: "office", label: "สำนักงาน", icon: "▤", description: "วัสดุ Office เช่น หมึก กระดาษ และอุปกรณ์สำนักงาน", details: ["รับเข้าพร้อมราคาและเอกสารอ้างอิง", "เบิกจ่ายระบุผู้รับหรือแผนก", "ยอดคงเหลือและประวัติการเคลื่อนไหว"]}
+      ].map(category => `<button class="stock-choice is-${category.id}" data-route="stock-${category.id}" type="button"><span class="stock-choice-icon" aria-hidden="true">${category.icon}</span><span class="stock-choice-status">รับเข้า / เบิกออก / คงเหลือ</span><strong>Stock ${category.label}</strong><p>${category.description}</p><ul>${category.details.map(detail => `<li>${detail}</li>`).join("")}</ul><span class="stock-choice-cta">เปิด Stock ${category.label} →</span></button>`).join("")}
+    </div>
+    <div class="stock-hub-note">C4 ขึ้นไปเข้าใช้งานและบันทึกรับเข้า/เบิกออกได้ · PF Accounting อยู่ในเมนูเดิมสำหรับเรื่องเงิน · Stock ผลไม้ยังเป็นข้อมูลรับซื้อ ส่วน Stock ห้องเย็นยังเป็นโหมดทดลอง</div>
+  </section>`;
+}
+
 function renderModuleContent(user, moduleItem) {
-  const settingsSubpageIds = new Set(["employees", "production-employees", "time-employees", "wage-rates", "settings-pile-summary", "account-management", "audit-log", "backup"]);
+  const settingsSubpageIds = new Set(["employees", "production-employees", "time-employees", "wage-rates", "settings-pile-summary", "account-management", "audit-log", "backup", "pf-desktop-app"]);
   const wrapSettingsSubpage = (content) =>
     settingsSubpageIds.has(moduleItem.id) ? `${renderSettingsBackBar()}${content}` : content;
 
@@ -5752,9 +6821,12 @@ function renderModuleContent(user, moduleItem) {
   if (moduleItem.id === "production") {
     return renderProductionManagement(user, moduleItem);
   }
-  if (moduleItem.id === "inbound") return renderInboundEntry(user);
-  if (moduleItem.id === "inbound-fruits") return renderInboundFruitManagement(user);
-  if (moduleItem.id === "inbound-history") return renderInboundHistory(user);
+  if (moduleItem.id === "stock") return renderStockHub();
+  if (moduleItem.id === "stock-cold-room") return `${renderStockNavigation("cold")}<section class="stock-cold-workspace" data-stock-cold-workspace data-stock-write="${canWriteStock(user)}"><iframe src="stock-cold-room.html?v=20261103-sales${canWriteStock(user) ? "" : "&readonly=1"}" title="Stock ห้องเย็น 2D — ข้อมูลจริง" class="stock-cold-frame"></iframe></section>`;
+  if (stockCategoryForRoute(moduleItem.id)) return `${renderStockNavigation(stockCategoryForRoute(moduleItem.id))}<section data-stock-ledger-workspace aria-label="${escapeHtml(moduleItem.label)}"></section>`;
+  if (moduleItem.id === "inbound") return `<div class="stock-ledger sl-fruit">${renderInboundEntry(user)}</div>`;
+  if (moduleItem.id === "inbound-fruits") return `<div class="stock-ledger sl-fruit">${renderInboundFruitManagement(user)}</div>`;
+  if (moduleItem.id === "inbound-history") return `<div class="stock-ledger sl-fruit">${renderInboundHistory(user)}</div>`;
   if (moduleItem.id === "summary-person") {
     return renderPersonalReport(moduleItem);
   }
@@ -5791,6 +6863,9 @@ function renderModuleContent(user, moduleItem) {
   if (moduleItem.id === "backup") {
     return wrapSettingsSubpage(renderBackupModule(user, moduleItem));
   }
+  if (moduleItem.id === "pf-desktop-app") {
+    return wrapSettingsSubpage(renderPfDesktopApp(user, moduleItem));
+  }
   if (moduleItem.id === "pile-management") {
     return renderPileManagement(moduleItem);
   }
@@ -5807,6 +6882,21 @@ function renderModuleContent(user, moduleItem) {
 }
 
 function bindAppEvents(user, moduleItem) {
+  const stockCategory = stockCategoryForRoute(moduleItem.id);
+  if (stockCategory && !window.StockLedger) {
+    const stockRoot = document.querySelector("[data-stock-ledger-workspace]");
+    if (stockRoot) stockRoot.innerHTML = '<div class="alert alert-error" role="alert">โหลดหน้าสต็อกไม่ครบ กรุณารีเฟรชหน้าเว็บเพื่อลองใหม่</div>';
+  }
+  if (stockCategory && window.StockLedger) {
+    stockLedgerController?.destroy();
+    stockLedgerMountedRoute = moduleItem.id;
+    stockLedgerMountKey = `${user.username || ""}:${canWriteStock(user)}`;
+    stockLedgerController = window.StockLedger.mount(document.querySelector("[data-stock-ledger-workspace]"), {
+      category: stockCategory,
+      canWrite: canWriteStock(user),
+      request: (path, options = {}) => cloudApiRequest(path, {timeoutMs: 20000, ...options, ...(options.body ? {body: JSON.stringify(options.body)} : {})})
+    });
+  }
   document.querySelectorAll("[data-route]").forEach((button) => {
     button.addEventListener("click", () => {
       document.body.classList.remove("drawer-open");
@@ -5815,7 +6905,7 @@ function bindAppEvents(user, moduleItem) {
         setSelectedProductionFruit(button.dataset.dashboardFruit);
       }
       if (nextRoute === "summary-main") {
-        summaryDate = new Date().toISOString().slice(0, 10);
+        summaryDate = localDateInputValue();
       }
       location.hash = `#/${nextRoute}`;
     });
@@ -5827,6 +6917,61 @@ function bindAppEvents(user, moduleItem) {
   document.querySelector("[data-close-drawer]")?.addEventListener("click", () => {
     document.body.classList.remove("drawer-open");
   });
+  if (moduleItem.id === "pf-desktop-app") {
+    document.querySelector("#desktopImportFile")?.addEventListener("change", async (event) => {
+      if (!canImportDesktopWeighing(getSession()?.user)) {
+        event.currentTarget.value = "";
+        desktopImportPreview = null;
+        desktopImportMessage = "การนำเข้าข้อมูลชั่งใช้สิทธิ์ C6 ขึ้นไป บัญชี C4–C5 ดูและส่งออกข้อมูลหลักได้";
+        desktopImportMessageType = "error";
+        render();
+        return;
+      }
+      const file = event.target.files?.[0];
+      if (!file) return;
+      try {
+        if (file.size > 10_000_000) throw new Error("ไฟล์ใหญ่เกิน 10 MB");
+        const payload = JSON.parse(await file.text());
+        desktopImportPreview = prepareDesktopWeighingImport(payload);
+        desktopImportPreview.fileName = file.name;
+        desktopImportMessage = desktopImportPreview.rejected.length
+          ? `ตรวจไฟล์แล้ว พบ ${desktopImportPreview.rejected.length.toLocaleString("th-TH")} รายการที่ยังไม่นำเข้า`
+          : "ตรวจไฟล์ผ่าน พร้อมยืนยันนำเข้า";
+        desktopImportMessageType = desktopImportPreview.rejected.length ? "error" : "success";
+      } catch (error) {
+        desktopImportPreview = null;
+        desktopImportMessage = `อ่านไฟล์ไม่ได้: ${error.message}`;
+        desktopImportMessageType = "error";
+      }
+      render();
+    });
+    document.querySelector("#desktopImportConfirm")?.addEventListener("click", () => submitDesktopWeighingImport(user));
+    document.querySelector("#desktopImportOverlapConfirm")?.addEventListener("click", () => submitDesktopWeighingImport(user, true));
+    document.querySelector("#desktopImportCancel")?.addEventListener("click", () => {
+      desktopImportPreview = null;
+      desktopImportMessage = "ยกเลิกไฟล์นี้แล้ว ยังไม่ได้รับเข้าคิว";
+      desktopImportMessageType = "success";
+      render();
+    });
+    document.querySelector("#desktopExportCatalog")?.addEventListener("click", () => {
+      const payload = exportDesktopCatalogFile();
+      desktopImportMessage = `ดาวน์โหลดข้อมูลหลักแล้ว ${payload.fruits.length} ผลไม้ · ${payload.weighing_types.length} ประเภทน้ำหนัก`;
+      desktopImportMessageType = "success";
+      render();
+    });
+    document.querySelector("#desktopExportEmployees")?.addEventListener("click", async () => {
+      try {
+        const count = await exportScaleEmployeeFile("production");
+        desktopImportMessage = `ดาวน์โหลดรหัสพนักงานแล้ว ${count.toLocaleString("th-TH")} คน`;
+        desktopImportMessageType = "success";
+      } catch (error) {
+        desktopImportMessage = error.message;
+        desktopImportMessageType = "error";
+      }
+      render();
+    });
+    return;
+  }
   document.querySelector("#manualCloudRefresh")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
@@ -5882,7 +7027,7 @@ function bindAppEvents(user, moduleItem) {
 
 function renderLegacyDashboard(moduleItem) {
   const records = getProductionRecords();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateInputValue();
   const todayRecords = records.filter((record) => (record.record_date || record.date) === today);
   const totals = getProductionTotals(records);
   const todayTotals = getProductionTotals(todayRecords);
@@ -6363,7 +7508,7 @@ function renderSummaryAll(moduleItem) {
 function bindSummaryAllEvents() {
   const user = getSession()?.user;
   document.querySelector("#summaryDate")?.addEventListener("change", (event) => {
-    summaryDate = event.target.value || new Date().toISOString().slice(0, 10);
+    summaryDate = event.target.value || localDateInputValue();
     summaryMainExportMenuOpen = false;
     summaryExportMessage = "";
     render();
@@ -6433,7 +7578,7 @@ function setSummaryReportExportMessage(message, type = "success") {
 }
 
 function buildSummaryByPilePayload(user) {
-  const startDate = summaryReportExportStartDate || new Date().toISOString().slice(0, 10);
+  const startDate = summaryReportExportStartDate || localDateInputValue();
   const endDate = summaryReportExportEndDate || startDate;
   const [normalizedStart, normalizedEnd] = startDate <= endDate ? [startDate, endDate] : [endDate, startDate];
   return {
@@ -6475,7 +7620,7 @@ function bindSummaryExportEvents(user) {
   const form = document.querySelector("#summaryExportForm");
   form?.addEventListener("change", (event) => {
     const formData = new FormData(form);
-    summaryReportExportStartDate = String(formData.get("start_date") || new Date().toISOString().slice(0, 10));
+    summaryReportExportStartDate = String(formData.get("start_date") || localDateInputValue());
     summaryReportExportEndDate = String(formData.get("end_date") || summaryReportExportStartDate);
     summaryReportExportProduct = String(formData.get("product") || "all");
     summaryReportExportProductType = String(formData.get("product_type") || "ทั้งหมด").trim() || "ทั้งหมด";
@@ -6511,26 +7656,40 @@ function isDeductionApprovalTab() {
   return deductionActiveTab === "approval";
 }
 
+function isDailyOtOverrideTab() {
+  return deductionActiveTab === "daily-ot";
+}
+
 function getActiveAdjustmentEmployeeKind() {
+  if (isDailyOtOverrideTab()) return "time";
   if (isAttendanceBonusTab()) return deductionBonusEmployeeKind;
   if (isDeductionApprovalTab()) return deductionApprovalEmployeeKind;
   return normalizeDeductionKind(deductionActiveTab);
 }
 
 function getCurrentDeductionContext() {
-  const selectedDate = deductionStartDate || new Date().toISOString().slice(0, 10);
-  const range = { startDate: selectedDate, endDate: selectedDate };
-  deductionStartDate = selectedDate;
-  deductionEndDate = selectedDate;
+  const selectedDate = deductionStartDate || localDateInputValue();
   const employeeKind = getActiveAdjustmentEmployeeKind();
   const bonusMode = isAttendanceBonusTab();
+  const otOverrideMode = isDailyOtOverrideTab();
+  const range = otOverrideMode
+    ? normalizeDateRange(selectedDate, deductionEndDate || selectedDate)
+    : { startDate: selectedDate, endDate: selectedDate };
+  deductionStartDate = range.startDate;
+  deductionEndDate = range.endDate;
   const employees = getDeductionEmployeeOptions(employeeKind);
   const selectedEmployeeId = employees.some((employee) => String(employee.id) === String(deductionEmployeeId))
     ? deductionEmployeeId
     : employees[0]?.id || "";
   deductionEmployeeId = selectedEmployeeId ? String(selectedEmployeeId) : "";
   const selectedEmployee = employees.find((employee) => String(employee.id) === String(selectedEmployeeId)) || null;
-  const records = (bonusMode
+  const records = (otOverrideMode
+    ? getDeductionRecords().filter((record) => (
+      isDailyOtOverrideRecord(record) && record.employee_kind === "time" &&
+      deductionRangesOverlap(record, range.startDate, range.endDate) &&
+      (!selectedEmployee || employeeReferenceMatches(record, selectedEmployee))
+    ))
+    : bonusMode
     ? getBonusesForRange(employeeKind, range.startDate, range.endDate)
     : getDeductionRecords().filter((record) => (
       !isAttendanceBonusRecord(record) &&
@@ -6539,7 +7698,7 @@ function getCurrentDeductionContext() {
     )))
     .sort((a, b) => `${a.start_date} ${a.emp_code} ${a.deduction_label}`.localeCompare(`${b.start_date} ${b.emp_code} ${b.deduction_label}`, "th", { numeric: true }));
   const editingRecord = records.find((record) => Number(record.id) === Number(editingDeductionId)) || null;
-  return { range, employees, selectedEmployee, records, editingRecord, employeeKind, bonusMode };
+  return { range, employees, selectedEmployee, records, editingRecord, employeeKind, bonusMode, otOverrideMode };
 }
 
 function renderDeductionTypeOptions(selectedType = "advance") {
@@ -6556,7 +7715,7 @@ function renderDeductionEmployeeOptions(employees, selectedId) {
 }
 
 function renderDeductionRow(record) {
-  const appliedTotal = isAttendanceBonusRecord(record) ? 0 : getAppliedTotalForDeduction(record.id);
+  const appliedTotal = isAttendanceBonusRecord(record) || isDailyOtOverrideRecord(record) ? 0 : getAppliedTotalForDeduction(record.id);
   const remaining = Math.max(0, Number(record.amount || 0) - appliedTotal);
   return `
     <tr>
@@ -6623,28 +7782,23 @@ function renderDeductionApproval(user, moduleItem) {
   const visibleEmployeeCount = new Set((showingApproved ? approvedRows : rows).map((row) => `${row.employee_kind}-${row.employee_id || row.emp_code}`)).size;
   const remainingTotal = rows.reduce((sum, row) => sum + row.remaining_amount, 0);
   const approvedTotal = approvedRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
-  const kindLabel = deductionApprovalEmployeeKind === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก";
+  const kindLabel = deductionApprovalEmployeeKind === "time" ? "พนักงานรายวัน" : "พนักงานเหมา";
   return `
-    <section class="summary-page deduction-page deduction-approval-page">
+    <section class="summary-page deduction-page deduction-approval-page deduction-minimal deduction-refined">
       <div class="summary-header">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>เลือกรายการและกำหนดยอดที่จะหักในรอบนี้ รายการที่ยังหักไม่ครบจะกลับมารอด้วยยอดคงเหลือเดิม</p>
+
         </div>
-        <span class="badge badge-success deduction-cloud-badge">ฐานข้อมูลกลางพร้อมใช้งาน</span>
+
       </div>
-      <div class="module-tabs deduction-tabs">
-        <button class="module-tab" type="button" data-deduction-tab="production">พนักงานเหมาน้ำหนัก</button>
-        <button class="module-tab" type="button" data-deduction-tab="time">พนักงานเหมาเวลา</button>
-        <button class="module-tab bonus-tab" type="button" data-deduction-tab="bonus">ลงเบี้ยขยัน</button>
-        <button class="module-tab active approval-tab" type="button" data-deduction-tab="approval">อนุมัติหักเงิน</button>
-      </div>
+
       ${deductionMessage ? `<div class="alert ${deductionMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(deductionMessage)}</div>` : ""}
       <section class="panel deduction-approval-toolbar">
         <div class="deduction-kind-switch" role="group" aria-label="ประเภทพนักงานที่อนุมัติหักเงิน">
           <span>ประเภทพนักงาน</span>
-          <button class="${deductionApprovalEmployeeKind === "production" ? "active" : ""}" type="button" data-approval-employee-kind="production">พนักงานเหมาน้ำหนัก</button>
-          <button class="${deductionApprovalEmployeeKind === "time" ? "active" : ""}" type="button" data-approval-employee-kind="time">พนักงานเหมาเวลา</button>
+          <button class="${deductionApprovalEmployeeKind === "production" ? "active" : ""}" type="button" data-approval-employee-kind="production">พนักงานเหมา</button>
+          <button class="${deductionApprovalEmployeeKind === "time" ? "active" : ""}" type="button" data-approval-employee-kind="time">พนักงานรายวัน</button>
         </div>
         <div class="deduction-kind-switch deduction-approval-view-switch" role="group" aria-label="มุมมองรายการอนุมัติหักเงิน">
           <span>เมนู</span>
@@ -6750,8 +7904,43 @@ function renderDeductionApproval(user, moduleItem) {
     </section>`;
 }
 
+const deductionEntryDrafts = {};
+
+function renderDeductionWorkspace() {
+  const date = deductionStartDate || localDateInputValue();
+  const columns = ["production", "time"].map((kind) => {
+    const title = kind === "production" ? "พนักงานเหมา" : "พนักงานรายวัน";
+    const employees = getDeductionEmployeeOptions(kind);
+    const records = getDeductionRecords().filter((row) => row.employee_kind === kind && !isAttendanceBonusRecord(row) && !isDailyOtOverrideRecord(row) && deductionRangesOverlap(row, date, date));
+    const editing = records.find((row) => Number(row.id) === Number(editingDeductionId));
+    const draft = deductionEntryDrafts[kind];
+    const values = draft && String(draft.id || "") === String(editing?.id || "") ? draft : (editing || {});
+    return `<section class="deduction-entry-column" aria-label="${title}">
+      <header><div><span class="deduction-entry-kicker">${kind === "production" ? "PRODUCTION" : "DAILY"}</span><h3>${title}</h3></div><span class="deduction-entry-count">${records.length} รายการ</span></header>
+      <form data-deduction-entry-form="${kind}" class="deduction-entry-fields">
+        <input type="hidden" name="id" value="${editing?.id || ""}"><input type="hidden" name="employee_kind" value="${kind}">
+        <label class="field deduction-entry-wide"><span>พนักงาน</span><select name="employee_id" required ${employees.length ? "" : "disabled"}>${renderDeductionEmployeeOptions(employees, values.employee_id || "")}</select></label>
+        <label class="field"><span>วันที่บันทึก</span><input type="date" name="start_date" value="${escapeHtml(values.start_date || date)}" required></label>
+        <label class="field"><span>รายการหัก</span><select name="deduction_type" required>${renderDeductionTypeOptions(values.deduction_type || "advance")}</select></label>
+        <label class="field"><span>ยอดตั้งต้น (บาท)</span><input type="number" name="amount" min="0.01" step="0.01" value="${escapeHtml(values.amount ?? "")}" placeholder="0.00" required></label>
+        <label class="field"><span>รายละเอียด / หมายเหตุ</span><input name="note" value="${escapeHtml(values.note || "")}" placeholder="ระบุเพิ่มเติม หรือกลับมาแก้ภายหลัง"></label>
+        <div class="deduction-entry-wide deduction-entry-actions">${editing ? `<button class="btn btn-outline" type="button" data-cancel-deduction-edit="${kind}">ยกเลิกแก้ไข</button>` : ""}<button class="btn btn-primary" type="submit" ${employees.length ? "" : "disabled"}>${editing ? "บันทึกการแก้ไข" : "บันทึกรายการหัก"}</button></div>
+      </form>
+      <div class="deduction-entry-ledger"><div class="deduction-entry-ledger-heading"><strong>รายการวันที่เลือก</strong><span>${money(sumDeductions(records))}</span></div>
+      ${records.length ? records.map((row) => `<article class="deduction-entry-record"><div><strong>${escapeHtml(row.emp_code)} · ${escapeHtml(row.employee_name)}</strong><span>${escapeHtml(row.deduction_label || getDeductionTypeLabel(row.deduction_type))}</span>${row.note ? `<small>${escapeHtml(row.note)}</small>` : ""}</div><div class="deduction-entry-record-end"><strong>${money(row.amount)}</strong><div><button class="deduction-entry-link" type="button" data-edit-deduction="${row.id}">แก้ไข</button><button class="deduction-entry-link" type="button" data-delete-deduction="${row.id}">ลบ</button></div></div></article>`).join("") : '<p class="deduction-entry-empty">ยังไม่มีรายการในวันที่เลือก</p>'}
+      </div>
+    </section>`;
+  });
+  return `<section class="summary-page deduction-page deduction-minimal"><div class="summary-header"><div><h2>บันทึกหักเงิน / เบี้ยขยัน</h2></div></div>
+
+    ${deductionMessage ? `<div class="alert ${deductionMessageType === "error" ? "alert-error" : "alert-success"}" role="status">${escapeHtml(deductionMessage)}</div>` : ""}
+    <div class="deduction-entry-toolbar"><form id="deductionFilterForm"><label class="field"><span>ดูรายการตามวันที่</span><input type="date" name="start_date" value="${escapeHtml(date)}" required></label><button class="btn btn-outline" type="submit">แสดงรายการ</button></form><p>บันทึกยอดตั้งต้นไว้ก่อน · หักเงินจริงเมื่ออนุมัติ</p></div>
+    <div class="deduction-entry-columns">${columns.join("")}</div></section>`;
+}
+
 function renderDeductionEntry(user, moduleItem) {
   if (isDeductionApprovalTab()) return renderDeductionApproval(user, moduleItem);
+  if (["production", "time"].includes(deductionActiveTab)) return renderDeductionWorkspace();
   const context = getCurrentDeductionContext();
   const editing = context.editingRecord;
   const formEmployeeId = editing?.employee_id || context.selectedEmployee?.id || "";
@@ -6759,32 +7948,26 @@ function renderDeductionEntry(user, moduleItem) {
   const totalAmount = sumDeductions(context.records);
   const employeeCount = new Set(context.records.map((record) => record.employee_id || record.emp_code)).size;
   const actionLabel = context.bonusMode ? "เบี้ยขยัน" : "รายการหัก";
-  const employeeKindLabel = context.employeeKind === "time" ? "พนักงานเหมาเวลา" : "พนักงานเหมาน้ำหนัก";
-  const withholdingTaxGroups = getProductionWithholdingTaxGroups();
-  const withholdingTaxGroupOptions = getGroupReportPayGroups();
+  const effectiveActionLabel = context.otOverrideMode ? "ปรับ OT รายวัน" : actionLabel;
+  const employeeKindLabel = context.employeeKind === "time" ? "พนักงานรายวัน" : "พนักงานเหมา";
 
   return `
-    <section class="summary-page deduction-page">
+    <section class="summary-page deduction-page deduction-minimal deduction-refined">
       <div class="summary-header">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>บันทึกรายการหักไว้รออนุมัติ หรือเพิ่มเบี้ยขยันลงฐานข้อมูลกลางสำหรับรายงานและใบเสร็จ</p>
+
         </div>
-        <span class="badge badge-success deduction-cloud-badge">ฐานข้อมูลกลางพร้อมใช้งาน</span>
+
       </div>
 
-      <div class="module-tabs deduction-tabs">
-        <button class="module-tab ${deductionActiveTab === "production" ? "active" : ""}" type="button" data-deduction-tab="production">พนักงานเหมาน้ำหนัก</button>
-        <button class="module-tab ${deductionActiveTab === "time" ? "active" : ""}" type="button" data-deduction-tab="time">พนักงานเหมาเวลา</button>
-        <button class="module-tab ${deductionActiveTab === "bonus" ? "active bonus-tab" : ""}" type="button" data-deduction-tab="bonus">ลงเบี้ยขยัน</button>
-        <button class="module-tab ${deductionActiveTab === "approval" ? "active approval-tab" : ""}" type="button" data-deduction-tab="approval">อนุมัติหักเงิน</button>
-      </div>
+
 
       ${context.bonusMode ? `
         <div class="deduction-kind-switch" role="group" aria-label="ประเภทพนักงานสำหรับเบี้ยขยัน">
           <span>ประเภทพนักงาน</span>
-          <button class="${context.employeeKind === "production" ? "active" : ""}" type="button" data-bonus-employee-kind="production">พนักงานเหมาน้ำหนัก</button>
-          <button class="${context.employeeKind === "time" ? "active" : ""}" type="button" data-bonus-employee-kind="time">พนักงานเหมาเวลา</button>
+          <button class="${context.employeeKind === "production" ? "active" : ""}" type="button" data-bonus-employee-kind="production">พนักงานเหมา</button>
+          <button class="${context.employeeKind === "time" ? "active" : ""}" type="button" data-bonus-employee-kind="time">พนักงานรายวัน</button>
         </div>
       ` : ""}
 
@@ -6797,59 +7980,44 @@ function renderDeductionEntry(user, moduleItem) {
       <section class="panel deduction-control-panel">
         <div class="deduction-control-copy">
           <strong>ดูรายการตามวันที่</strong>
-          <span>เลือกวันที่ที่ต้องการตรวจสอบหรือเพิ่ม${context.bonusMode ? "เบี้ยขยัน" : "รายการหักเงิน"}</span>
+          <span>เลือกวันที่ที่ต้องการตรวจสอบหรือเพิ่ม${context.otOverrideMode ? "อัตรา OT เฉพาะวัน" : context.bonusMode ? "เบี้ยขยัน" : "รายการหักเงิน"}</span>
         </div>
         <form class="deduction-filter-form" id="deductionFilterForm">
+          ${context.otOverrideMode ? `<label class="field">
+            <span>พนักงานที่ต้องการดู</span>
+            <select name="employee_id" required>${renderDeductionEmployeeOptions(context.employees, context.selectedEmployee?.id || "")}</select>
+          </label>` : ""}
           <label class="field">
-            <span>${context.bonusMode ? "วันที่ลงเบี้ยขยัน" : "วันที่หักเงิน"}</span>
+            <span>${context.otOverrideMode ? "วันที่เริ่ม" : context.bonusMode ? "วันที่ลงเบี้ยขยัน" : "วันที่หักเงิน"}</span>
             <input name="start_date" type="date" value="${escapeHtml(context.range.startDate)}" required />
           </label>
+          ${context.otOverrideMode ? `<label class="field">
+            <span>วันที่สิ้นสุด</span>
+            <input name="end_date" type="date" value="${escapeHtml(context.range.endDate)}" min="${escapeHtml(context.range.startDate)}" required />
+          </label>` : ""}
           <button class="btn btn-outline deduction-load-button" type="submit">แสดงรายการ</button>
         </form>
       </section>
 
       <div class="deduction-export-note">
-        <span class="deduction-export-note-mark">฿</span>
+
         <div>
-          <strong>${context.bonusMode ? "ระบบจะบวกเบี้ยขยันให้อัตโนมัติ" : "รายการหักจะถูกพักไว้ก่อน"}</strong>
-          <span>${context.bonusMode ? `เมื่อช่วงวันที่ Export ครอบคลุมวันที่ ${escapeHtml(context.range.startDate)} ยอดนี้จะถูกบวกในการคำนวณทันที` : "ยอดจะยังไม่ถูกหักจากเงิน จนกว่าจะเลือกและยืนยันในแท็บอนุมัติหักเงิน"}</span>
+          <strong>${context.otOverrideMode ? "ระบบจะใช้อัตรานี้เฉพาะวันที่กำหนด" : context.bonusMode ? "ระบบจะบวกเบี้ยขยันให้อัตโนมัติ" : "รายการหักจะถูกพักไว้ก่อน"}</strong>
+          <span>${context.otOverrideMode ? "วันอื่นจะใช้อัตรา OT ปัจจุบันจากข้อมูลการเงินของพนักงาน" : context.bonusMode ? `เมื่อช่วงวันที่ Export ครอบคลุมวันที่ ${escapeHtml(context.range.startDate)} ยอดนี้จะถูกบวกในการคำนวณทันที` : "ยอดจะยังไม่ถูกหักจากเงิน จนกว่าจะเลือกและยืนยันในแท็บอนุมัติหักเงิน"}</span>
         </div>
       </div>
-      ${!context.bonusMode && context.employeeKind === "production" ? `
-        <form class="panel withholding-tax-panel" id="withholdingTaxForm">
-          <div class="section-title-row">
-            <div>
-              <h3>ตั้งค่าหัก ณ ที่จ่าย 3%</h3>
-              <p class="muted-text">เลือกกลุ่มไว้ก่อน แล้วกดยืนยัน ระบบจึงจะเริ่มใช้การหัก 3% ในรายงานแบบกลุ่มและไฟล์ Export</p>
-            </div>
-            <span class="summary-mode-pill" id="withholdingTaxSavedCount">ค่าปัจจุบัน ${withholdingTaxGroups.length.toLocaleString("th-TH")} กลุ่ม</span>
-          </div>
-          <div class="withholding-tax-options">
-            ${withholdingTaxGroupOptions.map((group) => `
-              <label class="withholding-tax-option">
-                <input type="checkbox" data-withholding-tax-group="${escapeHtml(group)}" ${withholdingTaxGroups.includes(group) ? "checked" : ""} />
-                <span>${escapeHtml(group)}</span>
-              </label>
-            `).join("")}
-          </div>
-          <div class="withholding-tax-confirm-row">
-            <p class="withholding-tax-note" id="withholdingTaxPendingStatus">ค่าที่แสดงได้รับการยืนยันและกำลังใช้งานอยู่</p>
-            <button class="btn btn-primary withholding-tax-confirm-button" id="confirmWithholdingTaxGroups" type="submit" disabled>ยืนยันการตั้งค่าหัก 3%</button>
-          </div>
-        </form>
-      ` : ""}
-
       <div class="summary-metrics deduction-metrics">
-        <div class="metric-card metric-blue"><span>${actionLabel}</span><strong>${context.records.length.toLocaleString("th-TH")} รายการ</strong><small>ประจำวันที่ ${escapeHtml(context.range.startDate)}</small></div>
+        <div class="metric-card metric-blue"><span>${effectiveActionLabel}</span><strong>${context.records.length.toLocaleString("th-TH")} รายการ</strong><small>ประจำวันที่ ${escapeHtml(context.range.startDate)}</small></div>
         <div class="metric-card metric-green"><span>จำนวนพนักงาน</span><strong>${employeeCount.toLocaleString("th-TH")} คน</strong><small>${employeeKindLabel}</small></div>
         <div class="metric-card ${context.bonusMode ? "metric-green" : "metric-orange"}"><span>${context.bonusMode ? "ยอดเบี้ยขยันรวมวันนี้" : "ยอดตั้งต้นรวมวันนี้"}</span><strong>${money(totalAmount)}</strong><small>${context.bonusMode ? "เงินเพิ่มก่อนคำนวณยอดสุทธิ" : "รออนุมัติก่อนนำไปหักเงินจริง"}</small></div>
       </div>
 
+      <div class="deduction-refined-layout">
       <section class="panel deduction-form-panel">
         <div class="section-title-row">
           <div>
-            <h3>${editing ? `แก้ไข${actionLabel}` : `เพิ่ม${actionLabel}`}</h3>
-            <p class="muted-text">${context.bonusMode ? "กรอกจำนวนเงินจริง ระบบจะนำยอดไปบวกในรายงานตามวันที่ที่เลือก" : "กรอกยอดตั้งต้น รายการจะอยู่ในคิวรอและเก็บวันที่นี้ไว้จนกว่าจะหักครบ"}</p>
+            <h3>${editing ? `แก้ไข${effectiveActionLabel}` : `เพิ่ม${effectiveActionLabel}`}</h3>
+            <p class="muted-text">${context.otOverrideMode ? "กำหนดอัตรา OT เฉพาะวันที่เลือก (บาท/ชั่วโมง)" : context.bonusMode ? "เพิ่มยอดเงินตามวันที่เลือก" : "บันทึกยอดตั้งต้นไว้รออนุมัติ"}</p>
           </div>
           ${editing ? `<button class="btn btn-outline" id="cancelDeductionEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
         </div>
@@ -6863,10 +8031,12 @@ function renderDeductionEntry(user, moduleItem) {
             </select>
           </label>
           <label class="field">
-            <span>${context.bonusMode ? "วันที่ลงเบี้ยขยัน" : "วันที่หักเงิน"}</span>
+            <span>${context.otOverrideMode ? "วันที่ปรับ OT" : context.bonusMode ? "วันที่ลงเบี้ยขยัน" : "วันที่หักเงิน"}</span>
             <input name="start_date" type="date" value="${escapeHtml(formStartDate)}" required />
           </label>
-          ${context.bonusMode ? `
+          ${context.otOverrideMode ? `
+            <input type="hidden" name="deduction_type" value="${DAILY_OT_OVERRIDE_TYPE}" />
+          ` : context.bonusMode ? `
             <label class="field deduction-readonly-field">
               <span>ประเภทเงินเพิ่ม</span>
               <input value="เบี้ยขยัน" readonly />
@@ -6881,22 +8051,22 @@ function renderDeductionEntry(user, moduleItem) {
             </label>
           `}
           <label class="field">
-            <span>จำนวนเงิน</span>
+            <span>${context.otOverrideMode ? "อัตรา OT (บาท/ชม.)" : "จำนวนเงิน"}</span>
             <input name="amount" type="number" min="0" step="1" value="${editing ? Number(editing.amount || 0) : ""}" placeholder="0" required />
           </label>
           <label class="field">
             <span>หมายเหตุ</span>
             <input name="note" value="${escapeHtml(editing?.note || "")}" placeholder="รายละเอียดเพิ่มเติมถ้ามี" />
           </label>
-          <button class="btn ${context.bonusMode ? "btn-success" : "btn-primary"} deduction-submit-button" type="submit" ${context.employees.length ? "" : "disabled"}>${editing ? "บันทึกการแก้ไข" : `บันทึก${actionLabel}`}</button>
+          <button class="btn ${context.bonusMode || context.otOverrideMode ? "btn-success" : "btn-primary"} deduction-submit-button" type="submit" ${context.employees.length ? "" : "disabled"}>${editing ? "บันทึกการแก้ไข" : `บันทึก${effectiveActionLabel}`}</button>
         </form>
       </section>
 
       <section class="table-card">
         <div class="table-heading deduction-table-heading">
           <div>
-            <strong>${actionLabel}ประจำวันที่ ${escapeHtml(context.range.startDate)}</strong>
-            <span>${employeeKindLabel}</span>
+            <strong>${context.otOverrideMode ? `${effectiveActionLabel} ${escapeHtml(context.range.startDate)} ถึง ${escapeHtml(context.range.endDate)}` : `${effectiveActionLabel}ประจำวันที่ ${escapeHtml(context.range.startDate)}`}</strong>
+            <span>${context.otOverrideMode && context.selectedEmployee ? `${escapeHtml(context.selectedEmployee.emp_code)} - ${escapeHtml(context.selectedEmployee.fullname)}` : employeeKindLabel}</span>
           </div>
           <span class="deduction-table-total ${context.bonusMode ? "bonus-total" : ""}">รวม ${money(totalAmount)}</span>
         </div>
@@ -6907,28 +8077,37 @@ function renderDeductionEntry(user, moduleItem) {
                 <th>วันที่</th>
                 <th>รหัส</th>
                 <th>ชื่อพนักงาน</th>
-                <th>${context.bonusMode ? "ประเภทเงินเพิ่ม" : "รายการหัก"}</th>
-                <th>${context.bonusMode ? "จำนวนเงิน" : "ยอดตั้งต้น"}</th>
+                <th>${context.otOverrideMode ? "ประเภท" : context.bonusMode ? "ประเภทเงินเพิ่ม" : "รายการหัก"}</th>
+                <th>${context.otOverrideMode ? "OT บาท/ชม." : context.bonusMode ? "จำนวนเงิน" : "ยอดตั้งต้น"}</th>
                 <th>หมายเหตุ</th>
                 <th>ผู้บันทึก</th>
                 <th>จัดการ</th>
               </tr>
             </thead>
             <tbody>
-              ${context.records.length ? context.records.map(renderDeductionRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มี${actionLabel}ในวันนี้</td></tr>`}
+              ${context.records.length ? context.records.map(renderDeductionRow).join("") : `<tr><td colspan="8" class="empty-cell">ยังไม่มี${effectiveActionLabel}${context.otOverrideMode ? "ของพนักงานคนนี้ในช่วงวันที่เลือก" : "ในวันนี้"}</td></tr>`}
             </tbody>
           </table>
         </div>
       </section>
+      </div>
     </section>
   `;
 }
 
 function bindDeductionEvents(user) {
+  document.querySelectorAll("[data-deduction-entry-form]").forEach((form) => {
+    form.addEventListener("input", () => { deductionEntryDrafts[form.dataset.deductionEntryForm] = Object.fromEntries(new FormData(form)); });
+  });
+  document.querySelectorAll("[data-cancel-deduction-edit]").forEach((button) => button.addEventListener("click", () => {
+    delete deductionEntryDrafts[button.dataset.cancelDeductionEdit];
+    editingDeductionId = null;
+    render();
+  }));
   document.querySelectorAll("[data-deduction-tab]").forEach((button) => {
     button.addEventListener("click", async () => {
       const requestedTab = button.dataset.deductionTab;
-      deductionActiveTab = ["bonus", "approval"].includes(requestedTab) ? requestedTab : normalizeDeductionKind(requestedTab);
+      deductionActiveTab = ["bonus", "approval", "daily-ot"].includes(requestedTab) ? requestedTab : normalizeDeductionKind(requestedTab);
       deductionEmployeeId = "";
       editingDeductionId = null;
       const employeeKind = getActiveAdjustmentEmployeeKind();
@@ -6939,7 +8118,7 @@ function bindDeductionEvents(user) {
           await Promise.all([hydrateDeductionsFromCloud(), hydrateDeductionApplicationsFromCloud()]);
         } else {
           await Promise.all([
-            hydrateDeductionsFromCloud({ employee_kind: employeeKind, start_date: deductionStartDate, end_date: deductionEndDate }),
+            hydrateDeductionsFromCloud({ ...(["production", "time"].includes(deductionActiveTab) ? {} : { employee_kind: employeeKind }), start_date: deductionStartDate, end_date: deductionEndDate }),
             hydrateDeductionApplicationsFromCloud({ employee_kind: employeeKind, start_date: deductionStartDate, end_date: deductionEndDate })
           ]);
         }
@@ -7061,86 +8240,37 @@ function bindDeductionEvents(user) {
   document.querySelector("#deductionFilterForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    deductionStartDate = String(form.get("start_date") || deductionStartDate);
-    deductionEndDate = deductionStartDate;
+    const requestedRange = normalizeDateRange(
+      String(form.get("start_date") || deductionStartDate),
+      isDailyOtOverrideTab() ? String(form.get("end_date") || deductionEndDate || deductionStartDate) : String(form.get("start_date") || deductionStartDate)
+    );
+    deductionStartDate = requestedRange.startDate;
+    deductionEndDate = requestedRange.endDate;
+    if (isDailyOtOverrideTab()) deductionEmployeeId = String(form.get("employee_id") || deductionEmployeeId);
     editingDeductionId = null;
-    setDeductionMessage("กำลังโหลดรายการหักเงินจากฐานกลาง...");
+    setDeductionMessage(isDailyOtOverrideTab() ? "กำลังโหลดรายการปรับ OT จากฐานกลาง..." : "กำลังโหลดรายการหักเงินจากฐานกลาง...");
     render();
     try {
-      await hydrateDeductionsFromCloud({ employee_kind: getActiveAdjustmentEmployeeKind(), start_date: deductionStartDate, end_date: deductionEndDate });
-      setDeductionMessage("โหลดรายการหักเงินจากฐานกลางเรียบร้อยแล้ว");
+      await hydrateDeductionsFromCloud({ ...(["production", "time"].includes(deductionActiveTab) ? {} : { employee_kind: getActiveAdjustmentEmployeeKind() }), start_date: deductionStartDate, end_date: deductionEndDate });
+      setDeductionMessage(isDailyOtOverrideTab() ? "โหลดรายการปรับ OT ตามพนักงานและช่วงวันที่เรียบร้อยแล้ว" : "โหลดรายการหักเงินจากฐานกลางเรียบร้อยแล้ว");
     } catch (error) {
       setDeductionMessage(`${error instanceof Error ? error.message : "โหลดรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
     }
     render();
   });
 
-  const withholdingTaxForm = document.querySelector("#withholdingTaxForm");
-  const getSelectedWithholdingTaxGroups = () => [...document.querySelectorAll("[data-withholding-tax-group]:checked")]
-    .map((checkbox) => normalizeEmployeePayGroupValue(checkbox.dataset.withholdingTaxGroup || ""))
-    .filter(Boolean);
-  const getSortedWithholdingTaxGroups = (groups) => [...new Set(groups)].sort((a, b) => a.localeCompare(b, "th"));
-  const sameWithholdingTaxGroups = (left, right) => {
-    const normalizedLeft = getSortedWithholdingTaxGroups(left);
-    const normalizedRight = getSortedWithholdingTaxGroups(right);
-    return normalizedLeft.length === normalizedRight.length
-      && normalizedLeft.every((group, index) => group === normalizedRight[index]);
-  };
-  const updateWithholdingTaxConfirmationState = () => {
-    if (!withholdingTaxForm) return;
-    const changed = !sameWithholdingTaxGroups(getSelectedWithholdingTaxGroups(), getProductionWithholdingTaxGroups());
-    const confirmButton = document.querySelector("#confirmWithholdingTaxGroups");
-    const statusNode = document.querySelector("#withholdingTaxPendingStatus");
-    if (confirmButton) confirmButton.disabled = !changed;
-    if (statusNode) {
-      statusNode.textContent = changed
-        ? "มีการเปลี่ยนแปลงที่ยังไม่ยืนยัน ระบบยังใช้ค่าเดิมอยู่"
-        : "ค่าที่แสดงได้รับการยืนยันและกำลังใช้งานอยู่";
-      statusNode.classList.toggle("is-pending", changed);
-    }
-  };
-
-  document.querySelectorAll("[data-withholding-tax-group]").forEach((input) => {
-    input.addEventListener("change", updateWithholdingTaxConfirmationState);
-  });
-
-  withholdingTaxForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const currentGroups = getProductionWithholdingTaxGroups();
-    const selectedGroups = getSelectedWithholdingTaxGroups();
-    if (sameWithholdingTaxGroups(selectedGroups, currentGroups)) {
-      updateWithholdingTaxConfirmationState();
-      return;
-    }
-    const enabledGroups = selectedGroups.filter((group) => !currentGroups.includes(group));
-    const disabledGroups = currentGroups.filter((group) => !selectedGroups.includes(group));
-    const confirmationLines = ["ยืนยันเปลี่ยนการตั้งค่าหัก ณ ที่จ่าย 3%?"];
-    if (enabledGroups.length) confirmationLines.push(`เปิดหัก: ${enabledGroups.join(", ")}`);
-    if (disabledGroups.length) confirmationLines.push(`ยกเลิกหัก: ${disabledGroups.join(", ")}`);
-    confirmationLines.push("การตั้งค่านี้จะมีผลกับรายงานและไฟล์ Export หลังจากยืนยัน");
-    if (!window.confirm(confirmationLines.join("\n"))) return;
-
-    saveProductionWithholdingTaxGroups(selectedGroups);
-    addAuditLog(
-      user,
-      "UPDATE_WITHHOLDING_TAX_GROUPS",
-      `Withholding tax 3% groups changed from [${currentGroups.join(", ") || "none"}] to [${selectedGroups.join(", ") || "none"}]`
-    );
-    setDeductionMessage(`ยืนยันการตั้งค่าหัก ณ ที่จ่าย 3% แล้ว (${selectedGroups.length.toLocaleString("th-TH")} กลุ่ม)`);
-    render();
-  });
-
-  document.querySelector("#deductionForm")?.addEventListener("submit", async (event) => {
+  document.querySelectorAll("#deductionForm, [data-deduction-entry-form]").forEach((entryForm) => entryForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const id = Number(form.get("id") || 0);
     const bonusMode = isAttendanceBonusTab();
+    const otOverrideMode = isDailyOtOverrideTab();
     const payload = {
       employee_kind: normalizeDeductionKind(form.get("employee_kind") || getActiveAdjustmentEmployeeKind()),
       employee_id: Number(form.get("employee_id") || 0),
       start_date: String(form.get("start_date") || deductionStartDate),
       end_date: String(form.get("start_date") || deductionStartDate),
-      deduction_type: bonusMode ? ATTENDANCE_BONUS_TYPE : String(form.get("deduction_type") || "advance"),
+      deduction_type: bonusMode ? ATTENDANCE_BONUS_TYPE : otOverrideMode ? DAILY_OT_OVERRIDE_TYPE : String(form.get("deduction_type") || "advance"),
       amount: Number(form.get("amount") || 0),
       note: String(form.get("note") || "")
     };
@@ -7152,16 +8282,22 @@ function bindDeductionEvents(user) {
         await apiCreateDeduction(payload, user);
         setDeductionMessage(`บันทึก${bonusMode ? "เบี้ยขยัน" : "รายการหักเงิน"}ลงฐานกลางเรียบร้อยแล้ว`);
       }
-      deductionStartDate = payload.start_date;
-      deductionEndDate = payload.end_date;
+      if (!otOverrideMode) {
+        deductionStartDate = payload.start_date;
+        deductionEndDate = payload.end_date;
+      } else {
+        deductionStartDate = deductionStartDate < payload.start_date ? deductionStartDate : payload.start_date;
+        deductionEndDate = deductionEndDate > payload.end_date ? deductionEndDate : payload.end_date;
+      }
       deductionEmployeeId = String(payload.employee_id);
       editingDeductionId = null;
-      await hydrateDeductionsFromCloud({ employee_kind: payload.employee_kind, start_date: deductionStartDate, end_date: deductionEndDate });
+      delete deductionEntryDrafts[payload.employee_kind];
+      await hydrateDeductionsFromCloud({ ...(["production", "time"].includes(deductionActiveTab) ? {} : { employee_kind: payload.employee_kind }), start_date: deductionStartDate, end_date: deductionEndDate });
     } catch (error) {
       setDeductionMessage(`${error instanceof Error ? error.message : "บันทึกรายการหักเงินไม่สำเร็จ"} กรุณาตรวจสอบ Supabase`, "error");
     }
     render();
-  });
+  }));
 
   document.querySelector("#cancelDeductionEdit")?.addEventListener("click", () => {
     editingDeductionId = null;
@@ -7284,6 +8420,10 @@ const issueReportPriorityLabels = {
 
 function canManageIssueReports(user) {
   return Number(String(getUserLevel(user)).replace(/\D/g, "") || 1) >= 5;
+}
+
+function canViewAllIssueReports(user) {
+  return canOpen(user, "record-report");
 }
 
 function canReceiveIssueNotifications(user) {
@@ -7458,7 +8598,7 @@ function renderIssueReportPage(user, moduleItem) {
           <h2>${escapeHtml(moduleItem.label)}</h2>
           <p>${escapeHtml(moduleItem.description)}</p>
         </div>
-        <span class="issue-access-note">${canManageIssueReports(user) ? "มุมมองผู้ดูแลระบบ" : "รายงานของฉัน"}</span>
+        <span class="issue-access-note">${canViewAllIssueReports(user) ? "รายงานทั้งหมด" : "รายงานของฉัน"}</span>
       </header>
       ${renderIssueReportSummary()}
       ${issueReportMessage ? `<div class="issue-message ${issueReportMessageType === "error" ? "is-error" : "is-success"}" role="alert">${escapeHtml(issueReportMessage)}</div>` : ""}
@@ -7485,7 +8625,7 @@ function renderIssueReportPage(user, moduleItem) {
           </form>
         </section>
         <section class="issue-list-panel" aria-labelledby="issueListTitle">
-          <div class="issue-section-head"><h3 id="issueListTitle">รายงานล่าสุด</h3><p>${canManageIssueReports(user) ? "รายการจากผู้ใช้งานทั้งหมด" : "ติดตามเรื่องที่คุณแจ้งไว้"}</p></div>
+          <div class="issue-section-head"><h3 id="issueListTitle">รายงานล่าสุด</h3><p>${canViewAllIssueReports(user) ? "รายการจากผู้ใช้งานทั้งหมด" : "ติดตามเรื่องที่คุณแจ้งไว้"}</p></div>
           <form id="issueReportFilter" class="issue-report-filter">
             <input name="search" value="${escapeHtml(issueReportSearch)}" placeholder="ค้นหาเลขที่ หัวข้อ หรือหน้า" aria-label="ค้นหารายงาน" />
             <select name="status" aria-label="กรองตามสถานะ"><option value="all">ทุกสถานะ</option>${Object.entries(issueReportStatusMeta).map(([key, item]) => `<option value="${key}" ${issueReportStatusFilter === key ? "selected" : ""}>${item.label}</option>`).join("")}</select>
@@ -7635,10 +8775,11 @@ function renderSettingsBackBar() {
 
 function getDetailedSettingsPileSummaries(records) {
   const summaries = new Map(
-    [1, 2, 3, 4, 5].map((pile) => [
-      pile,
+    getFruitPiles().map((pileConfig) => [
+      pileConfig.number,
       {
-        pile,
+        pile: pileConfig.number,
+        config: pileConfig,
         water: 0,
         flower: 0,
         fieldTotalsByFruit: {},
@@ -7722,11 +8863,15 @@ function renderSettingsPileWeightRows(summary, selectedFruit) {
 
 function renderSettingsPileCard(summary, selectedFruit) {
   const hasGrades = summary.gradeTotal > 0;
+  const config = summary.config || fruitPileByNumber(summary.pile);
+  const displayName = config?.name || `กอง ${summary.pile}`;
+  const color = config?.color || "#64748b";
   return `
-    <article class="settings-pile-card ${summary.count ? "" : "is-empty"}">
+    <article class="settings-pile-card ${summary.count ? "" : "is-empty"} ${config?.visible === false ? "is-hidden" : ""}" style="--fruit-pile-accent:${color}">
+      <div class="settings-pile-card-glow"></div>
       <div class="settings-pile-card-head">
-        <div><span>PILE</span><h3>กอง ${escapeHtml(summary.pile)}</h3></div>
-        <span class="settings-pile-count">${summary.count.toLocaleString("th-TH")} รายการ</span>
+        <div><span>PILE ${escapeHtml(summary.pile)}</span><h3>${escapeHtml(displayName)}</h3></div>
+        <div class="settings-pile-card-status"><i style="background:${color}"></i>${config?.visible === false ? "ซ่อนอยู่" : "แสดงในหน้ากรอก"}</div>
       </div>
       <div class="settings-pile-total">
         <span>น้ำหนักรวม</span>
@@ -7739,6 +8884,7 @@ function renderSettingsPileCard(summary, selectedFruit) {
       </div>
       ${hasGrades ? `<div class="settings-pile-grades"><span>ทุเรียนรวม <strong>${numberText(summary.gradeTotal)}</strong> กก.</span></div>` : ""}
       <div class="settings-pile-amount"><span>ยอดเงินกองนี้</span><strong>${money(summary.amount)}</strong></div>
+      ${config ? `<div class="settings-pile-card-actions"><button type="button" data-pile-edit="${config.number}">แก้ไข</button><button type="button" data-pile-toggle="${config.number}">${config.visible ? "ปิดการแสดง" : "เปิดการแสดง"}</button><button class="danger" type="button" data-pile-delete="${config.number}">ลบกอง</button></div>` : `<div class="settings-pile-history-note">ข้อมูลเก่าถูกเก็บไว้ และจะเชื่อมกลับเมื่อสร้างกองเลขนี้อีกครั้ง</div>`}
     </article>
   `;
 }
@@ -7821,6 +8967,8 @@ function renderSettingsPileSummary(user, moduleItem) {
   const employeeById = new Map(employees.map((employee) => [String(employee.id), employee]));
   const employeeByCode = new Map(employees.map((employee) => [String(employee.emp_code || "").trim(), employee]));
   const absenceGroups = getSettingsPileAbsenceGroups(employees, dayRecords);
+  const pileConfigs = getFruitPiles();
+  const editingPile = pileConfigs.find((pile) => pile.number === Number(editingFruitPileNumber));
   const fruitOptions = [
     { id: "all", label: "ทุกผลไม้" },
     ...productionFruitOptions
@@ -7833,9 +8981,9 @@ function renderSettingsPileSummary(user, moduleItem) {
       <section class="panel settings-pile-header">
         <div class="settings-pile-title-row">
           <div>
-            <p class="eyebrow">SETTINGS / PILE SUMMARY</p>
+            <p class="eyebrow">FRUIT PILE CONTROL CENTER</p>
             <h2>${escapeHtml(moduleItem.label)}</h2>
-            <p>ตรวจสอบยอดรวมและรายละเอียดของแต่ละกองจากข้อมูลผลผลิตจริง</p>
+            <p>สร้าง จัดสี และควบคุมกองที่จะแสดงในหน้าบันทึกผลผลิต โดยไม่กระทบข้อมูลย้อนหลัง</p>
           </div>
           <div class="settings-pile-export-actions">
             <button class="btn btn-outline" id="settingsPileExportExcel" type="button" ${records.length ? "" : "disabled"}>Export Excel</button>
@@ -7861,6 +9009,28 @@ function renderSettingsPileSummary(user, moduleItem) {
         </div>
       </section>
 
+      <section class="settings-pile-command-deck">
+        <div class="settings-pile-command-copy">
+          <span>PILE OPERATIONS</span>
+          <h3>ควบคุมกองผลไม้</h3>
+          <p>${pileConfigs.filter((pile) => pile.visible).length} กองกำลังแสดง · ${pileConfigs.filter((pile) => !pile.visible).length} กองถูกซ่อน · ประวัติผลผลิตจะไม่ถูกลบ</p>
+        </div>
+        <button class="settings-pile-create-button" id="openFruitPileForm" type="button">＋ สร้างกองใหม่</button>
+      </section>
+
+      ${(fruitPileFormOpen || editingPile) ? `
+        <section class="settings-pile-editor" style="--editor-accent:${editingPile?.color || "#0f766e"}">
+          <div class="settings-pile-editor-head"><div><span>${editingPile ? "EDIT PILE" : "NEW PILE"}</span><h3>${editingPile ? `แก้ไข ${escapeHtml(editingPile.name)}` : "สร้างกองผลไม้"}</h3></div><button id="closeFruitPileForm" type="button" aria-label="ปิด">×</button></div>
+          <form id="fruitPileForm">
+            <label><span>หมายเลขกอง</span><input name="number" type="number" min="1" max="99" value="${editingPile?.number || ""}" ${editingPile ? "readonly" : ""} required /></label>
+            <label><span>ชื่อที่แสดง</span><input name="name" maxlength="40" value="${escapeHtml(editingPile?.name || "")}" placeholder="เช่น กองมังคุด A" required /></label>
+            <label class="settings-pile-color-field"><span>สีกอง</span><input name="color" type="color" value="${editingPile?.color || "#0f766e"}" /><b>${editingPile?.color || "#0f766e"}</b></label>
+            <label class="settings-pile-visibility-field"><input name="visible" type="checkbox" ${editingPile?.visible !== false ? "checked" : ""} /><span>แสดงในหน้ากรอกผลผลิต</span></label>
+            <button class="btn btn-primary" type="submit">${editingPile ? "บันทึกการแก้ไข" : "สร้างกอง"}</button>
+          </form>
+        </section>
+      ` : ""}
+
       ${settingsPileSummaryMessage ? `<div class="alert ${settingsPileSummaryMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(settingsPileSummaryMessage)}</div>` : ""}
 
       <section class="settings-pile-metrics">
@@ -7872,8 +9042,8 @@ function renderSettingsPileSummary(user, moduleItem) {
 
       <section>
         <div class="section-title-row settings-pile-section-title">
-          <div><h3>ยอดรวมแต่ละกอง</h3><p class="muted-text">แสดงกอง 1-5 เสมอเพื่อเปรียบเทียบได้ทันที</p></div>
-          <span class="badge badge-success">${summaries.filter((summary) => summary.count).length} กองมีข้อมูล</span>
+          <div><h3>กองที่จัดการอยู่</h3><p class="muted-text">เปลี่ยนชื่อ สี สถานะ หรือลบตัวกองได้โดยข้อมูลผลผลิตเดิมยังอยู่ครบ</p></div>
+          <span class="badge badge-success">${pileConfigs.length} กอง</span>
         </div>
         <div class="settings-pile-grid">${summaries.map((summary) => renderSettingsPileCard(summary, settingsPileSummaryFruit)).join("")}</div>
       </section>
@@ -7952,10 +9122,11 @@ async function exportSettingsPileSummary(user, format) {
         start_date: settingsPileSummaryDate,
         end_date: settingsPileSummaryDate,
         fruit_type: settingsPileSummaryFruit,
+        ...getProductionReportCatalog(),
         printed_by: user?.fullname || "System Admin",
         printed_by_position: getExportPositionLabel(user),
         employees: getEmployees(),
-        production_records: getProductionRecords(),
+        production_records: records,
         export_sections: { overview: true, piles: true, details: true }
       })
     });
@@ -7970,8 +9141,91 @@ async function exportSettingsPileSummary(user, format) {
 }
 
 function bindSettingsPileSummaryEvents(user) {
+  document.querySelector("#openFruitPileForm")?.addEventListener("click", () => {
+    editingFruitPileNumber = null;
+    fruitPileFormOpen = true;
+    render();
+  });
+  document.querySelector("#closeFruitPileForm")?.addEventListener("click", () => {
+    editingFruitPileNumber = null;
+    fruitPileFormOpen = false;
+    render();
+  });
+  document.querySelector("#fruitPileForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const number = Number(form.get("number"));
+    const piles = getFruitPiles();
+    if (!Number.isInteger(number) || number < 1 || number > 99) {
+      settingsPileSummaryMessage = "หมายเลขกองต้องเป็นเลข 1-99";
+      settingsPileSummaryMessageType = "error";
+      render();
+      return;
+    }
+    if (!editingFruitPileNumber && piles.some((pile) => pile.number === number)) {
+      settingsPileSummaryMessage = `กองหมายเลข ${number} มีอยู่แล้ว กรุณาแก้ไขกองเดิม`;
+      settingsPileSummaryMessageType = "error";
+      render();
+      return;
+    }
+    const nextPile = normalizeFruitPile({ number, name: form.get("name"), color: form.get("color"), visible: form.get("visible") === "on" });
+    const next = piles.filter((pile) => pile.number !== number);
+    next.push(nextPile);
+    if (!await saveSharedFruitPiles(next)) return;
+    settingsPileSummaryMessage = editingFruitPileNumber ? `บันทึกการแก้ไข ${nextPile.name} แล้ว` : `สร้าง ${nextPile.name} แล้ว ข้อมูลเก่าของกองหมายเลขนี้เชื่อมต่อให้อัตโนมัติ`;
+    settingsPileSummaryMessageType = "success";
+    addAuditLog(user, editingFruitPileNumber ? "UPDATE_FRUIT_PILE" : "CREATE_FRUIT_PILE", `${nextPile.name} (#${number})`);
+    editingFruitPileNumber = null;
+    fruitPileFormOpen = false;
+    render();
+  });
+  document.querySelectorAll("[data-pile-edit]").forEach((button) => button.addEventListener("click", () => {
+    editingFruitPileNumber = Number(button.dataset.pileEdit);
+    fruitPileFormOpen = false;
+    render();
+  }));
+  document.querySelectorAll("[data-pile-toggle]").forEach((button) => button.addEventListener("click", async () => {
+    const number = Number(button.dataset.pileToggle);
+    const piles = getFruitPiles();
+    const target = piles.find((pile) => pile.number === number);
+    if (!target) return;
+    if (target.visible && piles.filter((pile) => pile.visible).length === 1) {
+      settingsPileSummaryMessage = "ต้องเปิดใช้งานอย่างน้อย 1 กอง เพื่อให้ระบบบันทึกผลผลิตทำงานได้";
+      settingsPileSummaryMessageType = "error";
+      render();
+      return;
+    }
+    target.visible = !target.visible;
+    if (!await saveSharedFruitPiles(piles)) return;
+    settingsPileSummaryMessage = `${target.name} ${target.visible ? "เปิดแสดงในหน้ากรอกผลผลิตแล้ว" : "ถูกซ่อนจากหน้ากรอกผลผลิตแล้ว"}`;
+    settingsPileSummaryMessageType = "success";
+    addAuditLog(user, target.visible ? "SHOW_FRUIT_PILE" : "HIDE_FRUIT_PILE", `${target.name} (#${number})`);
+    render();
+  }));
+  document.querySelectorAll("[data-pile-delete]").forEach((button) => button.addEventListener("click", async () => {
+    const number = Number(button.dataset.pileDelete);
+    const target = fruitPileByNumber(number);
+    if (target?.visible && getVisibleFruitPiles().length === 1) {
+      settingsPileSummaryMessage = "ลบกองสุดท้ายที่เปิดใช้งานไม่ได้ กรุณาสร้างหรือเปิดกองอื่นก่อน";
+      settingsPileSummaryMessageType = "error";
+      render();
+      return;
+    }
+    if (!target || !window.confirm(`ลบ ${target.name} ออกจากรายการกอง? ข้อมูลผลผลิตเดิมจะยังอยู่ครบ`)) return;
+    if (!await saveSharedFruitPiles(getFruitPiles().filter((pile) => pile.number !== number))) return;
+    settingsPileSummaryMessage = `ลบ ${target.name} แล้ว ข้อมูลผลผลิตเดิมยังคงอยู่และพร้อมเชื่อมกลับเมื่อสร้างกอง ${number} ใหม่`;
+    settingsPileSummaryMessageType = "success";
+    addAuditLog(user, "DELETE_FRUIT_PILE", `${target.name} (#${number}); production history preserved`);
+    render();
+  }));
+  document.querySelector('input[name="color"]')?.addEventListener("input", (event) => {
+    const editor = document.querySelector(".settings-pile-editor");
+    const label = event.currentTarget.parentElement?.querySelector("b");
+    if (editor) editor.style.setProperty("--editor-accent", event.currentTarget.value);
+    if (label) label.textContent = event.currentTarget.value;
+  });
   document.querySelector("#settingsPileDate")?.addEventListener("change", (event) => {
-    settingsPileSummaryDate = event.target.value || new Date().toISOString().slice(0, 10);
+    settingsPileSummaryDate = event.target.value || localDateInputValue();
     settingsPileSummaryMessage = "";
     render();
   });
@@ -7996,50 +9250,90 @@ function renderFullSettingsModule(user) {
   const logs = getAuditLogs();
   const canViewAuditLog = canOpen(user, "audit-log");
   const settingsTiles = [
-    ["employees", "จัดการพนักงาน", "เลือกจัดการพนักงานเหมาน้ำหนักหรือพนักงานตามเวลา"],
-    ["settings-pile-summary", "สรุปตามกอง", "เลือกวันที่ ดูยอดรวมแต่ละกอง และ Export PDF หรือ Excel"],
-    ["wage-rates", "ตั้งค่าอัตราค่าจ้าง", "เพิ่มอัตราใหม่และดูประวัติค่าน้ำ/ค่าดอกย้อนหลัง"],
-    ["account-management", "บัญชีเข้าใช้งาน", "Register และแก้ไข ID สำหรับเข้าเว็บ"],
-    ["audit-log", "Audit Log", "ดูประวัติระบบ หลังกรอกรหัส 4 หลัก"],
-    ["backup", "สำรองข้อมูล", "Export และ Import ฐานข้อมูล Supabase จริง"]
-  ].filter(([route]) => canOpen(user, route));
+    { route: "employees", icon: "EM", tone: "green", title: "จัดการพนักงาน", description: "พนักงานเหมาน้ำหนักและพนักงานตามเวลา" },
+    { route: "settings-pile-summary", icon: "PL", tone: "orange", title: "กองผลไม้", description: "สร้าง แก้ไขสี ซ่อน และจัดการกอง" },
+    { route: "wage-rates", icon: "฿", tone: "blue", title: "อัตราค่าจ้าง", description: "กำหนดอัตราและตรวจสอบประวัติย้อนหลัง" },
+    { route: "account-management", icon: "ID", tone: "purple", title: "บัญชีเข้าใช้งาน", description: "สร้างบัญชีและกำหนดสิทธิ์เข้าเว็บ" },
+    { route: "audit-log", icon: "LG", tone: "slate", title: "Audit Log", description: "ตรวจสอบกิจกรรมและประวัติระบบ" },
+    { route: "backup", icon: "BK", tone: "cyan", title: "สำรองข้อมูล", description: "ส่งออก นำเข้า และดูแลฐานข้อมูล" },
+    { route: "pf-desktop-app", icon: "PF", tone: "green", title: "PF DesktopApp", description: "รับข้อมูลชั่งและส่งข้อมูลหลักให้เครื่องชั่ง" }
+  ].filter((item) => canOpen(user, item.route));
 
   return `
-    <section class="panel settings-home-panel">
-      <div class="panel-head">
+    <div class="settings-control-page">
+    <section class="panel settings-control-hero">
+      <div class="settings-control-head">
         <div>
+          <span class="settings-control-eyebrow">ADMIN CONTROL</span>
           <h2>ตั้งค่า</h2>
-          <p>ศูนย์จัดการข้อมูลหลักสำหรับแอดมิน: พนักงาน บัญชี ค่าจ้าง และ Backup ฐานข้อมูล${canViewAuditLog ? " รวมถึง Audit Log" : ""}</p>
+          <p>ศูนย์ควบคุมข้อมูล พนักงาน บัญชี และระบบ</p>
         </div>
-        <span class="badge badge-success">Admin</span>
+        <span class="settings-control-role">Admin</span>
       </div>
-      <div class="metrics-grid metrics-spaced">
-        <div class="metric-card"><span>พนักงานใช้งาน</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>จาก ${employees.length.toLocaleString("th-TH")} คน</small></div>
-        <div class="metric-card"><span>อัตราค่าจ้าง</span><strong>${rates.length.toLocaleString("th-TH")}</strong><small>รายการประวัติ</small></div>
-        <div class="metric-card"><span>บัญชีระบบ</span><strong>${accounts.length.toLocaleString("th-TH")}</strong><small>รวมบัญชีแอดมิน</small></div>
-        ${canViewAuditLog ? `<div class="metric-card"><span>Audit Log</span><strong>${logs.length.toLocaleString("th-TH")}</strong><small>รายการล่าสุด</small></div>` : ""}
+      <div class="settings-control-stats">
+        <div><span>พนักงานใช้งาน</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>/ ${employees.length.toLocaleString("th-TH")} คน</small></div>
+        <div><span>อัตราค่าจ้าง</span><strong>${rates.length.toLocaleString("th-TH")}</strong><small>รายการ</small></div>
+        <div><span>บัญชีระบบ</span><strong>${accounts.length.toLocaleString("th-TH")}</strong><small>บัญชี</small></div>
+        ${canViewAuditLog ? `<div><span>Audit Log</span><strong>${logs.length.toLocaleString("th-TH")}</strong><small>รายการ</small></div>` : ""}
       </div>
     </section>
 
-    <section class="panel">
-      <div class="section-title-row">
-        <h3>เมนูตั้งค่า</h3>
-        <p class="muted-text">เลือกงานที่ต้องการจัดการ</p>
+    <section class="panel settings-control-menu">
+      <div class="settings-control-menu-head">
+        <div><h3>เมนูตั้งค่า</h3><p>เลือกส่วนที่ต้องการจัดการ</p></div>
+        <span>${settingsTiles.length.toLocaleString("th-TH")} เมนู</span>
       </div>
-      <div class="settings-grid settings-grid-wide">
+      <div class="settings-control-grid">
         ${
           settingsTiles.length
             ? settingsTiles
                 .map(
-                  ([route, title, description]) =>
-                    `<button class="settings-tile" data-route="${route}" type="button"><strong>${title}</strong><span>${description}</span></button>`
+                  (item) =>
+                    `<button class="settings-control-tile settings-control-${item.tone}" data-route="${item.route}" type="button"><span class="settings-control-icon">${item.icon}</span><span class="settings-control-copy"><strong>${item.title}</strong><small>${item.description}</small></span><span class="settings-control-arrow" aria-hidden="true">→</span></button>`
                 )
                 .join("")
             : `<div class="empty-state">ระดับ ${escapeHtml(getUserLevel(user))} ยังไม่มีเมนูตั้งค่าที่เปิดให้ใช้งาน</div>`
         }
       </div>
     </section>
+    </div>
   `;
+}
+
+function renderPfDesktopApp(user, moduleItem) {
+  const catalog = getDesktopCatalogPayload();
+  const employees = getEmployees().filter((employee) => employee.status === "Active");
+  const canImport = canImportDesktopWeighing(user);
+  const preview = canImport ? desktopImportPreview : null;
+  return `
+    <section class="pf-desktop-page">
+      <div class="pf-desktop-hero">
+        <div><span class="settings-control-eyebrow">DATA BRIDGE</span><h2>${escapeHtml(moduleItem.label)}</h2><p>ตรวจประวัติชื่อไฟล์และข้อมูลทั้งชุดก่อนรับเข้า การชั่งน้ำหนักเท่ากันภายในไฟล์จะบันทึกครบทุกครั้ง</p></div>
+        <span class="pf-desktop-status">พร้อมเชื่อมต่อ</span>
+      </div>
+      ${desktopImportMessage ? `<div class="alert ${desktopImportMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(desktopImportMessage)}</div>` : ""}
+      <div class="pf-desktop-split">
+        <section class="panel pf-desktop-zone pf-desktop-receive">
+          <div class="pf-desktop-zone-head"><span class="pf-zone-icon">IN</span><div><h3>รับข้อมูลชั่ง</h3><p>ไฟล์ JSON จากเมนู “ส่งออกไปเว็บ / คิดเงิน” ใน Desktop app</p></div></div>
+          ${!canImport ? '<div class="alert alert-error">การนำเข้าข้อมูลชั่งใช้สิทธิ์ C6 ขึ้นไป บัญชี C4–C5 ดูและส่งออกข้อมูลหลักได้</div>' : ""}
+          <label class="pf-upload-box" for="desktopImportFile"><strong>เลือกไฟล์ pff.weighing.v1</strong><small>รับทุกกองและทุกพนักงานจากไฟล์ · JSON ไม่เกิน 10 MB · ไม่รับข้อมูล Simulation</small><input id="desktopImportFile" type="file" accept="application/json,.json" ${!canImport || desktopImportBusy ? "disabled" : ""} /></label>
+          ${preview ? `
+            <p>ไฟล์: <strong>${escapeHtml(preview.fileName || "")}</strong></p>
+            <div class="pf-import-summary"><div><span>พร้อมนำเข้า</span><strong>${preview.accepted.length.toLocaleString("th-TH")}</strong></div><div><span>ไม่ผ่านตรวจ</span><strong>${preview.rejected.length.toLocaleString("th-TH")}</strong></div><div><span>กองในไฟล์</span><strong>${new Set(preview.accepted.map((record) => record.pile_no)).size.toLocaleString("th-TH")}</strong></div></div>
+            ${preview.rejected.length ? `<details class="pf-import-errors"><summary>ดูรายการที่ไม่ผ่าน (${preview.rejected.length})</summary><ul>${preview.rejected.slice(0, 50).map((item) => `<li>แถว ${item.row} · ${escapeHtml(item.id)} — ${escapeHtml(item.reason)}</li>`).join("")}</ul></details>` : ""}
+            ${preview.review ? `<div class="alert alert-error"><strong>พักรอตรวจสอบ — ยังไม่ได้รับไฟล์เข้าคิว</strong><ul>${preview.review.matches.map((match) => `<li>ตรงกับ ${escapeHtml(match.file_name)} จำนวน ${match.matched} จาก ${match.total} รายการ (${match.percent}%)</li>`).join("")}</ul><p>หากยืนยัน จะรับทั้งไฟล์ รวมรายการส่วนที่ตรงกับไฟล์เก่าและนับยอดเพิ่มด้วย</p><button class="btn btn-primary" id="desktopImportOverlapConfirm" type="button" ${desktopImportBusy ? "disabled" : ""}>ตรวจสอบแล้ว ยืนยันรับทั้งไฟล์</button><button class="btn btn-outline" id="desktopImportCancel" type="button" ${desktopImportBusy ? "disabled" : ""}>ยกเลิกไฟล์นี้</button></div>` : `<button class="btn btn-primary pf-desktop-main-action" id="desktopImportConfirm" type="button" ${!preview.accepted.length || desktopImportBusy || preview.blocked ? "disabled" : ""}>${desktopImportBusy ? "กำลังตรวจและรับไฟล์..." : `ยืนยันนำเข้า ${preview.accepted.length.toLocaleString("th-TH")} รายการ`}</button>`}
+          ` : `<div class="pf-zone-note"><strong>ลำดับการทำงาน</strong><span>เลือกไฟล์ → ระบบแยกกองและพนักงาน → ตรวจผล → ยืนยันเข้าคิว</span></div>`}
+          <div class="pf-zone-note"><strong>ตรวจซ้ำทั้งไฟล์</strong><span>เหมือน 100% ไม่รับซ้ำ แม้เปลี่ยนชื่อไฟล์ · ตั้งแต่ 90% พักให้ตรวจสอบ · ต่ำกว่า 90% รับทั้งไฟล์ รวมส่วนที่ตรงกับไฟล์เก่า</span></div>
+        </section>
+
+        <section class="panel pf-desktop-zone pf-desktop-send">
+          <div class="pf-desktop-zone-head"><span class="pf-zone-icon">OUT</span><div><h3>ส่งข้อมูลหลักให้ Desktop app</h3><p>ให้เครื่องชั่งใช้รหัสชุดเดียวกับเว็บก่อนเริ่มบันทึก</p></div></div>
+          <div class="pf-master-list"><div><span>ผลไม้ที่ใช้งาน</span><strong>${catalog.fruits.length.toLocaleString("th-TH")}</strong><small>${catalog.fruits.map((item) => escapeHtml(item.name)).join(" · ")}</small></div><div><span>ประเภทน้ำหนัก</span><strong>${catalog.weighing_types.length.toLocaleString("th-TH")}</strong><small>${catalog.weighing_types.map((item) => escapeHtml(item.name)).join(" · ")}</small></div><div><span>กองผลไม้</span><strong>${catalog.piles.length.toLocaleString("th-TH")}</strong><small>${catalog.piles.map((item) => escapeHtml(item.name)).join(" · ")}</small></div><div><span>รหัสพนักงานใช้งาน</span><strong>${employees.length.toLocaleString("th-TH")}</strong><small>รายชื่อพนักงานเหมาน้ำหนักจากฐานกลาง</small></div></div>
+          <div class="pf-desktop-actions"><button class="btn btn-primary" id="desktopExportCatalog" type="button">ดาวน์โหลดผลไม้และประเภทน้ำหนัก</button><button class="btn btn-outline" id="desktopExportEmployees" type="button">ดาวน์โหลดรหัสพนักงาน</button></div>
+          <div class="pf-zone-note"><strong>ใช้ที่ Desktop app</strong><span>นำเข้าไฟล์ Catalog และ Employees ที่เมนูรับข้อมูล ก่อนเริ่มชั่ง</span></div>
+        </section>
+      </div>
+    </section>`;
 }
 function renderAccountManagement(user, moduleItem) {
   const accounts = apiGetAccountUsers(accountSearch);
@@ -8059,7 +9353,7 @@ function renderAccountManagement(user, moduleItem) {
           <h2>${escapeHtml(moduleItem.label)}</h2>
           <p>${escapeHtml(moduleItem.description)}</p>
         </div>
-        <span class="badge badge-success">Admin</span>
+        <span class="badge badge-success">HR C4+ / ผู้ดูแลระบบ</span>
       </div>
       <div class="toolbar">
         <form class="search-form" id="accountSearchForm">
@@ -8212,7 +9506,7 @@ function renderAccountRow(accountUser, currentUser) {
               : `<button class="btn btn-small btn-outline" data-edit-account="${accountUser.id}" type="button">Edit</button>`
           }
           ${
-            locked || accountUser.id === currentUser.id
+            locked || accountUser.id === currentUser.id || !isTopLevelUser(currentUser)
               ? ""
               : `<button class="btn btn-small btn-danger" data-delete-account="${accountUser.id}" type="button">Delete</button>`
           }
@@ -8351,6 +9645,7 @@ function getAuditLogActionLabel(action) {
     UPDATE_TIME_RECORD: "แก้ไขเวลาทำงาน",
     DELETE_TIME_RECORD: "ลบเวลาทำงาน",
     EXPORT_DATABASE_BACKUP: "ส่งออกข้อมูลสำรอง",
+    EXPORT_DATABASE_MIGRATION: "ย้ายฐานข้อมูลทั้งหมด",
     IMPORT_DATABASE_BACKUP: "นำเข้าข้อมูลสำรอง",
     BACKUP_CLEAR_MAIN: "Backup และเคลียร์ข้อมูลธุรกรรม",
     BACKUP_CLEAR_QUEUE: "Backup และเคลียร์ประวัติคิว",
@@ -8408,7 +9703,7 @@ function renderAuditLog(moduleItem) {
           <h2>${escapeHtml(moduleItem.label)}</h2>
           <p>ตรวจสอบประวัติการทำรายการสำคัญในระบบ เรียงจากรายการล่าสุด</p>
         </div>
-        <span class="badge audit-level-badge">เฉพาะ C6-C7</span>
+        <span class="badge audit-level-badge">เฉพาะ C5-C7</span>
       </div>
       <div class="audit-summary-grid">
         <div class="audit-summary-item"><span>รายการทั้งหมด</span><strong>${logs.length.toLocaleString("th-TH")}</strong><small>รายการที่บันทึกไว้</small></div>
@@ -8604,7 +9899,8 @@ const BACKUP_DATA_KEYS = [
   "community_posts",
   "secret_messages"
 ];
-const SUPABASE_FREE_DATABASE_BYTES = 500 * 1024 * 1024;
+const SUPABASE_DATABASE_INCLUDED_BYTES = 8 * 1024 * 1024 * 1024;
+const SUPABASE_BANDWIDTH_INCLUDED_BYTES = 250 * 1024 * 1024 * 1024;
 const BACKUP_STORAGE_WARNING_PERCENT = 85;
 
 function resetBackupSecurityState() {
@@ -8634,18 +9930,6 @@ function backupRows(data, key) {
 function backupGroupSummaries(data = backupPayloadData()) {
   return [
     {
-      label: "ข้อมูลพนักงาน",
-      detail: "พนักงานเหมาน้ำหนักและพนักงานตามเวลา",
-      count: backupRows(data, "employees").length + backupRows(data, "time_employees").length,
-      icon: "บุคคล"
-    },
-    {
-      label: "บัญชีผู้ใช้และสิทธิ์",
-      detail: "บัญชี ตำแหน่ง ระดับสิทธิ์ และสถานะ",
-      count: backupRows(data, "account_users").length,
-      icon: "สิทธิ์"
-    },
-    {
       label: "ผลผลิตและเวลาทำงาน",
       detail: "รายการผลิต กองงาน และบันทึกเวลา",
       count:
@@ -8665,29 +9949,18 @@ function backupGroupSummaries(data = backupPayloadData()) {
       icon: "คิว"
     },
     {
-      label: "รายการรับเข้าและต้นทุน",
-      detail: "ผลไม้ ประวัติราคาแนะนำ และราคาจริงของแต่ละรายการรับเข้า",
-      count:
-        backupRows(data, "inbound_fruits").length +
-        backupRows(data, "inbound_fruit_prices").length +
-        backupRows(data, "inbound_receipts").length,
-      icon: "รับเข้า"
-    },
-    {
       label: "รายงานปัญหาของเว็บ",
       detail: "รายละเอียด สถานะ และภาพหน้าจอที่แนบมากับรายงาน",
       count: backupRows(data, "issue_reports").length,
       icon: "เว็บ"
     },
     {
-      label: "อัตราค่าจ้างและประวัติระบบ",
-      detail: "อัตราค่าจ้าง รายการหัก และ Audit Log",
+      label: "รายการหักเงิน อนุมัติ และเบี้ยขยัน",
+      detail: "ข้อมูลรายการหักและการอนุมัติครบทั้งวงจร",
       count:
-        backupRows(data, "wage_rates").length +
         backupRows(data, "deduction_records").length +
-        backupRows(data, "deduction_applications").length +
-        backupRows(data, "audit_logs").length,
-      icon: "ระบบ"
+        backupRows(data, "deduction_applications").length,
+      icon: "เงิน"
     }
   ];
 }
@@ -8698,6 +9971,7 @@ function backupTotalRows(data = backupPayloadData()) {
 
 function formatBackupFileSize(bytes) {
   const size = Number(bytes || 0);
+  if (size >= 1024 * 1024 * 1024) return `${(size / (1024 * 1024 * 1024)).toLocaleString("th-TH", { maximumFractionDigits: 1 })} GB`;
   if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toLocaleString("th-TH", { maximumFractionDigits: 1 })} MB`;
   return `${Math.max(1, Math.ceil(size / 1024)).toLocaleString("th-TH")} KB`;
 }
@@ -8705,7 +9979,7 @@ function formatBackupFileSize(bytes) {
 function getBackupStorageUsage() {
   const serverUsage = backupSnapshot?.storage_usage;
   const usedBytes = Number(serverUsage?.used_bytes) || new Blob([JSON.stringify(backupSnapshot || {})]).size;
-  const limitBytes = Number(serverUsage?.limit_bytes) || SUPABASE_FREE_DATABASE_BYTES;
+  const limitBytes = Number(serverUsage?.limit_bytes) || SUPABASE_DATABASE_INCLUDED_BYTES;
   const warningPercent = Number(serverUsage?.warning_percent) || BACKUP_STORAGE_WARNING_PERCENT;
   const percent = Math.min(100, Math.max(0, (usedBytes / limitBytes) * 100));
   const level = percent >= warningPercent ? "critical" : percent >= 70 ? "watch" : percent >= 45 ? "moderate" : "healthy";
@@ -8728,9 +10002,9 @@ function renderBackupStorageMeter() {
     <section class="backup-storage-card is-${usage.level}" aria-label="สถานะพื้นที่ฐานข้อมูล Supabase">
       <div class="backup-storage-card-head">
         <div>
-          <span class="backup-storage-kicker"><i></i> SUPABASE FREE DATABASE</span>
+          <span class="backup-storage-kicker"><i></i> SUPABASE PRO DATABASE</span>
           <h3>สถานะพื้นที่ฐานข้อมูล</h3>
-          <p>ติดตามขนาดข้อมูลที่ระบบสำรองได้ เทียบกับโควตา Free Plan 500 MB</p>
+          <p>ติดตามขนาดข้อมูลเทียบพื้นที่ฐานข้อมูล Pro 8 GB</p>
         </div>
         <div class="backup-storage-score"><strong>${displayPercent}%</strong><span>${escapeHtml(usage.label)}</span></div>
       </div>
@@ -8738,7 +10012,7 @@ function renderBackupStorageMeter() {
         <span class="backup-storage-fill" style="width:${fillPercent}%"></span>
         <i class="backup-storage-threshold" style="left:${usage.warningPercent}%"><b>${usage.warningPercent}%</b></i>
       </div>
-      <div class="backup-storage-scale"><span>0 MB</span><span>ระดับเตือน ${usage.warningPercent}%</span><span>500 MB</span></div>
+      <div class="backup-storage-scale"><span>0</span><span>ระดับเตือน ${usage.warningPercent}%</span><span>${formatBackupFileSize(usage.limitBytes)}</span></div>
       <div class="backup-storage-facts">
         <div><span>ข้อมูลปัจจุบัน</span><strong>${formatBackupFileSize(usage.usedBytes)}</strong></div>
         <div><span>พื้นที่คงเหลือ</span><strong>${formatBackupFileSize(usage.remainingBytes)}</strong></div>
@@ -8760,7 +10034,7 @@ function formatBackupDateTime(value) {
 
 function getBackupHistory() {
   return getAuditLogs()
-    .filter((log) => ["EXPORT_DATABASE_BACKUP", "IMPORT_DATABASE_BACKUP", "BACKUP_CLEAR_MAIN", "BACKUP_CLEAR_QUEUE"].includes(String(log.action || "").toUpperCase()))
+    .filter((log) => ["EXPORT_DATABASE_BACKUP", "EXPORT_DATABASE_MIGRATION", "IMPORT_DATABASE_BACKUP", "BACKUP_CLEAR_MAIN", "BACKUP_CLEAR_QUEUE"].includes(String(log.action || "").toUpperCase()))
     .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
     .slice(0, 12);
 }
@@ -8817,6 +10091,13 @@ async function exportQueueBackup(accessCode) {
   });
 }
 
+async function exportDatabaseMigration(migrationCode) {
+  return cloudApiRequest("/api/backup/migrate", {
+    headers: { "X-Migration-Code": migrationCode },
+    timeoutMs: 120000
+  });
+}
+
 async function backupAndClearDatabase(accessCode, scope) {
   return cloudApiRequest("/api/backup/clear", {
     method: "POST",
@@ -8829,7 +10110,7 @@ async function backupAndClearDatabase(accessCode, scope) {
 function downloadBackupPayload(backup, scope = "main") {
   const content = JSON.stringify(backup, null, 2);
   const timestamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
-  const scopeLabel = scope === "queue" ? "production-queue" : "database";
+  const scopeLabel = scope === "queue" ? "production-queue" : scope === "migration" ? "full-database-migration" : "operations";
   downloadTextFile(`pismai-${scopeLabel}-backup-${timestamp}.json`, content, "application/json;charset=utf-8");
 }
 
@@ -8915,9 +10196,10 @@ function renderBackupOverview(user) {
           <div class="backup-action-buttons">
             <button class="btn btn-primary" id="exportBackup" type="button" ${backupBusy ? "disabled" : ""}>${backupBusy ? "กำลังสร้างไฟล์..." : "Backup"}</button>
             <button class="btn backup-clear-button" data-open-backup-clear="main" type="button" ${backupBusy || !canClear ? "disabled" : ""}>Backup / เคลียร์</button>
+            <button class="btn btn-outline" id="exportDatabaseMigration" type="button" ${backupBusy ? "disabled" : ""}>ย้ายฐานข้อมูล</button>
           </div>
         </div>
-        <div class="backup-warning">Backup จะดาวน์โหลดไฟล์อย่างเดียว ส่วน Backup / เคลียร์ จะล้างรายการรับเข้าแต่เก็บชนิดผลไม้ ประวัติราคา บัญชีผู้ใช้ พนักงาน การตั้งค่า และ Audit Log ไว้</div>
+        <div class="backup-warning">Backup จะดาวน์โหลดเฉพาะผลผลิต เวลาทำงาน คิว รายการหัก/อนุมัติ/เบี้ยขยัน และรายงานปัญหา ส่วน Backup / เคลียร์ จะดาวน์โหลดชุดเดียวกันแล้วลบออก โดยจะเก็บบัญชีผู้ใช้ พนักงาน อัตราค่าจ้าง และ Audit Log ไว้เสมอ ปุ่มย้ายฐานข้อมูลเท่านั้นที่ส่งออกข้อมูลทั้งหมด</div>
       </div>
       ${renderBackupStatusRail()}
     </section>
@@ -9074,7 +10356,7 @@ function renderBackupClearConfirm() {
         <h3 id="backupClearConfirmTitle">ยืนยัน Backup / เคลียร์${queueScope ? "ประวัติคิว" : "ข้อมูลธุรกรรม"}</h3>
         <p>${queueScope
           ? "ระบบจะสร้างไฟล์ เก็บสำเนา Private และตรวจสอบก่อนลบเฉพาะคิวที่สำเร็จหรือยกเลิกแล้ว ข้อมูลผลผลิตจริงจะไม่ถูกลบ"
-          : "ระบบจะสำรองทั้งระบบก่อนลบผลผลิต เวลา รายการหัก เบี้ยขยัน และคิว โดยเก็บบัญชี พนักงาน อัตราค่าจ้าง การตั้งค่า และ Audit Log ไว้"}</p>
+          : "ระบบจะสำรองเฉพาะผลผลิต เวลา รายการหัก/อนุมัติ/เบี้ยขยัน คิว และรายงานปัญหา ก่อนลบข้อมูลชุดนี้ โดยเก็บบัญชี พนักงาน อัตราค่าจ้าง การตั้งค่า และ Audit Log ไว้"}</p>
         <div class="backup-clear-safety-list">
           <span>1. สร้าง Snapshot พร้อม checksum</span>
           <span>2. เก็บและตรวจสอบ Private Archive</span>
@@ -9233,6 +10515,30 @@ function bindBackupEvents(user) {
     }
   });
 
+  document.querySelector("#exportDatabaseMigration")?.addEventListener("click", async () => {
+    const migrationCode = window.prompt("กรอกรหัสย้ายฐานข้อมูล 4 หลัก");
+    if (migrationCode === null) return;
+    if (!/^\d{4}$/.test(migrationCode)) {
+      setBackupMessage("กรุณากรอกรหัสย้ายฐานข้อมูลให้ครบ 4 หลัก", "error");
+      render();
+      return;
+    }
+    backupBusy = true;
+    backupMessage = "";
+    render();
+    try {
+      const backup = await exportDatabaseMigration(migrationCode);
+      downloadBackupPayload(backup, "migration");
+      addAuditLog(user, "EXPORT_DATABASE_MIGRATION", `Exported full database migration (${backup?.total_rows || 0} rows)`);
+      backupBusy = false;
+      setBackupMessage("สร้างและดาวน์โหลดไฟล์ย้ายฐานข้อมูลทั้งหมดเรียบร้อยแล้ว");
+    } catch (error) {
+      backupBusy = false;
+      setBackupMessage(error?.status === 403 ? "รหัสย้ายฐานข้อมูลไม่ถูกต้อง" : error instanceof Error ? error.message : "สร้างไฟล์ย้ายฐานข้อมูลไม่สำเร็จ", "error");
+    }
+    render();
+  });
+
   document.querySelector("#exportQueueBackup")?.addEventListener("click", async () => {
     backupBusy = true;
     backupMessage = "";
@@ -9387,7 +10693,7 @@ function renderPileManagement(moduleItem) {
   const totalRecords = pileSummaries.reduce((sum, item) => sum + item.count, 0);
   const totalWeight = pileSummaries.reduce((sum, item) => sum + item.total, 0);
   const totalAmount = pileSummaries.reduce((sum, item) => sum + item.amount, 0);
-  const rows = [1, 2, 3, 4, 5].map((pileNo) => {
+  const rows = [1, 2, 3, 4, 5, 6].map((pileNo) => {
     const item = pileMap.get(pileNo) || { water: 0, flower: 0, total: 0, amount: 0, count: 0 };
     const statusClass = item.count > 0 ? "badge-success" : "badge-warning";
     const statusText = item.count > 0 ? "Active" : "No records";
@@ -9409,12 +10715,12 @@ function renderPileManagement(moduleItem) {
       <div class="panel-head">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>ตรวจสอบกองงาน 1-5 จากรายการผลิตจริง โดยหน้านี้ไม่แก้ข้อมูลผลผลิต</p>
+          <p>ตรวจสอบกองงาน 1-6 จากรายการผลิตจริง โดยหน้านี้ไม่แก้ข้อมูลผลผลิต</p>
         </div>
-        <span class="badge badge-success">${activePileCount}/5 Active</span>
+        <span class="badge badge-success">${activePileCount}/6 Active</span>
       </div>
       <div class="metrics-grid metrics-spaced">
-        <div class="metric-card"><span>กองที่มีข้อมูล</span><strong>${activePileCount.toLocaleString("th-TH")}</strong><small>จากทั้งหมด 5 กอง</small></div>
+        <div class="metric-card"><span>กองที่มีข้อมูล</span><strong>${activePileCount.toLocaleString("th-TH")}</strong><small>จากทั้งหมด 6 กอง</small></div>
         <div class="metric-card"><span>รายการผลิต</span><strong>${totalRecords.toLocaleString("th-TH")}</strong><small>จากข้อมูลในเครื่อง</small></div>
         <div class="metric-card"><span>น้ำหนักรวม</span><strong>${numberText(totalWeight)}</strong><small>กิโลกรัม</small></div>
         <div class="metric-card"><span>ยอดเงินรวม</span><strong>${currency(totalAmount)}</strong><small>ตามอัตราค่าจ้าง</small></div>
@@ -9461,7 +10767,7 @@ function bindPileManagementEvents(user) {
     const summaries = getPileSummaries(getProductionRecords());
     const summaryMap = new Map(summaries.map((item) => [Number(item.pile), item]));
     const rows = [["pile", "records", "water", "flower", "total", "amount", "status"]];
-    [1, 2, 3, 4, 5].forEach((pileNo) => {
+    [1, 2, 3, 4, 5, 6].forEach((pileNo) => {
       const item = summaryMap.get(pileNo) || { water: 0, flower: 0, total: 0, amount: 0, count: 0 };
       rows.push([
         `Pile ${pileNo}`,
@@ -9474,7 +10780,7 @@ function bindPileManagementEvents(user) {
       ]);
     });
     const csv = rows.map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\n");
-    downloadTextFile(`pile-summary-${new Date().toISOString().slice(0, 10)}.csv`, csv);
+    downloadTextFile(`pile-summary-${localDateInputValue()}.csv`, csv);
     pileManagementMessage = "ส่งออกสรุปกองเป็น CSV แล้ว";
     pileManagementMessageType = "success";
     addAuditLog(user, "EXPORT_PILE_SUMMARY", "Exported pile summary CSV");
@@ -9488,6 +10794,15 @@ function bindPileManagementEvents(user) {
   });
 }
 function renderProductionManagement(user, moduleItem) {
+  if (!canEditProductionRecords(user)) {
+    productionEditorOpen = false;
+    if (["desktop-pull", "queue"].includes(productionView)) productionView = "fast-entry";
+  }
+  if (productionView === "desktop-pull") {
+    return window.ProductionPull.render({ date: localDateInputValue(), escape: escapeHtml,
+      canImport: canImportDesktopWeighing(user), fruits: productionFruitOptions,
+      preview: desktopImportPreview, importMessage: desktopImportMessage, importBusy: desktopImportBusy });
+  }
   if (productionEditorOpen) {
     return renderProductionEditor(user, moduleItem);
   }
@@ -9513,16 +10828,21 @@ function renderProductionManagement(user, moduleItem) {
   const currentView = visibleViews.some(([id]) => id === productionView)
     ? productionView
     : "fast-entry";
+  const artworkFruit = ["mangosteen", "durian", "mango", "pomelo", "coconut"].includes(selectedFruit.id)
+    ? selectedFruit.id
+    : "mangosteen";
 
   return `
-    <section class="panel">
+    <section class="panel production-workspace-header">
       <div class="panel-head">
         <div>
+          <span class="production-eyebrow">PRODUCTION WORKSPACE</span>
           <h2>${escapeHtml(moduleItem.label)}</h2>
           <p>${escapeHtml(labels.description)}</p>
         </div>
+        <div class="production-hero-fruit production-hero-fruit-${artworkFruit}" aria-hidden="true"></div>
         <div class="panel-actions">
-          <button class="btn btn-outline production-queue-open-button" data-open-production-queue type="button">คิวการบันทึก <span class="production-queue-count" data-production-queue-count ${productionQueueItems.some((item) => ["queued", "processing"].includes(item.status)) ? "" : "hidden"}>${productionQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length}</span></button>
+          ${canEditProductionRecords(user) ? `<button class="btn btn-outline production-queue-open-button" data-open-production-queue type="button">คิวการบันทึก <span class="production-queue-count" data-production-queue-count ${productionQueueItems.some((item) => ["queued", "processing"].includes(item.status)) ? "" : "hidden"}>${productionQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length}</span></button>` : ""}
           <button class="btn btn-outline report-primary-button" data-production-fruit-menu type="button">เปลี่ยนผลไม้</button>
           <span class="badge badge-success">พร้อมบันทึก</span>
         </div>
@@ -9542,6 +10862,7 @@ function renderProductionManagement(user, moduleItem) {
         : ""
     }
     ${renderProductionView(user, currentView)}
+    ${renderProductionPullEntry(user)}
   `;
 }
 
@@ -9577,6 +10898,21 @@ function productionQueueFruitLabel(fruitType) {
   return productionFruitOptions.find((fruit) => fruit.id === fruitType)?.label || fruitType || "ผลผลิต";
 }
 
+function productionQueueWeightDetails(item) {
+  const fruitType = item?.fruit_type || "mangosteen";
+  const labels = getProductionFieldLabels(fruitType);
+  const details = item?.weight_details && typeof item.weight_details === "object" ? item.weight_details : {};
+  const rows = labels.mode === "single"
+    ? [[labels.weightShort || labels.weight || "น้ำหนัก", details.weight ?? item?.total_weight]]
+    : [
+        [labels.waterShort || labels.water || "น้ำ", details.water],
+        [labels.flowerShort || labels.flower || "ดอก", details.flower]
+      ];
+  const available = rows.filter(([, value]) => Number(value) > 0);
+  if (!available.length) return `<span class="production-queue-weight-total">รวม ${numberText(item?.total_weight)} กก.</span>`;
+  return `${available.map(([label, value]) => `<span class="production-queue-weight-chip"><b>${escapeHtml(label)}</b> ${numberText(value)} กก.</span>`).join("")}<span class="production-queue-weight-total">รวม ${numberText(item?.total_weight)} กก.</span>`;
+}
+
 function productionQueueCanAct(user, item) {
   const identities = [user?.username, user?.fullname].map((value) => String(value || "").trim().toLocaleLowerCase("th-TH"));
   return canManageAllProductionRecords(user) || identities.includes(String(item?.created_by || "").trim().toLocaleLowerCase("th-TH"));
@@ -9586,6 +10922,9 @@ function renderProductionQueueActions(user, item) {
   const busy = Number(productionQueueActionId) === Number(item.id);
   if (busy) return `<button class="btn btn-small btn-outline" type="button" disabled>กำลังตรวจสอบ...</button>`;
   const canAct = productionQueueCanAct(user, item);
+  if (item.status === "succeeded" && item.desktop_import && canManageAllProductionRecords(user)) {
+    return `<button class="btn btn-small btn-outline" data-queue-verify="${item.id}" type="button">ตรวจรายการจริงอีกครั้ง</button>`;
+  }
   if (item.status === "needs_review" || item.status === "failed") {
     const candidateIds = Array.isArray(item.duplicate_details?.existing_ids) ? item.duplicate_details.existing_ids : [];
     const linkButton = canManageAllProductionRecords(user) && item.error_code !== "not_found" && candidateIds.length
@@ -9594,10 +10933,13 @@ function renderProductionQueueActions(user, item) {
     const retryButton = canAct && item.error_code === "not_found"
       ? `<button class="btn btn-small btn-primary" data-queue-retry="${item.id}" type="button">บันทึกใหม่</button>`
       : "";
+    const confirmSaveButton = canManageAllProductionRecords(user)
+      ? `<button class="btn btn-small btn-primary production-queue-confirm-save" data-queue-confirm-save="${item.id}" onclick="runProductionQueueAction(${Number(item.id)}, 'confirm-save', { manually_reviewed: true })" type="button">ยืนยันกรอกข้อมูล</button>`
+      : "";
     const cancelButton = canAct
       ? `<button class="btn btn-small btn-outline" data-queue-cancel="${item.id}" type="button">ยกเลิก</button>`
       : "";
-    return `<div class="production-queue-row-actions"><button class="btn btn-small btn-outline" data-queue-verify="${item.id}" type="button">ตรวจสอบ</button>${retryButton}${linkButton}${cancelButton}</div>`;
+    return `<div class="production-queue-row-actions"><button class="btn btn-small btn-outline" data-queue-verify="${item.id}" type="button">ตรวจสอบ</button>${confirmSaveButton}${retryButton}${linkButton}${cancelButton}</div>`;
   }
   if (item.status === "queued" && canAct) {
     return `<button class="btn btn-small btn-outline" data-queue-cancel="${item.id}" type="button">ยกเลิก</button>`;
@@ -9616,9 +10958,9 @@ function renderProductionQueueRow(user, item) {
     <article class="production-queue-row status-${status.className}" data-queue-search-row>
       <div class="production-queue-cell queue-number"><span>คิว</span><strong>#${escapeHtml(productionQueueNumber(item))}</strong><small>${item.record_count || 1} รายการ</small></div>
       <div class="production-queue-cell queue-production"><span>ข้อมูลผลผลิต</span><strong>${escapeHtml(productionQueueFruitLabel(item.fruit_type))}</strong><small>${escapeHtml(item.emp_code || "-")} · ${escapeHtml(item.employee_name || "-")}</small></div>
-      <div class="production-queue-cell queue-amount"><span>จำนวนที่บันทึก</span><strong>${numberText(item.total_weight)} กก.</strong><small>${money(item.total_amount || 0)}</small></div>
-      <div class="production-queue-cell queue-date"><span>วันที่ข้อมูล</span><strong>${escapeHtml(formatProductionQueueDate(item.record_date))}</strong><small>${escapeHtml(submitted.time)} น.</small></div>
-      <div class="production-queue-cell queue-actor"><span>ผู้บันทึก</span><strong>${escapeHtml(item.created_by || "-")}</strong><small>ลองแล้ว ${Number(item.attempt_count || 0)} ครั้ง</small></div>
+      <div class="production-queue-cell queue-amount"><span>จำนวนที่บันทึก</span><div class="production-queue-weight-details">${productionQueueWeightDetails(item)}</div><small>${money(item.total_amount || 0)}</small></div>
+      <div class="production-queue-cell queue-date"><span>วันที่ลงผลงาน</span><strong>${escapeHtml(formatProductionQueueDate(item.record_date))}</strong><small>ส่งเข้าคิวจริง ${escapeHtml(submitted.date)} · ${escapeHtml(submitted.time)} น.</small></div>
+      <div class="production-queue-cell queue-actor"><span>บัญชีผู้กรอก</span><strong>${escapeHtml(item.created_by || "-")}</strong><small>กรอกจริง ${escapeHtml(submitted.date)} ${escapeHtml(submitted.time)} น. · ลองแล้ว ${Number(item.attempt_count || 0)} ครั้ง</small></div>
       <div class="production-queue-cell queue-status"><span>สถานะ · ${escapeHtml(elapsedText)}</span><div class="production-queue-status ${status.className}"><i>${status.icon}</i><strong>${escapeHtml(status.label)}</strong></div><small>${escapeHtml(status.detail)} · ผู้บันทึก ${escapeHtml(item.created_by || "-")}</small></div>
       <div class="production-queue-cell queue-actions"><span>จัดการ</span>${renderProductionQueueActions(user, item)}</div>
     </article>`;
@@ -9643,7 +10985,7 @@ function renderProductionQueuePage(user, moduleItem) {
   productionQueuePage = Math.min(Math.max(1, productionQueuePage), totalPages);
   const visible = filtered.slice((productionQueuePage - 1) * pageSize, productionQueuePage * pageSize);
   const activeCount = productionQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length;
-  const successToday = productionQueueItems.filter((item) => item.status === "succeeded" && String(item.finished_at || "").slice(0, 10) === new Date().toISOString().slice(0, 10)).length;
+  const successToday = productionQueueItems.filter((item) => item.status === "succeeded" && String(item.finished_at || "").slice(0, 10) === localDateInputValue()).length;
   const reviewCount = productionQueueItems.filter((item) => ["needs_review", "failed"].includes(item.status)).length;
   const completedTimes = productionQueueItems
     .filter((item) => item.status === "succeeded" && item.created_at && item.finished_at)
@@ -9671,28 +11013,50 @@ function renderProductionQueuePage(user, moduleItem) {
           </div>
           <label class="field compact-field production-queue-search"><span>ค้นหา</span><input id="productionQueueSearch" type="search" value="${escapeHtml(productionQueueSearch)}" placeholder="เลขคิว รหัส ชื่อ หรือผู้บันทึก" autocomplete="off" /></label>
         </div>
-        <div class="production-queue-columns" aria-hidden="true"><span>คิว</span><span>ข้อมูลผลผลิต</span><span>จำนวน</span><span>วันที่</span><span>ผู้บันทึก</span><span>สถานะ</span><span>จัดการ</span></div>
+        <div class="production-queue-columns" aria-hidden="true"><span>คิว</span><span>ข้อมูลผลผลิต</span><span>จำนวน</span><span>วันที่งาน / เวลากรอกจริง</span><span>บัญชีผู้กรอก</span><span>สถานะ</span><span>จัดการ</span></div>
         <div class="production-queue-list">${productionQueueLoading && !productionQueueItems.length ? `<div class="empty-cell">กำลังโหลดคิวจากฐานข้อมูลกลาง...</div>` : visible.length ? visible.map((item) => renderProductionQueueRow(user, item)).join("") : `<div class="empty-cell">ยังไม่มีรายการตามตัวกรอง</div>`}</div>
         <footer class="production-queue-pagination"><span>แสดง ${visible.length} จาก ${filtered.length} รายการ</span><div><button class="btn btn-small btn-outline" data-queue-page="${productionQueuePage - 1}" type="button" ${productionQueuePage <= 1 ? "disabled" : ""}>ก่อนหน้า</button><strong>หน้า ${productionQueuePage} / ${totalPages}</strong><button class="btn btn-small btn-outline" data-queue-page="${productionQueuePage + 1}" type="button" ${productionQueuePage >= totalPages ? "disabled" : ""}>ถัดไป</button></div><span class="production-queue-history-note">รายการสำเร็จไม่ถูกลบจากประวัติ</span></footer>
       </section>
     </section>`;
 }
 
+function renderProductionPullEntry(user = getSession()?.user) {
+  if (!canEditProductionRecords(user)) return "";
+  return `<div class="production-pull-entry"><button type="button" data-open-production-pull>${window.ProductionPull.icon("monitor")}ดึงข้อมูล</button></div>`;
+}
+
 function renderProductionFruitMenu(user) {
   return `
-    <section class="panel">
+    <section class="panel production-fruit-menu-panel">
       <div class="panel-head">
         <div>
           <h2>เลือกผลไม้สำหรับบันทึกผลผลิต</h2>
           <p>แต่ละผลไม้สามารถมีฟอร์มและข้อมูลที่ต้องเก็บต่างกัน เลือกผลไม้ก่อนเริ่มบันทึก</p>
         </div>
-        <div class="panel-actions"><button class="btn btn-outline production-queue-open-button" data-open-production-queue type="button">คิวการบันทึก <span class="production-queue-count" data-production-queue-count ${productionQueueItems.some((item) => ["queued", "processing"].includes(item.status)) ? "" : "hidden"}>${productionQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length}</span></button>${canEditProductionRecords(user) ? `<button class="btn btn-outline" data-open-production-editor type="button">แก้ไขข้อมูลผลผลิต</button>` : ""}</div>
+        <div class="panel-actions production-fruit-menu-actions">${canEditProductionRecords(user) ? `<button class="btn btn-outline production-queue-open-button" data-open-production-queue type="button">คิวการบันทึก <span class="production-queue-count" data-production-queue-count ${productionQueueItems.some((item) => ["queued", "processing"].includes(item.status)) ? "" : "hidden"}>${productionQueueItems.filter((item) => ["queued", "processing"].includes(item.status)).length}</span></button>` : ""}${canEditProductionRecords(user) ? `<button class="btn btn-outline" data-open-production-editor type="button">แก้ไขข้อมูลผลผลิต</button>` : ""}${canManageAllProductionRecords(user) ? `<button class="btn btn-primary" data-open-fruit-creator type="button">+ เพิ่มผลไม้</button>` : ""}</div>
       </div>
+      ${productionFruitCreatorOpen ? `
+        <section class="production-fruit-creator">
+          <div><h3>เพิ่มผลไม้สำหรับบันทึกผลผลิต</h3><p>กำหนดรูปแบบน้ำหนักและชื่อช่องที่ใช้กรอก</p></div>
+          <form id="productionFruitCreatorForm">
+            <label class="field"><span>ชื่อผลไม้</span><input name="label" maxlength="40" placeholder="เช่น ลำไย" required /></label>
+            <div class="production-fruit-category-editor">
+              <span>ประเภทน้ำหนัก</span>
+              <div data-fruit-category-list>
+                <div class="production-fruit-category-row"><input name="categories" maxlength="50" placeholder="เช่น น้ำหนักรวม หรือ เกรดดี" required /><button class="btn btn-outline" data-remove-fruit-category type="button" aria-label="ลบประเภท">ลบ</button></div>
+              </div>
+              <button class="btn btn-outline" data-add-fruit-category type="button">+ เพิ่มประเภทน้ำหนัก</button>
+              <small>เพิ่มได้หลายประเภทและตั้งชื่อได้อย่างอิสระ แต่ละประเภทจะแยกเป็นตัวเลือกบันทึกเพื่อไม่ให้ข้อมูลปะปนกัน</small>
+            </div>
+            <div class="production-fruit-creator-actions"><button class="btn btn-primary" type="submit">สร้างผลไม้</button><button class="btn btn-outline" data-close-fruit-creator type="button">ยกเลิก</button></div>
+          </form>
+        </section>` : ""}
       <div class="production-fruit-grid">
         ${productionFruitOptions
           .map(
             (fruit) => `
               <button class="production-fruit-card" data-production-fruit="${fruit.id}" type="button">
+                <i class="production-fruit-card-art production-hero-fruit-${["mangosteen", "durian", "mango", "pomelo", "coconut"].includes(fruit.id) ? fruit.id : "mangosteen"}" aria-hidden="true"></i>
                 <span>${escapeHtml(fruit.status)}</span>
                 <strong>${escapeHtml(fruit.label)}</strong>
                 <small>${escapeHtml(fruit.description)}</small>
@@ -9701,6 +11065,7 @@ function renderProductionFruitMenu(user) {
           )
           .join("")}
       </div>
+      ${renderProductionPullEntry(user)}
     </section>
   `;
 }
@@ -9744,7 +11109,7 @@ function renderProductionEditor(user, moduleItem) {
     ? getProductionRecords().find((record) => Number(record.id) === Number(deletingProductionRecordId))
     : null;
   const labels = getProductionFieldLabels(productionEditorFruit);
-  const isDurian = productionEditorFruit === "durian";
+  const isDurian = isSingleWeightFruit(productionEditorFruit);
   const employees = getEmployees().slice().sort((a, b) => String(a.emp_code).localeCompare(String(b.emp_code), undefined, { numeric: true }));
   const editEmployeeId = editingRecord
     ? employees.find((employee) => String(employee.emp_code) === String(editingRecord.emp_code))?.id || editingRecord.employee_id
@@ -9767,7 +11132,7 @@ function renderProductionEditor(user, moduleItem) {
       <section class="panel production-editor-filters">
         <label class="field compact-field">
           <span>วันที่</span>
-          <input id="productionEditorDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionEditorDate)}" />
+          <input id="productionEditorDate" type="date" max="${localDateInputValue()}" value="${escapeHtml(productionEditorDate)}" />
         </label>
         <label class="field compact-field">
           <span>ผลไม้</span>
@@ -9792,11 +11157,11 @@ function renderProductionEditor(user, moduleItem) {
             <button class="btn btn-outline btn-small" data-cancel-production-edit type="button">ยกเลิก</button>
           </div>
           <form id="productionEditForm" class="production-edit-form">
-            <label class="field compact-field"><span>วันที่ผลผลิต</span><input name="record_date" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(getRecordDate(editingRecord))}" required /></label>
+            <label class="field compact-field"><span>วันที่ผลผลิต</span><input name="record_date" type="date" max="${localDateInputValue()}" value="${escapeHtml(getRecordDate(editingRecord))}" required /></label>
             <label class="field compact-field"><span>พนักงาน</span><select name="employee_id" required>${employees.map((employee) => `<option value="${employee.id}" ${Number(employee.id) === Number(editEmployeeId) ? "selected" : ""}>${escapeHtml(employee.emp_code)} - ${escapeHtml(employee.fullname)}</option>`).join("")}</select></label>
-            <label class="field compact-field"><span>กอง</span><select name="pile_no">${[1,2,3,4,5].map((pile) => `<option value="${pile}" ${Number(editingRecord.pile_no ?? editingRecord.pile) === pile ? "selected" : ""}>กอง ${pile}</option>`).join("")}</select></label>
+            <label class="field compact-field"><span>กอง</span><select name="pile_no">${fruitPileOptionMarkup(editingRecord.pile_no ?? editingRecord.pile)}</select></label>
             ${isDurian
-              ? `<label class="field compact-field"><span>น้ำหนักทุเรียน (กก.)</span><input name="durian_weight" type="number" min="0" step="0.1" value="${Number(getRecordDurianWeight(editingRecord) || 0)}" required /></label>`
+              ? `<label class="field compact-field"><span>${escapeHtml(labels.weight)} (กก.)</span><input name="durian_weight" type="number" min="0" step="0.1" value="${Number(getRecordDurianWeight(editingRecord) || 0)}" required /></label>`
               : `<label class="field compact-field"><span>${escapeHtml(labels.water)} (กก.)</span><input name="water_weight" type="number" min="0" step="0.1" value="${Number(editingRecord.water_weight || editingRecord.water || 0)}" required /></label><label class="field compact-field"><span>${escapeHtml(labels.flower)} (กก.)</span><input name="flower_weight" type="number" min="0" step="0.1" value="${Number(editingRecord.flower_weight || editingRecord.flower || 0)}" required /></label>`}
             <label class="field production-edit-reason"><span>เหตุผลการแก้ไข</span><textarea name="reason" rows="2" minlength="3" placeholder="ระบุสาเหตุเพื่อบันทึกใน Log" required></textarea></label>
             <button class="btn btn-primary production-edit-submit" type="submit" ${productionEditorSaving ? "disabled" : ""}>${productionEditorSaving ? "กำลังบันทึก..." : "บันทึกการแก้ไข"}</button>
@@ -9830,7 +11195,7 @@ function renderProductionEditor(user, moduleItem) {
         <form id="productionBatchDateForm" class="production-batch-date-form">
           <label class="field compact-field">
             <span>วันที่ใหม่</span>
-            <input name="record_date" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionEditorBatchDate || productionEditorDate)}" required />
+            <input name="record_date" type="date" max="${localDateInputValue()}" value="${escapeHtml(productionEditorBatchDate || productionEditorDate)}" required />
           </label>
           <label class="field production-batch-reason">
             <span>เหตุผลการแก้ไข</span>
@@ -9898,9 +11263,9 @@ async function deleteProductionEditorRecord(user, formElement) {
       })
     });
     applyingCloudState = true;
-    localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(
+    writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY,
       getProductionRecords().filter((record) => Number(record.id) !== Number(existingRecord.id))
-    ));
+    );
     applyingCloudState = false;
     await refreshLiveStateFromCloud({ renderWhenIdle: false, force: true });
     deletingProductionRecordId = null;
@@ -9937,7 +11302,7 @@ async function saveProductionEditorRecord(user, formElement) {
   const reason = String(form.get("reason") || "").trim();
   const recordDate = String(form.get("record_date") || "");
   const pileNo = Number(form.get("pile_no"));
-  if (!employee || !isValidProductionRecordDate(recordDate) || !Number.isInteger(pileNo) || pileNo < 1 || pileNo > 5 || reason.length < 3) {
+  if (!employee || !isValidProductionRecordDate(recordDate) || !isConfiguredFruitPile(pileNo, true) || reason.length < 3) {
     productionEditorMessage = "กรุณาตรวจสอบวันที่ พนักงาน กอง และระบุเหตุผลอย่างน้อย 3 ตัวอักษร";
     productionEditorMessageType = "error";
     render();
@@ -9946,10 +11311,10 @@ async function saveProductionEditorRecord(user, formElement) {
 
   const fruitType = productionFruitTypeForRecord(existingRecord);
   const payload = { employee, fruit_type: fruitType, record_date: recordDate, pile_no: pileNo };
-  if (fruitType === "durian") {
+  if (isSingleWeightFruit(fruitType)) {
     const raw = String(form.get("durian_weight") ?? "").trim();
     if (!isOneDecimalWeightInput(raw) || Number(raw) <= 0) {
-      productionEditorMessage = "น้ำหนักทุเรียนต้องมากกว่า 0 และมีทศนิยมไม่เกิน 1 ตำแหน่ง";
+      productionEditorMessage = `${getProductionFieldLabels(fruitType).weight}ต้องมากกว่า 0 และมีทศนิยมไม่เกิน 1 ตำแหน่ง`;
       productionEditorMessageType = "error";
       render();
       return;
@@ -9995,7 +11360,7 @@ async function saveProductionEditorRecord(user, formElement) {
       response.data
     ].sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
     applyingCloudState = true;
-    localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
+    writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY, merged);
     applyingCloudState = false;
     await refreshLiveStateFromCloud({ renderWhenIdle: false, force: true });
     productionEditorDate = getRecordDate(response.data);
@@ -10082,7 +11447,7 @@ async function saveProductionEditorBatchDate(user, formElement) {
     const updatedById = new Map(updatedRows.map((record) => [Number(record.id), record]));
     const merged = getProductionRecords().map((record) => updatedById.get(Number(record.id)) || record);
     applyingCloudState = true;
-    localStorage.setItem(PRODUCTION_RECORDS_KEY, JSON.stringify(merged));
+    writeLiveStateRowsToStorage("production_records", PRODUCTION_RECORDS_KEY, merged);
     applyingCloudState = false;
     await refreshLiveStateFromCloud({ renderWhenIdle: false, force: true });
     productionEditorSelectedIds = [];
@@ -10127,7 +11492,9 @@ function renderProductionView(user, view) {
 }
 
 function renderBatchEntry() {
-  if (isDurianFruit()) return renderDurianBatchEntry();
+  if (isSingleWeightFruit()) return renderDurianBatchEntry();
+  batchGridState.flower_pile_no = effectiveVisibleFruitPileNumber(batchGridState.flower_pile_no);
+  batchGridState.water_pile_no = effectiveVisibleFruitPileNumber(batchGridState.water_pile_no);
   const labels = getProductionFieldLabels();
   const employeeName = batchGridState.employee
     ? batchGridState.employee.fullname
@@ -10144,17 +11511,17 @@ function renderBatchEntry() {
       .join("");
 
   return `
-    <section class="panel" id="productionBatchEntry">
+    <section class="panel production-entry-panel" id="productionBatchEntry">
       <div class="panel-head">
         <div>
           <h2>กรอกแบบชุด</h2>
-          <p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักฝั่งละ 40 ช่อง</p>
+          <p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักฝั่งละ ${BATCH_WEIGHT_INPUT_COUNT} ช่อง</p>
         </div>
       </div>
       <div class="batch-employee-row">
         <label class="field">
           <span>วันที่บันทึกผลผลิต</span>
-          <input id="batchRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" />
+          <input id="batchRecordDate" type="date" max="${localDateInputValue()}" value="${escapeHtml(productionRecordDate)}" />
         </label>
         <label class="field">
           <span>รหัสพนักงาน</span>
@@ -10166,25 +11533,25 @@ function renderBatchEntry() {
         </div>
       </div>
       <div class="batch-grid-entry">
-        <section class="batch-side ${productionPileToneClass(batchGridState.flower_pile_no)}">
+        <section class="batch-side ${productionPileToneClass(batchGridState.flower_pile_no)}" ${fruitPileToneStyle(batchGridState.flower_pile_no)}>
           <div class="batch-side-head">
             <h3>${escapeHtml(labels.flower)}</h3>
             <label class="compact-field">
               <span>กอง</span>
               <select id="batchFlowerPile" class="production-pile-select">
-                ${[1, 2, 3, 4, 5].map((pileNo) => `<option value="${pileNo}" ${batchGridState.flower_pile_no === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}
+                ${fruitPileOptionMarkup(batchGridState.flower_pile_no)}
               </select>
             </label>
           </div>
           <div class="batch-weight-grid">${renderWeightInputs("flower", getBatchPileWeights("flower"))}</div>
         </section>
-        <section class="batch-side ${productionPileToneClass(batchGridState.water_pile_no)}">
+        <section class="batch-side ${productionPileToneClass(batchGridState.water_pile_no)}" ${fruitPileToneStyle(batchGridState.water_pile_no)}>
           <div class="batch-side-head">
             <h3>${escapeHtml(labels.water)}</h3>
             <label class="compact-field">
               <span>กอง</span>
               <select id="batchWaterPile" class="production-pile-select">
-                ${[1, 2, 3, 4, 5].map((pileNo) => `<option value="${pileNo}" ${batchGridState.water_pile_no === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}
+                ${fruitPileOptionMarkup(batchGridState.water_pile_no)}
               </select>
             </label>
           </div>
@@ -10201,35 +11568,38 @@ function renderBatchEntry() {
 }
 
 function renderDurianBatchEntry() {
+  batchGridState.durian_pile_no = effectiveVisibleFruitPileNumber(batchGridState.durian_pile_no);
   const employeeName = batchGridState.employee
     ? batchGridState.employee.fullname
     : "รอกรอกรหัสพนักงานอย่างน้อย 2 หลัก";
+  const labels = getProductionFieldLabels();
+  const fruitLabel = productionQueueFruitLabel(getSelectedProductionFruitId());
   const renderInputs = () => getBatchPileWeights("durian", batchGridState.durian_pile_no).map((value, index) => `
     <label class="batch-weight-cell">
       <span>${index + 1}</span>
       <input data-durian-batch-weight data-batch-index="${index}" inputmode="decimal" type="number" min="0" step="0.1" value="${escapeHtml(value)}" />
     </label>`).join("");
   return `
-    <section class="panel" id="productionBatchEntry">
-      <div class="panel-head"><div><h2>กรอกทุเรียนแบบชุด</h2><p>กรอกรหัสพนักงาน แล้วใส่น้ำหนักทุเรียนแยกตามกอง กองละ 40 ช่อง</p></div></div>
+    <section class="panel production-entry-panel" id="productionBatchEntry">
+      <div class="panel-head"><div><h2>กรอก${escapeHtml(fruitLabel)}แบบชุด</h2><p>กรอกรหัสพนักงาน แล้วใส่${escapeHtml(labels.weight)}แยกตามกอง กองละ ${BATCH_WEIGHT_INPUT_COUNT} ช่อง</p></div></div>
       <div class="batch-employee-row">
-        <label class="field"><span>วันที่บันทึกผลผลิต</span><input id="batchRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" /></label>
+        <label class="field"><span>วันที่บันทึกผลผลิต</span><input id="batchRecordDate" type="date" max="${localDateInputValue()}" value="${escapeHtml(productionRecordDate)}" /></label>
         <label class="field"><span>รหัสพนักงาน</span><input id="batchEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(batchGridState.emp_code)}" autocomplete="off" /></label>
         <div class="employee-result"><span>พนักงาน</span><strong>${escapeHtml(employeeName)}</strong></div>
       </div>
       <div class="durian-batch-grid">
-        <section class="batch-side durian-grade-side ${productionPileToneClass(batchGridState.durian_pile_no)}">
+        <section class="batch-side durian-grade-side ${productionPileToneClass(batchGridState.durian_pile_no)}" ${fruitPileToneStyle(batchGridState.durian_pile_no)}>
           <div class="batch-side-head">
-            <h3>น้ำหนักทุเรียน</h3>
+            <h3>${escapeHtml(labels.weight)}</h3>
             <label class="compact-field"><span>กอง</span><select id="batchDurianPile" class="production-pile-select">
-              ${[1,2,3,4,5].map((pileNo) => `<option value="${pileNo}" ${String(batchGridState.durian_pile_no || "1") === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}
+              ${fruitPileOptionMarkup(batchGridState.durian_pile_no)}
             </select></label>
           </div>
           <div class="batch-weight-grid">${renderInputs()}</div>
         </section>
       </div>
       <div class="batch-actions"><button class="btn btn-primary report-primary-button" id="saveBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังรับเข้าคิว..." : "บันทึกชุดนี้"}</button><button class="btn btn-outline" id="clearBatchEntry" type="button" ${productionSaving ? "disabled" : ""}>ล้างข้อมูล</button></div>
-      <p class="demo-note">คีย์ลัด: Shift+Enter บันทึกชุดนี้</p>
+      <p class="demo-note">คีย์ลัด: Enter ไปช่องถัดไป · Shift+Enter บันทึกชุดนี้ · ↑/↓ เปลี่ยนกองของช่องที่กำลังกรอก</p>
     </section>`;
 }
 
@@ -10239,7 +11609,7 @@ function renderProductionSummary(user) {
   const totals = getProductionTotals(records);
   const employeeMap = new Map(getEmployees().map((employee) => [employee.id, employee]));
 
-  const durianMode = isDurianFruit();
+  const durianMode = isSingleWeightFruit();
   const durianTotal = durianMode
     ? records.reduce((sum, record) => sum + getRecordDurianWeight(record), 0)
     : 0;
@@ -10265,7 +11635,7 @@ function renderProductionSummary(user) {
 
 function renderProductionRecordsTable(records, editUser = null) {
   const labels = getProductionFieldLabels();
-  const durianMode = isDurianFruit();
+  const durianMode = isSingleWeightFruit();
   return `
     <section class="table-card">
       <div class="table-scroll">
@@ -10310,8 +11680,9 @@ function renderProductionManagementRow(record, editUser) {
 }
 
 function renderProductionFast(user, moduleItem) {
-  if (isDurianFruit()) return renderDurianFast(user, moduleItem);
+  if (isSingleWeightFruit()) return renderDurianFast(user, moduleItem);
   syncFastInputStateForSelectedFruit();
+  fastInputState.pile_no = effectiveVisibleFruitPileNumber(fastInputState.pile_no);
   if (fastInputState.emp_code) {
     updateFastEmployeeFromCode(fastInputState.emp_code);
   }
@@ -10326,7 +11697,7 @@ function renderProductionFast(user, moduleItem) {
   );
 
   return `
-    <section class="panel fast-input-panel">
+    <section class="panel fast-input-panel production-entry-panel">
       <div class="panel-head">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
@@ -10355,22 +11726,15 @@ function renderProductionFast(user, moduleItem) {
           : ""
       }
 
-      <form class="fast-input-form ${productionPileToneClass(fastInputState.pile_no)}" id="productionFastForm">
+      <form class="fast-input-form ${productionPileToneClass(fastInputState.pile_no)}" ${fruitPileToneStyle(fastInputState.pile_no)} id="productionFastForm">
         <label class="field">
           <span>วันที่</span>
-          <input id="fastRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" required />
+          <input id="fastRecordDate" type="date" max="${localDateInputValue()}" value="${escapeHtml(productionRecordDate)}" required />
         </label>
         <label class="field">
           <span>กอง</span>
           <select name="pile_no" id="fastPileNo" class="production-pile-select" required>
-            ${[1, 2, 3, 4, 5]
-              .map(
-                (pileNo) =>
-                  `<option value="${pileNo}" ${
-                    fastInputState.pile_no === String(pileNo) ? "selected" : ""
-                  }>กอง ${pileNo}</option>`
-              )
-              .join("")}
+            ${fruitPileOptionMarkup(fastInputState.pile_no)}
           </select>
         </label>
 
@@ -10428,7 +11792,7 @@ function renderProductionFast(user, moduleItem) {
       </p>
     </section>
 
-    <section class="table-card">
+    <section class="table-card production-latest-table">
       <div class="table-scroll">
         <table>
           <thead>
@@ -10465,8 +11829,8 @@ function renderProductionRecordRow(record) {
       <td>${escapeHtml(record.record_time)}</td>
       <td>${record.pile_no}</td>
       <td><strong>${escapeHtml(record.emp_code)}</strong></td>
-      <td>${record.water_weight.toLocaleString("th-TH")} x ${money(record.water_rate)}</td>
-      <td>${record.flower_weight.toLocaleString("th-TH")} x ${money(record.flower_rate)}</td>
+      <td>${record.water_weight.toLocaleString("th-TH")} x ${rateMoney(record.water_rate)}</td>
+      <td>${record.flower_weight.toLocaleString("th-TH")} x ${rateMoney(record.flower_rate)}</td>
       <td><strong>${money(record.total_amount)}</strong></td>
       <td><span class="badge badge-warning">${escapeHtml(record.status)}</span></td>
       <td>${escapeHtml(record.created_by)}</td>
@@ -10476,26 +11840,29 @@ function renderProductionRecordRow(record) {
 
 function renderDurianFast(user, moduleItem) {
   syncFastInputStateForSelectedFruit();
+  fastInputState.pile_no = effectiveVisibleFruitPileNumber(fastInputState.pile_no);
   if (fastInputState.emp_code) updateFastEmployeeFromCode(fastInputState.emp_code);
   const latestRecords = productionRecordsForActiveSession().sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 10);
   const employeeName = getEmployeeLookupText(fastInputState.employee, fastInputState.emp_code);
+  const labels = getProductionFieldLabels();
+  const fruitLabel = productionQueueFruitLabel(getSelectedProductionFruitId());
   return `
-    <section class="panel fast-input-panel durian-fast-panel">
-      <div class="panel-head"><div><h2>${escapeHtml(moduleItem.label)} - ทุเรียน</h2><p>บันทึกน้ำหนักทุเรียนรวมในแต่ละกอง</p></div><span class="badge badge-success">กรอกเร็ว</span></div>
+    <section class="panel fast-input-panel production-entry-panel durian-fast-panel">
+      <div class="panel-head"><div><h2>${escapeHtml(moduleItem.label)} - ${escapeHtml(fruitLabel)}</h2><p>บันทึก${escapeHtml(labels.weight)}รวมในแต่ละกอง</p></div><span class="badge badge-success">กรอกเร็ว</span></div>
       ${fastInputState.message ? `<div class="alert ${fastInputState.messageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(fastInputState.message)}</div>` : ""}
-      <form class="fast-input-form durian-fast-form ${productionPileToneClass(fastInputState.pile_no)}" id="productionFastForm">
-        <label class="field"><span>วันที่</span><input id="fastRecordDate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${escapeHtml(productionRecordDate)}" required /></label>
-        <label class="field"><span>กอง</span><select name="pile_no" id="fastPileNo" class="production-pile-select" required>${[1,2,3,4,5].map((pileNo) => `<option value="${pileNo}" ${fastInputState.pile_no === String(pileNo) ? "selected" : ""}>กอง ${pileNo}</option>`).join("")}</select></label>
+      <form class="fast-input-form durian-fast-form ${productionPileToneClass(fastInputState.pile_no)}" ${fruitPileToneStyle(fastInputState.pile_no)} id="productionFastForm">
+        <label class="field"><span>วันที่</span><input id="fastRecordDate" type="date" max="${localDateInputValue()}" value="${escapeHtml(productionRecordDate)}" required /></label>
+        <label class="field"><span>กอง</span><select name="pile_no" id="fastPileNo" class="production-pile-select" required>${fruitPileOptionMarkup(fastInputState.pile_no)}</select></label>
         <label class="field"><span>รหัสพนักงาน</span><input name="emp_code" id="fastEmpCode" inputmode="numeric" maxlength="8" value="${escapeHtml(fastInputState.emp_code)}" autocomplete="off" required /></label>
         <div class="employee-result"><span>พนักงาน</span><strong>${escapeHtml(employeeName)}</strong></div>
-        <label class="field"><span>น้ำหนักทุเรียน (กก.)</span><input id="fastDurianWeight" class="production-pile-weight" type="number" min="0" step="0.1" value="${escapeHtml(fastInputState.durian_weight || "")}" placeholder="0.0" required /></label>
+        <label class="field"><span>${escapeHtml(labels.weight)} (กก.)</span><input id="fastDurianWeight" class="production-pile-weight" type="number" min="0" step="0.1" value="${escapeHtml(fastInputState.durian_weight || "")}" placeholder="0.0" required /></label>
         <button class="btn btn-primary form-submit" type="submit" ${productionSaving ? "disabled" : ""}>${productionSaving ? "กำลังรับเข้าคิว..." : "บันทึก"}</button>
       </form>
-      <p class="demo-note">กด Ctrl+S เพื่อบันทึก · Esc เพื่อล้างฟอร์ม</p>
+      <p class="demo-note">กด Enter เพื่อไปช่องถัดไป, Ctrl+S เพื่อบันทึก, Esc เพื่อล้างฟอร์ม</p>
     </section>
-    <section class="table-card"><div class="table-scroll"><table>
-      <thead><tr><th>เลขที่</th><th>วันที่</th><th>เวลา</th><th>กอง</th><th>รหัส</th><th>น้ำหนักทุเรียน</th><th>อัตรา</th><th>รวมเงิน</th><th>สถานะ</th><th>ผู้บันทึก</th></tr></thead>
-      <tbody>${latestRecords.length ? latestRecords.map(renderDurianRecordRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีรายการทุเรียนวันนี้</td></tr>`}</tbody>
+    <section class="table-card production-latest-table"><div class="table-scroll"><table>
+      <thead><tr><th>เลขที่</th><th>วันที่</th><th>เวลา</th><th>กอง</th><th>รหัส</th><th>${escapeHtml(labels.weight)}</th><th>อัตรา</th><th>รวมเงิน</th><th>สถานะ</th><th>ผู้บันทึก</th></tr></thead>
+      <tbody>${latestRecords.length ? latestRecords.map(renderDurianRecordRow).join("") : `<tr><td colspan="10" class="empty-cell">ยังไม่มีรายการ${escapeHtml(fruitLabel)}วันนี้</td></tr>`}</tbody>
     </table></div></section>`;
 }
 
@@ -10504,7 +11871,7 @@ function renderDurianRecordRow(record) {
   const rate = Number(record.durian_rate || (weight > 0 ? Number(record.total_amount || 0) / weight : 0));
   return `<tr>
     <td>${record.id}</td><td>${escapeHtml(record.record_date)}</td><td>${escapeHtml(record.record_time)}</td><td>${record.pile_no}</td><td><strong>${escapeHtml(record.emp_code)}</strong></td>
-    <td>${numberText(weight)} กก.</td><td>${money(rate)}</td>
+    <td>${numberText(weight)} กก.</td><td>${rateMoney(rate)}</td>
     <td><strong>${money(record.total_amount)}</strong></td><td><span class="badge badge-warning">${escapeHtml(record.status)}</span></td><td>${escapeHtml(record.created_by)}</td>
   </tr>`;
 }
@@ -10540,7 +11907,7 @@ function focusFastEmployeeCode() {
 async function saveProductionFastForm(user) {
   if (productionSaving) return;
   syncFastInputStateForSelectedFruit();
-  if (isDurianFruit()) {
+  if (isSingleWeightFruit()) {
     await saveDurianFastForm(user);
     return;
   }
@@ -10551,6 +11918,11 @@ async function saveProductionFastForm(user) {
   const flowerInput = document.querySelector("#fastFlowerWeight");
 
   if (pileInput) fastInputState.pile_no = pileInput.value;
+  if (!isConfiguredFruitPile(fastInputState.pile_no, true)) {
+    setFastInputMessage("ยังไม่มีกองผลไม้ที่เปิดใช้งาน กรุณาเปิดกองในเมนู ตั้งค่า > กองผลไม้", "error");
+    render();
+    return;
+  }
   if (dateInput?.value) productionRecordDate = dateInput.value;
   if (!isValidProductionRecordDate(productionRecordDate)) {
     setFastInputMessage("กรุณาเลือกวันที่บันทึกที่ถูกต้องและไม่เกินวันนี้", "error");
@@ -10671,6 +12043,11 @@ async function saveDurianFastForm(user) {
   const dateInput = document.querySelector("#fastRecordDate");
   const empInput = document.querySelector("#fastEmpCode");
   if (pileInput) fastInputState.pile_no = pileInput.value;
+  if (!isConfiguredFruitPile(fastInputState.pile_no, true)) {
+    setFastInputMessage("ยังไม่มีกองผลไม้ที่เปิดใช้งาน กรุณาเปิดกองในเมนู ตั้งค่า > กองผลไม้", "error");
+    render();
+    return;
+  }
   if (dateInput?.value) productionRecordDate = dateInput.value;
   if (!isValidProductionRecordDate(productionRecordDate)) {
     setFastInputMessage("กรุณาเลือกวันที่บันทึกที่ถูกต้องและไม่เกินวันนี้", "error");
@@ -10686,26 +12063,29 @@ async function saveDurianFastForm(user) {
     setFastInputMessage("ต้องกรอกรหัสพนักงานที่มีอยู่และยังใช้งานอยู่", "error");
     render(); focusFastEmployeeCode(); return;
   }
+  const labels = getProductionFieldLabels();
+  const fruitType = getSelectedProductionFruitId();
+  const fruitLabel = productionQueueFruitLabel(fruitType);
   const rawWeight = String(fastInputState.durian_weight || "").trim();
   const totalWeight = Number(rawWeight);
   if (!isOneDecimalWeightInput(rawWeight) || !Number.isFinite(totalWeight)) {
-    setFastInputMessage("น้ำหนักทุเรียนต้องเป็นทศนิยมได้ไม่เกิน 1 ตำแหน่ง", "error");
+    setFastInputMessage(`${labels.weight}ต้องเป็นทศนิยมได้ไม่เกิน 1 ตำแหน่ง`, "error");
     render(); return;
   }
   if (totalWeight <= 0) {
-    setFastInputMessage("กรุณากรอกน้ำหนักทุเรียนมากกว่า 0", "error");
+    setFastInputMessage(`กรุณากรอก${labels.weight}มากกว่า 0`, "error");
     render(); return;
   }
-  if (totalWeight > 500 && !window.confirm("น้ำหนักทุเรียนรวมเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?")) return;
-  const payload = { employee, record_date: productionRecordDate, fruit_type: "durian", pile_no: fastInputState.pile_no, durian_weight: totalWeight };
-  const duplicateWarning = getPotentialProductionDuplicateWarning(employee, [payload], productionRecordDate, "durian");
+  if (totalWeight > 500 && !window.confirm(`${labels.weight}รวมเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?`)) return;
+  const payload = { employee, record_date: productionRecordDate, fruit_type: fruitType, pile_no: fastInputState.pile_no, durian_weight: totalWeight };
+  const duplicateWarning = getPotentialProductionDuplicateWarning(employee, [payload], productionRecordDate, fruitType);
   if (duplicateWarning && !window.confirm(duplicateWarning)) {
-    setFastInputMessage(`ยกเลิกบันทึกทุเรียน รหัส ${employee.emp_code} ข้อมูลที่กรอกไว้ยังอยู่`, "error");
+    setFastInputMessage(`ยกเลิกบันทึก${fruitLabel} รหัส ${employee.emp_code} ข้อมูลที่กรอกไว้ยังอยู่`, "error");
     render(); focusFastEmployeeCode(); return;
   }
   try {
     productionSaving = true;
-    setFastInputMessage("กำลังส่งทุเรียนเข้าคิวกลาง... กรุณารอสักครู่", "success");
+    setFastInputMessage(`กำลังส่ง${fruitLabel}เข้าคิวกลาง... กรุณารอสักครู่`, "success");
     render();
     const record = buildProductionRecord({ ...payload, batch_uid: createProductionBatchUid() }, user);
     const queueItem = await enqueueProductionRows(record, {
@@ -10714,10 +12094,10 @@ async function saveDurianFastForm(user) {
         render();
       }
     });
-    setFastInputMessage(`รับเข้าคิว #${productionQueueNumber(queueItem)} แล้ว: ทุเรียนรหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(totalWeight)} กก. สามารถกรอกรายการถัดไปได้ทันที`);
+    setFastInputMessage(`รับเข้าคิว #${productionQueueNumber(queueItem)} แล้ว: ${fruitLabel}รหัส ${employee.emp_code} กอง ${payload.pile_no} รวม ${numberText(totalWeight)} กก. สามารถกรอกรายการถัดไปได้ทันที`);
     clearFastInputForm(true);
   } catch (error) {
-    setFastInputMessage(error instanceof Error ? error.message : "บันทึกทุเรียนขึ้น Cloud ไม่สำเร็จ", "error");
+    setFastInputMessage(error instanceof Error ? error.message : `บันทึก${fruitLabel}ขึ้น Cloud ไม่สำเร็จ`, "error");
   } finally {
     productionSaving = false;
     render(); focusFastEmployeeCode();
@@ -10748,7 +12128,7 @@ function bindProductionFastEvents(user) {
   });
 
   dateInput?.addEventListener("change", (event) => {
-    productionRecordDate = event.target.value || new Date().toISOString().slice(0, 10);
+    productionRecordDate = event.target.value || localDateInputValue();
     render();
   });
 
@@ -10812,6 +12192,79 @@ function setProductionMessage(message, type = "success") {
 }
 
 function bindProductionManagementEvents(user) {
+  window.ProductionPull?.bind({
+    canImport: () => canImportDesktopWeighing(getSession()?.user), refresh: render,
+    isImportBusy: () => desktopImportBusy,
+    clearPreview: () => { desktopImportPreview = null; desktopImportMessage = ""; },
+    preview: (payload) => {
+      desktopImportPreview = prepareDesktopWeighingImport(payload);
+      desktopImportPreview.fileName = payload.file_name;
+      desktopImportMessage = "ตรวจรายการจากเครื่องต้นทางแล้ว ยังไม่ได้ส่งเข้าคิว";
+    },
+    confirm: () => submitDesktopWeighingImport(getSession()?.user, Boolean(desktopImportPreview?.review))
+  });
+  document.querySelector("[data-open-production-pull]")?.addEventListener("click", () => {
+    if (!canEditProductionRecords(getSession()?.user)) return;
+    productionView = "desktop-pull";
+    render();
+    document.querySelector("#productionPullTitle")?.focus();
+  });
+  document.querySelector("[data-close-production-pull]")?.addEventListener("click", () => {
+    productionView = "fast-entry";
+    render();
+    document.querySelector("[data-open-production-pull]")?.focus();
+  });
+  document.querySelector("[data-open-fruit-creator]")?.addEventListener("click", () => {
+    productionFruitCreatorOpen = true;
+    render();
+  });
+  document.querySelector("[data-close-fruit-creator]")?.addEventListener("click", () => {
+    productionFruitCreatorOpen = false;
+    render();
+  });
+  document.querySelector("[data-add-fruit-category]")?.addEventListener("click", () => {
+    const list = document.querySelector("[data-fruit-category-list]");
+    if (!list) return;
+    list.insertAdjacentHTML("beforeend", `<div class="production-fruit-category-row"><input name="categories" maxlength="50" placeholder="ชื่อประเภทน้ำหนัก" required /><button class="btn btn-outline" data-remove-fruit-category type="button" aria-label="ลบประเภท">ลบ</button></div>`);
+    list.lastElementChild?.querySelector("input")?.focus();
+  });
+  document.querySelector("[data-fruit-category-list]")?.addEventListener("click", (event) => {
+    const removeButton = event.target.closest("[data-remove-fruit-category]");
+    if (!removeButton) return;
+    const rows = document.querySelectorAll(".production-fruit-category-row");
+    if (rows.length <= 1) {
+      rows[0]?.querySelector("input")?.focus();
+      return;
+    }
+    removeButton.closest(".production-fruit-category-row")?.remove();
+  });
+  document.querySelector("#productionFruitCreatorForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const label = String(form.get("label") || "").trim();
+    const categories = form.getAll("categories").map((value) => String(value || "").trim()).filter(Boolean);
+    if (!label || !categories.length) {
+      setProductionMessage("กรุณากรอกชื่อผลไม้และประเภทน้ำหนักอย่างน้อย 1 ประเภท", "error");
+      render();
+      return;
+    }
+    const uniqueCategories = [...new Set(categories)];
+    const createdAt = Date.now();
+    const configs = uniqueCategories.map((category, index) => ({
+      id: `custom-fruit-${createdAt}-${index + 1}`,
+      label: uniqueCategories.length === 1 ? label : `${label} - ${category}`,
+      mode: "single",
+      weight: category,
+      parent_label: label,
+      weight_category: category
+    }));
+    configs.forEach(saveCustomProductionFruit);
+    productionFruitCreatorOpen = false;
+    setProductionMessage(`เพิ่ม${label} ${configs.length} ประเภทแล้ว กรุณาตั้งอัตราค่าจ้างก่อนเริ่มบันทึก`, "success");
+    setSelectedProductionFruit(configs[0].id);
+    render();
+  });
+
   document.querySelector("[data-open-production-editor]")?.addEventListener("click", () => {
     if (!canEditProductionRecords(user)) {
       setProductionMessage("กรุณาเข้าสู่ระบบก่อนแก้ไขข้อมูลผลผลิต", "error");
@@ -10819,7 +12272,7 @@ function bindProductionManagementEvents(user) {
       return;
     }
     productionEditorOpen = true;
-    productionEditorDate = productionRecordDate || new Date().toISOString().slice(0, 10);
+    productionEditorDate = productionRecordDate || localDateInputValue();
     productionEditorFruit = selectedProductionFruit || "mangosteen";
     productionEditorSelectedIds = [];
     productionEditorBatchDate = productionEditorDate;
@@ -10841,7 +12294,7 @@ function bindProductionManagementEvents(user) {
   });
 
   document.querySelector("#productionEditorDate")?.addEventListener("change", (event) => {
-    productionEditorDate = event.target.value || new Date().toISOString().slice(0, 10);
+    productionEditorDate = event.target.value || localDateInputValue();
     productionEditorSelectedIds = [];
     productionEditorBatchDate = productionEditorDate;
     editingProductionRecordId = null;
@@ -10978,6 +12431,7 @@ function bindProductionManagementEvents(user) {
 
   document.querySelectorAll("[data-open-production-queue]").forEach((button) => {
     button.addEventListener("click", () => {
+      if (!canEditProductionRecords(getSession()?.user)) return;
       productionView = "queue";
       productionQueueMessage = "";
       productionQueuePage = 1;
@@ -11127,7 +12581,7 @@ function bindProductionManagementEvents(user) {
   });
 
   document.querySelector("#batchRecordDate")?.addEventListener("change", (event) => {
-    productionRecordDate = event.target.value || new Date().toISOString().slice(0, 10);
+    productionRecordDate = event.target.value || localDateInputValue();
   });
 
   document.querySelector("#batchFlowerPile")?.addEventListener("change", (event) => {
@@ -11145,7 +12599,7 @@ function bindProductionManagementEvents(user) {
   document.querySelector("#batchDurianPile")?.addEventListener("change", (event) => {
     batchGridState.durian_pile_no = event.target.value;
     render();
-    window.setTimeout(() => document.querySelector("[data-durian-batch-weight]")?.focus(), 0);
+    window.setTimeout(() => focusBatchWeightInput("durian"), 0);
   });
 
   document.querySelectorAll("[data-batch-weight]").forEach((input) => {
@@ -11155,25 +12609,11 @@ function bindProductionManagementEvents(user) {
       const values = getBatchPileWeights(type);
       values[index] = event.target.value;
     });
-    input.addEventListener("keydown", (event) => {
-      if (productionSaving) {
-        event.preventDefault();
-        return;
-      }
-      const type = event.currentTarget.dataset.batchWeight;
-      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-        event.preventDefault();
-        changeBatchPile(type, event.key === "ArrowUp" ? -1 : 1);
-        return;
-      }
-      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-        event.preventDefault();
-        focusBatchWeightInput(type === "flower" ? "water" : "flower");
-      }
-    });
+    input.addEventListener("keydown", handleBatchWeightShortcut);
   });
 
   document.querySelectorAll("[data-durian-batch-weight]").forEach((input) => {
+    input.addEventListener("keydown", handleBatchWeightShortcut);
     input.addEventListener("input", (event) => {
       const index = Number(event.target.dataset.batchIndex);
       getBatchPileWeights("durian")[index] = event.target.value;
@@ -11199,6 +12639,7 @@ function bindProductionManagementEvents(user) {
     input.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
+      if (productionSaving) return;
       if (isBatchProductionSaveShortcut(event)) {
         event.stopPropagation();
         if (!productionSaving) saveBatchEntries(user);
@@ -11274,8 +12715,8 @@ function saveLegacyBatchEntries(user) {
       errors.push(`แถว ${rowNo}: ต้องเป็น กอง รหัส น้ำ ดอก หรือ รหัส น้ำ ดอก`);
       return;
     }
-    if (!Number.isInteger(pileNo) || pileNo < 1 || pileNo > 5) {
-      errors.push(`แถว ${rowNo}: กองต้องเป็นเลข 1-5`);
+    if (!isConfiguredFruitPile(pileNo, true)) {
+      errors.push(`แถว ${rowNo}: ไม่พบกองนี้หรือกองถูกปิดการแสดงผล`);
       return;
     }
     if (seenCodes.has(empCode)) {
@@ -11345,6 +12786,7 @@ function syncBatchEmployeeFromInput() {
 function readBatchWeightValues(values, label) {
   const errors = [];
   const weights = [];
+  const entries = [];
 
   values.forEach((value, index) => {
     const raw = String(value).trim();
@@ -11356,9 +12798,10 @@ function readBatchWeightValues(values, label) {
       return;
     }
     weights.push(weight);
+    entries.push({ input_no: index + 1, value: weight });
   });
 
-  return { errors, weights };
+  return { errors, weights, entries };
 }
 
 function addBatchGroup(groups, pileNo, water, flower) {
@@ -11377,26 +12820,49 @@ function getNextBatchWeightInputIndex(type) {
 
 function focusBatchWeightInput(type, index = null) {
   const targetIndex = Number.isInteger(index) ? index : getNextBatchWeightInputIndex(type);
-  const input = document.querySelector(`[data-batch-weight='${type}'][data-batch-index='${targetIndex}']`)
-    || document.querySelector(`[data-batch-weight='${type}']`);
+  const selector = type === "durian" ? "[data-durian-batch-weight]" : `[data-batch-weight='${type}']`;
+  const input = document.querySelector(`${selector}[data-batch-index='${targetIndex}']`)
+    || document.querySelector(selector);
   if (!input) return;
   input.focus();
   input.select?.();
 }
 
 function changeBatchPile(type, direction) {
-  const field = type === "flower" ? "flower_pile_no" : "water_pile_no";
-  const currentPile = Number(batchGridState[field]) || 1;
-  const nextPile = Math.min(5, Math.max(1, currentPile + direction));
-  if (nextPile === currentPile) return;
-  batchGridState[field] = String(nextPile);
+  const field = type === "durian" ? "durian_pile_no" : type === "flower" ? "flower_pile_no" : "water_pile_no";
+  const visiblePileNumbers = getVisibleFruitPiles().map((pile) => pile.number);
+  if (!visiblePileNumbers.length) return;
+  const currentIndex = Math.max(0, visiblePileNumbers.indexOf(Number(batchGridState[field])));
+  const nextIndex = Math.min(visiblePileNumbers.length - 1, Math.max(0, currentIndex + direction));
+  if (nextIndex === currentIndex) return;
+  batchGridState[field] = String(visiblePileNumbers[nextIndex]);
   render();
   window.setTimeout(() => focusBatchWeightInput(type), 0);
 }
 
+function handleBatchWeightShortcut(event) {
+  if (productionSaving) {
+    event.preventDefault();
+    return;
+  }
+  const type = event.currentTarget.dataset.batchWeight || "durian";
+  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+    event.preventDefault();
+    changeBatchPile(type, event.key === "ArrowUp" ? -1 : 1);
+  } else if (type !== "durian" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    event.preventDefault();
+    focusBatchWeightInput(type === "flower" ? "water" : "flower");
+  }
+}
+
 async function saveBatchEntries(user) {
+  if (!getVisibleFruitPiles().length) {
+    setProductionMessage("ยังไม่มีกองผลไม้ที่เปิดใช้งาน กรุณาเปิดกองในเมนู ตั้งค่า > กองผลไม้", "error");
+    render();
+    return;
+  }
   if (productionSaving) return;
-  if (isDurianFruit()) {
+  if (isSingleWeightFruit()) {
     await saveDurianBatchEntries(user);
     return;
   }
@@ -11421,7 +12887,7 @@ async function saveBatchEntries(user) {
   const groups = new Map();
   const errors = [];
 
-  [1, 2, 3, 4, 5].forEach((pileNo) => {
+  getVisibleFruitPiles().forEach(({ number: pileNo }) => {
     const flowerResult = readBatchWeightValues(
       getBatchPileWeights("flower", pileNo),
       `${labels.flower} กอง ${pileNo}`
@@ -11437,6 +12903,10 @@ async function saveBatchEntries(user) {
     const waterTotal = waterResult.weights.reduce((sum, weight) => sum + weight, 0);
     if (flowerTotal > 0 || waterTotal > 0) {
       addBatchGroup(groups, pileNo, waterTotal, flowerTotal);
+      groups.get(pileNo).raw_weight_entries = [
+        ...waterResult.entries.map((entry) => ({ ...entry, weight_type: "water" })),
+        ...flowerResult.entries.map((entry) => ({ ...entry, weight_type: "flower" }))
+      ];
     }
   });
 
@@ -11467,7 +12937,9 @@ async function saveBatchEntries(user) {
     fruit_type: getSelectedProductionFruitId(),
     pile_no: group.pileNo,
     water_weight: group.water,
-    flower_weight: group.flower
+    flower_weight: group.flower,
+    entry_mode: "batch",
+    raw_weight_entries: group.raw_weight_entries
   }));
   const duplicateWarning = getPotentialProductionDuplicateWarning(
     employee,
@@ -11524,6 +12996,11 @@ async function saveBatchEntries(user) {
 }
 
 async function saveDurianBatchEntries(user) {
+  if (!getVisibleFruitPiles().length) {
+    setProductionMessage("ยังไม่มีกองผลไม้ที่เปิดใช้งาน กรุณาเปิดกองในเมนู ตั้งค่า > กองผลไม้", "error");
+    render();
+    return;
+  }
   if (productionSaving) return;
   syncBatchEmployeeFromInput();
   const selectedDate = document.querySelector("#batchRecordDate")?.value;
@@ -11534,6 +13011,9 @@ async function saveDurianBatchEntries(user) {
     return;
   }
   const employee = batchGridState.employee;
+  const labels = getProductionFieldLabels();
+  const fruitType = getSelectedProductionFruitId();
+  const fruitLabel = productionQueueFruitLabel(fruitType);
   if (!employee) {
     setProductionMessage("กรุณากรอกรหัสพนักงานที่มีอยู่และยังใช้งานอยู่", "error");
     render();
@@ -11542,37 +13022,43 @@ async function saveDurianBatchEntries(user) {
   }
   const groups = new Map();
   const errors = [];
-  [1,2,3,4,5].forEach((pileNo) => {
-    const result = readBatchWeightValues(getBatchPileWeights("durian", pileNo), `น้ำหนักทุเรียน กอง ${pileNo}`);
+  getVisibleFruitPiles().forEach(({ number: pileNo }) => {
+    const result = readBatchWeightValues(getBatchPileWeights("durian", pileNo), `${labels.weight} กอง ${pileNo}`);
     errors.push(...result.errors);
     const total = result.weights.reduce((sum, weight) => sum + weight, 0);
-    if (total > 0) groups.set(pileNo, { pileNo, durian_weight: total });
+    if (total > 0) groups.set(pileNo, {
+      pileNo,
+      durian_weight: total,
+      raw_weight_entries: result.entries.map((entry) => ({ ...entry, weight_type: fruitType }))
+    });
   });
   if (errors.length) {
     setProductionMessage(errors.join("\n"), "error"); render(); return;
   }
   if (!groups.size) {
-    setProductionMessage("กรุณากรอกน้ำหนักทุเรียนอย่างน้อย 1 ช่อง", "error"); render(); return;
+    setProductionMessage(`กรุณากรอก${labels.weight}อย่างน้อย 1 ช่อง`, "error"); render(); return;
   }
   const overLimit = [...groups.values()].some((group) => group.durian_weight > 500);
   if (overLimit && !window.confirm("ผลรวมน้ำหนักทุเรียนบางกองเกิน 500 กก. ต้องการบันทึกต่อหรือไม่?")) return;
   const batchPayloads = [...groups.values()].map((group) => ({
     employee,
     record_date: productionRecordDate,
-    fruit_type: "durian",
+    fruit_type: fruitType,
     pile_no: group.pileNo,
-    durian_weight: group.durian_weight
+    durian_weight: group.durian_weight,
+    entry_mode: "batch",
+    raw_weight_entries: group.raw_weight_entries
   }));
-  const duplicateWarning = getPotentialProductionDuplicateWarning(employee, batchPayloads, productionRecordDate, "durian");
+  const duplicateWarning = getPotentialProductionDuplicateWarning(employee, batchPayloads, productionRecordDate, fruitType);
   if (duplicateWarning && !window.confirm(duplicateWarning)) {
-    setProductionMessage(`ยกเลิกบันทึกทุเรียนชุด รหัส ${employee.emp_code} ข้อมูลในตารางยังอยู่ กรุณาตรวจสอบอีกครั้ง`, "error");
+    setProductionMessage(`ยกเลิกบันทึก${fruitLabel}ชุด รหัส ${employee.emp_code} ข้อมูลในตารางยังอยู่ กรุณาตรวจสอบอีกครั้ง`, "error");
     render();
     window.setTimeout(() => document.querySelector("#batchEmpCode")?.focus(), 0);
     return;
   }
   try {
     productionSaving = true;
-    setProductionMessage("กำลังส่งทุเรียนชุดนี้เข้าคิวกลาง... กรุณารอสักครู่");
+    setProductionMessage(`กำลังส่ง${fruitLabel}ชุดนี้เข้าคิวกลาง... กรุณารอสักครู่`);
     render();
     const batchUid = createProductionBatchUid();
     const createdRecords = batchPayloads.map((payload) => buildProductionRecord({ ...payload, batch_uid: batchUid }, user));
@@ -11583,7 +13069,7 @@ async function saveDurianBatchEntries(user) {
       }
     });
   } catch (error) {
-    setProductionMessage(error instanceof Error ? error.message : "บันทึกทุเรียนแบบชุดขึ้น Cloud ไม่สำเร็จ", "error");
+    setProductionMessage(error instanceof Error ? error.message : `บันทึก${fruitLabel}แบบชุดขึ้น Cloud ไม่สำเร็จ`, "error");
     productionSaving = false;
     render();
     return;
@@ -11592,7 +13078,7 @@ async function saveDurianBatchEntries(user) {
     `กอง ${group.pileNo}: ${numberText(group.durian_weight)} กก.`
   );
   const grandTotal = [...groups.values()].reduce((sum, group) => sum + group.durian_weight, 0);
-  const message = `รับทุเรียนแบบชุดเข้าคิว #${productionQueueNumber(queueItem)} แล้ว: รหัส ${employee.emp_code}\nรวม ${batchPayloads.length} รายการ\n${lines.join("\n")}\nน้ำหนักรวม ${numberText(grandTotal)} กก.\nสามารถกรอกพนักงานคนถัดไปได้ทันที`;
+  const message = `รับ${fruitLabel}แบบชุดเข้าคิว #${productionQueueNumber(queueItem)} แล้ว: รหัส ${employee.emp_code}\nรวม ${batchPayloads.length} รายการ\n${lines.join("\n")}\nน้ำหนักรวม ${numberText(grandTotal)} กก.\nสามารถกรอกพนักงานคนถัดไปได้ทันที`;
   clearBatchGridState();
   setProductionMessage(message);
   productionSaving = false;
@@ -11625,13 +13111,11 @@ function editProductionRecord(recordId, user) {
     const weight = window.prompt("น้ำหนักทุเรียน", String(getRecordDurianWeight(record)));
     if (weight === null) return;
     if (
-      !Number.isInteger(pileNo) ||
-      pileNo < 1 ||
-      pileNo > 5 ||
+      !isConfiguredFruitPile(pileNo, true) ||
       !isOneDecimalWeightInput(weight) ||
       Number(weight) <= 0
     ) {
-      setProductionMessage("กองต้องเป็นเลข 1-5 และน้ำหนักทุเรียนต้องมากกว่า 0 โดยมีทศนิยมไม่เกิน 1 ตำแหน่ง", "error");
+      setProductionMessage("กรุณาเลือกกองที่เปิดใช้งาน และน้ำหนักทุเรียนต้องมากกว่า 0 โดยมีทศนิยมไม่เกิน 1 ตำแหน่ง", "error");
       render();
       return;
     }
@@ -11661,15 +13145,13 @@ function editProductionRecord(recordId, user) {
   const flowerWeight = Number(flower);
 
   if (
-    !Number.isInteger(pileNo) ||
-    pileNo < 1 ||
-    pileNo > 5 ||
+    !isConfiguredFruitPile(pileNo, true) ||
     !Number.isFinite(waterWeight) ||
     !Number.isFinite(flowerWeight) ||
     waterWeight < 0 ||
     flowerWeight < 0
   ) {
-    setProductionMessage(`กองต้องเป็นเลข 1-5 และ${labels.water}/${labels.flower}ต้องเป็นตัวเลขไม่ติดลบ`, "error");
+    setProductionMessage(`กรุณาเลือกกองที่เปิดใช้งาน และ${labels.water}/${labels.flower}ต้องเป็นตัวเลขไม่ติดลบ`, "error");
     render();
     return;
   }
@@ -11721,32 +13203,33 @@ function renderWageRateForm(user) {
   wageRateTypeOptions.forEach((option) => {
     latestByType.set(option.value, allRates.find((rate) => rate.item_type === option.value) || null);
   });
-  const latestPreviewOptions = wageRateTypeOptions.slice(0, 4);
+  const latestPreviewOptions = wageRateTypeOptions.slice(0, 3);
 
   return `
-    <section class="panel">
-      <div class="panel-head">
+    <div class="wage-rate-page">
+    <section class="panel wage-rate-hero">
+      <div class="wage-rate-head">
         <div>
+          <span class="wage-rate-eyebrow">WAGE SETTINGS</span>
           <h2>ตั้งค่าอัตราค่าจ้าง</h2>
-          <p>เพิ่มอัตราใหม่แบบเก็บประวัติ ไม่แก้ทับรายการเดิม เพื่อให้ตรวจสอบย้อนหลังได้</p>
+          <p>กำหนดอัตราใหม่โดยเก็บประวัติเดิมไว้สำหรับตรวจสอบย้อนหลัง</p>
         </div>
-        <span class="badge badge-success">${rates.length.toLocaleString("th-TH")} records</span>
+        <span class="wage-rate-count">${allRates.length.toLocaleString("th-TH")} รายการ</span>
       </div>
-      <div class="metrics-grid metrics-spaced">
+      <div class="wage-rate-latest">
         ${latestPreviewOptions
           .map((option) => {
             const latestRate = latestByType.get(option.value);
-            return `<div class="metric-card"><span>${escapeHtml(option.label)}</span><strong>${latestRate ? money(latestRate.rate) : "-"}</strong><small>${latestRate ? escapeHtml(latestRate.effective_date) : "ยังไม่มีข้อมูล"}</small></div>`;
+            return `<div><span>${escapeHtml(option.label)}</span><strong>${latestRate ? rateMoney(latestRate.rate) : "-"}</strong><small>${latestRate ? `เริ่มใช้ ${escapeHtml(latestRate.effective_date)}` : "ยังไม่มีข้อมูล"}</small></div>`;
           })
           .join("")}
-        <div class="metric-card"><span>รายการทั้งหมด</span><strong>${allRates.length.toLocaleString("th-TH")}</strong><small>ประวัติอัตราค่าจ้าง</small></div>
       </div>
     </section>
 
-    <section class="panel">
-      <div class="section-title-row">
-        <h3>${editingRate ? `แก้ไขอัตรา #${editingRate.id}` : "เพิ่มอัตราใหม่"}</h3>
-        <p class="muted-text">${canManage ? "บัญชี C4 ขึ้นไปสามารถเพิ่มหรือแก้ไขอัตราค่าจ้างได้" : "หน้านี้ดูข้อมูลได้เท่านั้น การเพิ่ม/แก้ไขใช้บัญชี C4 ขึ้นไป"}</p>
+    <section class="panel wage-rate-editor">
+      <div class="wage-rate-editor-head">
+        <div><span>${editingRate ? "EDIT RATE" : "NEW RATE"}</span><h3>${editingRate ? `แก้ไขอัตรา #${editingRate.id}` : "เพิ่มอัตราใหม่"}</h3></div>
+        <p>${canManage ? "สิทธิ์ C4 ขึ้นไป" : "ดูข้อมูลเท่านั้น"}</p>
       </div>
       <form class="rate-form" id="wageRateForm">
         <label class="field">
@@ -11773,35 +13256,26 @@ function renderWageRateForm(user) {
       </form>
     </section>
 
-    <section class="panel">
-      <div class="toolbar">
-        <label class="compact-field">
-          <span>Filter</span>
-          <select id="wageRateFilter">
-            ${[["all", "ทั้งหมด"], ...wageRateTypeOptions.map((option) => [option.value, option.label])]
-              .map(([value, label]) => `<option value="${value}" ${wageRateFilter === value ? "selected" : ""}>${label}</option>`)
-              .join("")}
-          </select>
-        </label>
-        <label class="compact-field">
-          <span>วันที่เริ่มใช้เริ่มต้น</span>
-          <input id="currentRateDate" type="date" value="${escapeHtml(currentRateDate)}" />
-        </label>
+    <section class="table-card wage-rate-history">
+      <div class="wage-rate-history-head">
+        <div><h3>ประวัติอัตราค่าจ้าง</h3><p>แสดง ${rates.length.toLocaleString("th-TH")} จาก ${allRates.length.toLocaleString("th-TH")} รายการ</p></div>
+        <div class="wage-rate-filters">
+          <label><span>ประเภท</span><select id="wageRateFilter">${[["all", "ทั้งหมด"], ...wageRateTypeOptions.map((option) => [option.value, option.label])].map(([value, label]) => `<option value="${value}" ${wageRateFilter === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+          <label><span>วันที่เริ่มต้น</span><input id="currentRateDate" type="date" value="${escapeHtml(currentRateDate)}" /></label>
+        </div>
       </div>
-    </section>
-
-    <section class="table-card">
       <div class="table-scroll">
-        <table>
+        <table class="wage-rate-table">
           <thead>
-            <tr><th>ID</th><th>ชนิดงาน</th><th>Rate</th><th>Effective</th><th>Created By</th><th>Created</th><th>จัดการ</th></tr>
+            <tr><th>ID</th><th>ชนิดงาน</th><th>อัตรา</th><th>วันที่เริ่มใช้</th><th>บันทึกโดย</th><th>วันที่บันทึก</th><th>จัดการ</th></tr>
           </thead>
           <tbody>
-            ${rates.length ? rates.map((rate) => renderWageRateRow(rate, canManage)).join("") : `<tr><td colspan="7" class="empty-cell">No wage rates found.</td></tr>`}
+            ${rates.length ? rates.map((rate) => renderWageRateRow(rate, canManage)).join("") : `<tr><td colspan="7" class="empty-cell">ยังไม่มีประวัติอัตราค่าจ้าง</td></tr>`}
           </tbody>
         </table>
       </div>
     </section>
+    </div>
   `;
 }
 function renderWageRateRow(wageRate, canManage = false) {
@@ -11809,7 +13283,7 @@ function renderWageRateRow(wageRate, canManage = false) {
     <tr>
       <td>${wageRate.id}</td>
       <td><span class="badge badge-warning">${escapeHtml(wageRateTypeLabel(wageRate.item_type))}</span></td>
-      <td><strong>${money(wageRate.rate)}</strong></td>
+      <td><strong>${rateMoney(wageRate.rate)}</strong></td>
       <td>${escapeHtml(wageRate.effective_date)}</td>
       <td>${escapeHtml(wageRate.created_by)}</td>
       <td>${formatDate(wageRate.created_at)}</td>
@@ -11820,7 +13294,7 @@ function renderWageRateRow(wageRate, canManage = false) {
 
 function bindWageRateEvents(user) {
   document.querySelector("#currentRateDate")?.addEventListener("change", (event) => {
-    currentRateDate = event.target.value || new Date().toISOString().slice(0, 10);
+    currentRateDate = event.target.value || localDateInputValue();
     render();
   });
 
@@ -11876,7 +13350,7 @@ function bindWageRateEvents(user) {
 
 function normalizeDateRange(startDate, endDate) {
   if (!startDate && !endDate) {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateInputValue();
     return { startDate: today, endDate: today };
   }
 
@@ -12131,12 +13605,12 @@ function renderPersonalReport(moduleItem) {
 }
 
 function renderPersonalDailyRow(item, fruitId = personalReportFruitFilter) {
-  const isDurian = fruitId === "durian";
+  const isSingleWeight = isSingleWeightFruit(fruitId);
   return `
     <tr>
       <td><strong>${escapeHtml(item.date)}</strong></td>
-      ${isDurian
-        ? `<td>${numberText(getDurianGradeTotal(item.grades))}</td>`
+      ${isSingleWeight
+        ? `<td>${numberText(item.total)}</td>`
         : `<td>${numberText(item.water)}</td><td>${numberText(item.flower)}</td>`}
       <td><strong>${numberText(item.total)}</strong></td>
       <td><strong>${money(item.amount)}</strong></td>
@@ -12145,13 +13619,13 @@ function renderPersonalDailyRow(item, fruitId = personalReportFruitFilter) {
 }
 
 function renderPersonalPileRow(item, fruitId = personalReportFruitFilter) {
-  const isDurian = fruitId === "durian";
+  const isSingleWeight = isSingleWeightFruit(fruitId);
   return `
     <tr>
       <td><strong>กอง ${escapeHtml(item.pile)}</strong></td>
       <td>${item.count.toLocaleString("th-TH")}</td>
-      ${isDurian
-        ? `<td>${numberText(getDurianGradeTotal(item.grades))}</td>`
+      ${isSingleWeight
+        ? `<td>${numberText(item.total)}</td>`
         : `<td>${numberText(item.water)}</td><td>${numberText(item.flower)}</td>`}
       <td><strong>${numberText(item.total)}</strong></td>
       <td><strong>${money(item.amount)}</strong></td>
@@ -12168,7 +13642,8 @@ function buildPersonalReportPayload() {
     end_date: range.endDate,
     fruit_type: personalReportFruitFilter,
     employees: getEmployees(),
-    production_records: getProductionRecords(),
+    production_records: recordsForPersonalReport(personalReportEmployeeId, range.startDate, range.endDate, personalReportFruitFilter),
+    ...getProductionReportCatalog(),
     deduction_records: getAdjustmentRecordsForRange("production", range.startDate, range.endDate),
     printed_by: user?.fullname || user?.username || "ระบบรายงาน",
     printed_by_position: getExportPositionLabel(user)
@@ -12198,7 +13673,7 @@ function bindPersonalReportEvents() {
       personalReportFruitFilter = target.value || "mangosteen";
     }
     if (target.id === "personalReportStartDate") {
-      personalReportStartDate = target.value || new Date().toISOString().slice(0, 10);
+      personalReportStartDate = target.value || localDateInputValue();
     }
     if (target.id === "personalReportEndDate") {
       personalReportEndDate = target.value || personalReportStartDate;
@@ -12468,7 +13943,7 @@ function renderTimeQueuePage() {
 
 function bindReportEvents() {
   document.querySelector("#reportDate")?.addEventListener("change", (event) => {
-    reportDate = event.target.value || new Date().toISOString().slice(0, 10);
+    reportDate = event.target.value || localDateInputValue();
     reportMessage = "";
     render();
   });
@@ -12535,11 +14010,6 @@ function bindReportEvents() {
 }
 
 function renderTimeReport(user, moduleItem) {
-  const editingTimeRecord = editingTimeRecordId
-    ? getTimeRecords().find((record) => record.id === editingTimeRecordId)
-    : null;
-  const dailyTimeRecords = apiGetTimeRecordsForDate(timeRecordDate);
-  const dailyEntryEmployeeCode = editingTimeRecord?.emp_code || timeEntryEmployeeCode || getNextAvailableTimeEntryEmployeeCode("", timeRecordDate);
   return `
     <section class="time-page">
       <section class="time-hero panel">
@@ -12568,66 +14038,29 @@ function renderTimeReport(user, moduleItem) {
           : ""
       }
 
-      ${timeEntryMode === "daily" ? `
-      <section class="time-workspace">
-        <section class="panel time-form-panel">
-          <div class="time-section-head">
-            <div>
-              <span>Time Entry</span>
-              <h3>บันทึกรายการลงเวลา</h3>
-            </div>
-            <b>มาตรฐานกะ 08:00-17:00</b>
-          </div>
-          <form class="time-entry-form" id="timeRecordForm">
-            <label class="field">
-              <span>วันที่</span>
-              <input name="record_date" type="date" value="${escapeHtml(editingTimeRecord?.record_date || timeRecordDate)}" required />
-            </label>
-            <label class="field">
-              <span>รหัสพนักงาน</span>
-              <select name="emp_code" id="timeRecordEmployeeCode" required>
-                ${renderWeeklyTimeEmployeeOptions(getOrderedActiveTimeEmployees(), dailyEntryEmployeeCode)}
-              </select>
-            </label>
-            <label class="field">
-              <span>เวลาเข้า</span>
-              <input name="clock_in" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="เช่น 0752" value="${escapeHtml(editingTimeRecord?.clock_in || "")}" required />
-            </label>
-            <label class="field">
-              <span>เวลาออก</span>
-              <input name="clock_out" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="เช่น 1630" value="${escapeHtml(editingTimeRecord?.clock_out || "")}" required />
-            </label>
-            <button class="btn btn-primary form-submit" type="submit" ${timeRecordSaving ? "disabled" : ""}>${timeRecordSaving ? "กำลังบันทึก..." : (editingTimeRecord ? "บันทึกการแก้ไข" : "บันทึกรายการ")}</button>
-            ${editingTimeRecord ? `<button class="btn btn-outline" id="cancelTimeRecordEdit" type="button">ยกเลิกแก้ไข</button>` : ""}
-          </form>
-          ${editingTimeRecord ? `<div class="alert alert-success">กำลังแก้ไขรายการ #${editingTimeRecord.id} ${escapeHtml(editingTimeRecord.emp_code)} ${escapeHtml(editingTimeRecord.clock_in)}-${escapeHtml(editingTimeRecord.clock_out)}</div>` : ""}
-        </section>
-
-        <section class="panel time-policy-panel">
-          <div class="time-section-head">
-            <div>
-              <span>Work Rule</span>
-              <h3>หลักเกณฑ์คำนวณเวลา</h3>
-            </div>
-          </div>
-          <div class="time-policy-list">
-            <div><span>การปัดเวลาเข้าและออก</span><strong>00-15 นาที = ต้นชั่วโมง · 16-45 นาที = ครึ่งชั่วโมง · 46-59 นาที = ชั่วโมงถัดไป</strong></div>
-            <div><span>ช่วงพักกลางวัน</span><strong>12:00-13:00</strong></div>
-            <div><span>เงื่อนไขการหักพัก</span><strong>เข้า ก่อน 12:00 และออก หลัง 13:00</strong></div>
-            <div><span>ตัวอย่างมาตรฐาน</span><strong>08:00-17:00 = 8:00 ชั่วโมง</strong></div>
-            <div><span>เริ่มงานช่วงบ่าย</span><strong>ไม่หักเวลาพัก</strong></div>
-            <div><span>ค่าแรงไม่ครบ 8 ชั่วโมง</span><strong>ปัดเป็นบาท: ชั่วโมงสุทธิ × ฐานรายวันของพนักงาน ÷ 8</strong></div>
-            <div><span>ฐานรายวัน</span><strong>กลุ่มปกติ ${TIME_DAILY_WAGE} บาท · กลุ่มพิเศษเลือกได้ 347 / 365 / 500 บาท</strong></div>
-            <div><span>ค่าล่วงเวลา</span><strong>ส่วนที่เกิน 8 ชั่วโมง × ค่า OT ที่ตั้งไว้รายคน</strong></div>
-            <div><span>กันกรอกซ้ำ</span><strong>วันเดียวกันบันทึกได้หลายรอบเมื่อเวลาไม่ทับกัน · รอบใหม่ต้องเริ่มตั้งแต่เวลาออกรอบก่อนเป็นต้นไป</strong></div>
-            <div><span>ประวัติการแก้ไข</span><strong>แก้ภายใน 2 นาทีไม่ลง Log · เกิน 2 นาทีหรือข้ามวันจะลง Audit Log</strong></div>
-          </div>
-        </section>
-      </section>
-      ${renderDailyTimeRecordTable(dailyTimeRecords)}
-      ` : renderWeeklyTimeEntry(user)}
+      ${timeEntryMode === "data" ? renderTimeDataPanel() : renderWeeklyTimeEntry(user)}
       `}
     </section>
+  `;
+}
+
+function renderTimeDataPanel() {
+  const records = apiGetTimeRecordsForDate(timeRecordDate);
+  const employees = new Set(records.map(record => String(record.employee_id || record.emp_code)));
+  return `
+    <section class="panel time-data-panel">
+      <div class="time-data-heading">
+        <div><span class="eyebrow">ATTENDANCE DATA</span><h3>รายการข้อมูล</h3><p>รับข้อมูลจากเครื่องสแกน ตรวจสอบเวลา และติดตามรายการที่บันทึกแล้ว</p></div>
+        <label class="field time-data-date"><span>วันที่แสดงรายการ</span><input id="timeDataDate" type="date" value="${escapeHtml(timeRecordDate)}" /></label>
+      </div>
+      <div class="time-data-tools">
+        <article class="time-data-tool"><span class="time-data-icon" aria-hidden="true">⇧</span><h4>นำเข้าไฟล์จากเครื่อง</h4><p>เลือกไฟล์จาก USB ตรวจรายการและเติมเวลาที่ขาดก่อนบันทึก</p><button class="btn btn-outline time-data-button" id="openScannerImport" type="button">นำเข้าไฟล์ USB</button></article>
+        <article class="time-data-tool"><span class="time-data-icon" aria-hidden="true">↻</span><h4>ข้อมูลล่าสุด</h4><p>อัปเดตรายการที่บันทึกจากฐานข้อมูลกลางเพื่อดูข้อมูลล่าสุด</p><button class="btn btn-outline time-data-button" id="refreshTimeSavedRecords" type="button">รีเฟรชข้อมูล</button></article>
+        <article class="time-data-tool"><span class="time-data-icon" aria-hidden="true">⇄</span><h4>เชื่อมต่อเครื่องสแกน <span class="time-remote-badge">ผ่านคอมในโรงงาน</span></h4><p>อ่านรายการตามช่วงวันที่ผ่านตัวเชื่อม HIP บนคอม แล้วตรวจข้อมูลก่อนส่งเข้าคิว</p><button class="btn btn-outline time-data-button" id="openScannerRemote" type="button">ดึงข้อมูลระยะไกล</button></article>
+      </div>
+      <div class="time-data-summary"><span>วันที่ ${escapeHtml(timeRecordDate)}</span><strong>${records.length} รายการ</strong><span>พนักงาน ${employees.size} คน</span><small>รายการที่ส่งเข้าคิวแล้ว ติดตามสถานะได้ที่ “เปิดคิวบันทึก”</small></div>
+    </section>
+    ${renderDailyTimeRecordTable(records)}
   `;
 }
 
@@ -12686,13 +14119,17 @@ function renderTimeRecordRow(record) {
 
 function renderWeeklyTimeEntry(user) {
   const weekDates = Array.from({ length: 7 }, (_, index) => addDaysToDate(timeRecordDate, index));
+  const weeklyEdit = editingTimeRecordId ? getTimeRecords().find(r => r.id === editingTimeRecordId) : null;
   const activeEmployees = getOrderedActiveTimeEmployees();
   const selectedEmployeeCode = weeklyTimeEmployeeCode || activeEmployees[0]?.emp_code || "";
+  const selectedEmployee = activeEmployees.find((employee) => String(employee.emp_code) === String(selectedEmployeeCode));
   const weeklyRecords = getTimeRecords()
     .filter((record) => {
       const recordDate = record.record_date || "";
       const matchDate = recordDate >= weekDates[0] && recordDate <= weekDates[6];
-      const matchEmployee = !selectedEmployeeCode || record.emp_code === selectedEmployeeCode;
+      const matchEmployee = !selectedEmployeeCode || (record.employee_id
+        ? String(record.employee_id) === String(selectedEmployee?.id)
+        : String(record.emp_code) === String(selectedEmployeeCode));
       return matchDate && matchEmployee;
     })
     .sort((a, b) =>
@@ -12715,13 +14152,13 @@ function renderWeeklyTimeEntry(user) {
         <div class="weekly-control-bar">
           <label class="field">
             <span>รหัสพนักงาน / ชื่อพนักงาน</span>
-            <select name="emp_code" required>
+            <select name="emp_code" required ${weeklyEdit ? "disabled" : ""}>
               ${renderWeeklyTimeEmployeeOptions(activeEmployees, selectedEmployeeCode)}
             </select>
           </label>
           <label class="field">
             <span>วันที่เริ่มต้น</span>
-            <input id="weeklyStartDate" name="start_date" type="date" value="${escapeHtml(timeRecordDate)}" required />
+            <input id="weeklyStartDate" name="start_date" type="date" value="${escapeHtml(timeRecordDate)}" required ${weeklyEdit ? "disabled" : ""} />
           </label>
           <div class="weekly-auto-note">
             <span>สร้างวันที่ต่อเนื่อง</span>
@@ -12742,11 +14179,11 @@ function renderWeeklyTimeEntry(user) {
                     <input type="hidden" name="record_date_${index}" value="${escapeHtml(dateValue)}" />
                     <label>
                       <span>เข้า</span>
-                      <input data-weekly-clock-in="${index}" name="clock_in_${index}" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="0800" value="${escapeHtml(weeklyTimeDraft[index]?.clock_in || "")}" />
+                      <input data-weekly-clock-in="${index}" name="clock_in_${index}" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="0800" value="${escapeHtml(weeklyTimeDraft[index]?.clock_in || "")}" ${weeklyEdit && weeklyEdit.record_date !== dateValue ? "disabled" : ""} />
                     </label>
                     <label>
                       <span>ออก</span>
-                      <input data-weekly-clock-out="${index}" name="clock_out_${index}" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="1700" value="${escapeHtml(weeklyTimeDraft[index]?.clock_out || "")}" />
+                      <input data-weekly-clock-out="${index}" name="clock_out_${index}" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="1700" value="${escapeHtml(weeklyTimeDraft[index]?.clock_out || "")}" ${weeklyEdit && weeklyEdit.record_date !== dateValue ? "disabled" : ""} />
                     </label>
                     <div class="weekly-day-total">
                       <span>สุทธิ</span>
@@ -12771,7 +14208,8 @@ function renderWeeklyTimeEntry(user) {
           </div>
           <div class="weekly-actions">
             <button class="btn btn-outline" id="clearWeeklyTime" type="button">ล้างตาราง</button>
-            <button class="btn btn-primary report-primary-button" type="submit" ${timeRecordSaving ? "disabled" : ""}>${timeRecordSaving ? "กำลังบันทึก..." : "บันทึกทั้งสัปดาห์"}</button>
+            ${weeklyEdit ? '<button class="btn btn-outline" id="cancelWeeklyTimeEdit" type="button">ยกเลิกแก้ไข</button>' : ""}
+            <button class="btn btn-primary report-primary-button" type="submit" ${timeRecordSaving ? "disabled" : ""}>${timeRecordSaving ? "กำลังบันทึก..." : weeklyEdit ? "บันทึกแก้ไข" : "บันทึกทั้งสัปดาห์"}</button>
           </div>
         </div>
       </form>
@@ -12907,6 +14345,53 @@ function handleWeeklyTimeEnter(event) {
 }
 
 function bindTimeReportEvents(user) {
+  document.querySelector("#timeDataDate")?.addEventListener("change", (event) => {
+    if (!event.target.value) return;
+    timeRecordDate = event.target.value;
+    timeRecordMessage = "";
+    render();
+  });
+  const scannerAdapter = {
+      actor: user.fullname,
+      exists: code => Boolean(apiGetTimeEmployeeByCode(code)),
+      prepare: (payload, source) => {
+        const record = buildTimeRecord(payload, user);
+        assertNoConflictingTimeRecord(record.emp_code, record.record_date, record.clock_in, record.clock_out);
+        return { ...record, scanner_import: source };
+      },
+      send: record => enqueueTimeRows([record], "insert")
+    };
+  async function openScannerWithLatestRoster(event, remote) {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const response = await cloudApiRequest('/api/time-employees');
+      if (response.error || !Array.isArray(response.data)) throw Error('โหลดรายชื่อรายวันล่าสุดไม่สำเร็จ กรุณาลองใหม่');
+      let mapping = remote ? null : ScannerImport.rosterMap(response.data);
+      saveTimeEmployees(response.data.map(normalizeCloudTimeEmployee));
+      const adapter = {...scannerAdapter,
+        resolveScannerCode: id => {
+          mapping ||= ScannerImport.rosterMap(response.data);
+          return mapping.get(String(Number(id)))?.emp_code || '';
+        }
+      };
+      if (remote) ScannerImport.openRemote(timeRecordDate, adapter);
+      else ScannerImport.open(adapter);
+    } catch (error) { window.alert(error.message); }
+    finally { button.disabled = false; }
+  }
+  document.querySelector("#openScannerRemote")?.addEventListener("click", event => openScannerWithLatestRoster(event, true));
+  document.querySelector("#openScannerImport")?.addEventListener("click", event => openScannerWithLatestRoster(event, false));
+  document.querySelector("#refreshTimeSavedRecords")?.addEventListener("click", async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      await refreshSavedRecordView("time");
+      setTimeRecordMessage("รีเฟรชข้อมูลเวลาจากฐานกลางแล้ว");
+    } catch (error) {
+      setTimeRecordMessage(error.message || "รีเฟรชไม่สำเร็จ", "error");
+    }
+    render();
+  });
   if (!timeQueueLoadedOnce && !timeQueueLoading) refreshTimeQueue({ renderAfter: true });
   document.querySelector("[data-open-time-queue]")?.addEventListener("click", () => {
     timeView = "queue";
@@ -13001,7 +14486,9 @@ function bindTimeReportEvents(user) {
   if (timeView === "queue") return;
   document.querySelectorAll("[data-time-mode]").forEach((button) => {
     button.addEventListener("click", () => {
-      timeEntryMode = button.dataset.timeMode || "daily";
+      if (timeRecordSaving) return;
+      if (timeEntryMode === "weekly") syncWeeklyDraftFromForm();
+      timeEntryMode = button.dataset.timeMode || "weekly";
       timeRecordMessage = "";
       editingTimeRecordId = null;
       render();
@@ -13010,8 +14497,7 @@ function bindTimeReportEvents(user) {
 
   document.querySelector("#weeklyStartDate")?.addEventListener("change", (event) => {
     syncWeeklyDraftFromForm();
-    timeRecordDate = event.target.value || new Date().toISOString().slice(0, 10);
-    timeEntryEmployeeCode = getNextAvailableTimeEntryEmployeeCode("", timeRecordDate);
+    timeRecordDate = event.target.value || localDateInputValue();
     timeRecordMessage = "";
     render();
   });
@@ -13043,6 +14529,7 @@ function bindTimeReportEvents(user) {
   });
 
   document.querySelector("#clearWeeklyTime")?.addEventListener("click", () => {
+    if (timeRecordSaving) return;
     clearWeeklyTimeDraft();
     document.querySelectorAll("[data-weekly-clock-in], [data-weekly-clock-out]").forEach((input) => {
       input.value = "";
@@ -13055,6 +14542,24 @@ function bindTimeReportEvents(user) {
     if (timeRecordSaving) return;
     syncWeeklyDraftFromForm();
     const form = new FormData(event.currentTarget);
+    if (editingTimeRecordId) {
+      const record = getTimeRecords().find(r => r.id === editingTimeRecordId);
+      if (!record) { setTimeRecordMessage("ไม่พบรายการที่กำลังแก้ไข", "error"); render(); return; }
+      const index = Array.from({length: 7}, (_, i) => addDaysToDate(timeRecordDate, i)).indexOf(record.record_date);
+      if (index < 0) { setTimeRecordMessage("วันที่แก้ไขอยู่นอกตาราง กรุณาเลือกแก้ไขอีกครั้ง", "error"); render(); return; }
+      const payload = {record_date: record.record_date, emp_code: record.emp_code,
+        clock_in: normalizeClockText(form.get(`clock_in_${index}`)),
+        clock_out: normalizeClockText(form.get(`clock_out_${index}`))};
+      try {
+        timeRecordSaving = true;
+        const accepted = await apiUpdateTimeRecord(editingTimeRecordId, payload, user);
+        editingTimeRecordId = null;
+        clearWeeklyTimeDraft();
+        setTimeRecordMessage(`รับแก้ไขวันที่ ${record.record_date} เข้าคิว ${timeQueueNumber(accepted.queue_item)} แล้ว · กรอกรายการถัดไปได้ ตารางจะอัปเดตเมื่อฐานข้อมูลยืนยัน`);
+      } catch (error) { setTimeRecordMessage(error.message || "บันทึกแก้ไขไม่สำเร็จ", "error"); }
+      finally { timeRecordSaving = false; render(); }
+      return;
+    }
     const empCode = String(form.get("emp_code") || "").trim();
     weeklyTimeEmployeeCode = empCode;
     const errors = [];
@@ -13103,7 +14608,6 @@ function bindTimeReportEvents(user) {
       const nextEmployeeCode = getNextAvailableTimeEntryEmployeeCode(empCode, timeRecordDate);
       clearWeeklyTimeDraft();
       weeklyTimeEmployeeCode = nextEmployeeCode;
-      timeEntryEmployeeCode = nextEmployeeCode;
       setTimeRecordMessage(
         `รับเข้าคิว ${timeQueueNumber(queuedBatch.queue_item)} แล้ว ${queuedBatch.records.length} วัน` +
         `${nextEmployeeCode ? ` · เลื่อนไปพนักงาน ${nextEmployeeCode} แล้ว` : ""}`
@@ -13123,6 +14627,7 @@ function bindTimeReportEvents(user) {
 
   document.querySelectorAll("[data-edit-time-record]").forEach((button) => {
     button.addEventListener("click", () => {
+      if (timeRecordSaving) return;
       const id = Number(button.dataset.editTimeRecord);
       const record = getTimeRecords().find((item) => item.id === id);
       if (!record) {
@@ -13131,11 +14636,20 @@ function bindTimeReportEvents(user) {
         return;
       }
       editingTimeRecordId = id;
-      timeEntryMode = "daily";
-      timeRecordDate = record.record_date || timeRecordDate;
-      timeEntryEmployeeCode = record.emp_code || "";
-      setTimeRecordMessage("แก้เวลาให้ถูกต้องแล้วกดบันทึกการแก้ไข");
-      render();
+      timeEntryMode = "weekly";
+      {
+        weeklyTimeEmployeeCode = record.emp_code || "";
+        let index = Array.from({length: 7}, (_, i) => addDaysToDate(timeRecordDate, i)).indexOf(record.record_date);
+        if (index < 0) { timeRecordDate = record.record_date; index = 0; }
+        clearWeeklyTimeDraft();
+        weeklyTimeDraft[index] = {clock_in: record.clock_in || "", clock_out: record.clock_out || ""};
+        setTimeRecordMessage(`กำลังแก้ไขวันที่ ${record.record_date} แก้เวลาในตารางด้านบนแล้วกดบันทึกแก้ไข`);
+        render();
+        const input = document.querySelector(`[data-weekly-clock-in="${index}"]`);
+        input?.scrollIntoView({block: "center", behavior: "smooth"});
+        input?.focus();
+        return;
+      }
     });
   });
 
@@ -13160,65 +14674,13 @@ function bindTimeReportEvents(user) {
     });
   });
 
-  document.querySelector("#cancelTimeRecordEdit")?.addEventListener("click", () => {
-    editingTimeRecordId = null;
-    timeEntryEmployeeCode = getNextAvailableTimeEntryEmployeeCode(timeEntryEmployeeCode, timeRecordDate);
-    setTimeRecordMessage("ยกเลิกการแก้ไขแล้ว");
-    render();
-  });
-
-  document.querySelector("#timeRecordForm")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
+  document.querySelector("#cancelWeeklyTimeEdit")?.addEventListener("click", () => {
     if (timeRecordSaving) return;
-    const form = new FormData(event.currentTarget);
-    timeRecordDate = String(form.get("record_date") || timeRecordDate);
-
-    try {
-      const wasEditing = Boolean(editingTimeRecordId);
-      const payload = {
-        record_date: timeRecordDate,
-        emp_code: form.get("emp_code"),
-        clock_in: form.get("clock_in"),
-        clock_out: form.get("clock_out")
-      };
-      timeRecordSaving = true;
-      setTimeRecordMessage(`${wasEditing ? "กำลังแก้ไข" : "กำลังบันทึก"}รายการเวลาขึ้น Cloud... กรุณารอสักครู่`);
-      render();
-      const record = editingTimeRecordId
-        ? await apiUpdateTimeRecord(editingTimeRecordId, payload, user)
-        : await apiCreateTimeRecord(payload, user);
-      const actionText = wasEditing ? "รับการแก้ไขเข้าคิว" : "รับเข้าคิว";
-      const nextEmployeeCode = getNextAvailableTimeEntryEmployeeCode(record.emp_code, timeRecordDate);
-      editingTimeRecordId = null;
-      timeEntryEmployeeCode = nextEmployeeCode;
-      setTimeRecordMessage(`${actionText} ${timeQueueNumber(record.queue_item)} · ${record.emp_code} ${record.clock_in}-${record.clock_out} สุทธิ ${formatMinutesToHourText(record.net_minutes)} ชั่วโมง${nextEmployeeCode ? ` · ถัดไป ${nextEmployeeCode}` : ""}`);
-    } catch (error) {
-      setTimeRecordMessage(error instanceof Error ? error.message : "บันทึกเวลาไม่สำเร็จ", "error");
-    } finally {
-      timeRecordSaving = false;
-      render();
-    }
-  });
-
-  document.querySelector("#timeRecordForm input[name='record_date']")?.addEventListener("change", (event) => {
-    timeRecordDate = event.target.value || new Date().toISOString().slice(0, 10);
-    if (!editingTimeRecordId) {
-      timeEntryEmployeeCode = getNextAvailableTimeEntryEmployeeCode("", timeRecordDate);
-    }
-    timeRecordMessage = "";
+    editingTimeRecordId = null;
+    clearWeeklyTimeDraft();
+    setTimeRecordMessage("ยกเลิกแก้ไขแล้ว");
     render();
   });
-
-  document.querySelectorAll("#timeRecordForm input[name='clock_in'], #timeRecordForm input[name='clock_out']").forEach((input) => {
-    input.addEventListener("blur", () => normalizeClockInput(input));
-  });
-
-  const dailyTimeForm = document.querySelector("#timeRecordForm");
-  if (dailyTimeForm && !editingTimeRecordId) {
-    const clockInInput = dailyTimeForm.querySelector("input[name='clock_in']");
-    clockInInput?.focus();
-    clockInInput?.select?.();
-  }
 
 }
 
@@ -13229,38 +14691,42 @@ function renderEmployeeManagementHub(user, moduleItem) {
   const activeTimeEmployees = timeEmployees.filter((employee) => employee.status === "Active").length;
 
   return `
-    <section class="panel settings-home-panel">
-      <div class="panel-head">
+    <div class="employee-hub-page">
+    <section class="panel employee-hub-hero">
+      <div class="employee-hub-head">
         <div>
+          <span class="employee-hub-eyebrow">EMPLOYEE DATABASE</span>
           <h2>${escapeHtml(moduleItem.label)}</h2>
-          <p>แยกฐานพนักงานออกเป็น 2 กลุ่ม: กลุ่มชั่งน้ำหนักผลไม้ และกลุ่มบันทึกเวลาทำงาน</p>
+          <p>เลือกฐานพนักงานที่ต้องการดูหรือจัดการ</p>
         </div>
-        <span class="badge badge-success">แยกฐานข้อมูล</span>
+        <span class="employee-hub-status">2 ฐานข้อมูล</span>
       </div>
-      <div class="metrics-grid metrics-spaced">
-        <div class="metric-card"><span>พนักงานเหมาน้ำหนัก</span><strong>${activeWeightEmployees.toLocaleString("th-TH")}</strong><small>จาก ${weightEmployees.length.toLocaleString("th-TH")} คน</small></div>
-        <div class="metric-card"><span>พนักงานตามเวลา</span><strong>${activeTimeEmployees.toLocaleString("th-TH")}</strong><small>จาก ${timeEmployees.length.toLocaleString("th-TH")} คน</small></div>
-        <div class="metric-card"><span>ฐานปกติ</span><strong>${TIME_DAILY_WAGE.toLocaleString("th-TH")}</strong><small>บาทต่อวัน</small></div>
-        <div class="metric-card"><span>ฐานพิเศษ</span><strong>${TIME_SPECIAL_DAILY_WAGE.toLocaleString("th-TH")}</strong><small>บาทต่อวัน</small></div>
+      <div class="employee-hub-summary">
+        <div><span>ใช้งานรวม</span><strong>${(activeWeightEmployees + activeTimeEmployees).toLocaleString("th-TH")}</strong><small>คน</small></div>
+        <div><span>เหมาน้ำหนัก</span><strong>${activeWeightEmployees.toLocaleString("th-TH")}</strong><small>/ ${weightEmployees.length.toLocaleString("th-TH")}</small></div>
+        <div><span>ตามเวลา</span><strong>${activeTimeEmployees.toLocaleString("th-TH")}</strong><small>/ ${timeEmployees.length.toLocaleString("th-TH")}</small></div>
+        <div><span>ฐานรายวัน</span><strong>${TIME_DAILY_WAGE.toLocaleString("th-TH")}</strong><small>บาท</small></div>
       </div>
     </section>
 
-    <section class="panel">
-      <div class="section-title-row">
-        <h3>เลือกประเภทพนักงาน</h3>
-        <p class="muted-text">พนักงานสองกลุ่มนี้ใช้คนละฐานและคนละวิธีคิดเงิน</p>
+    <section class="panel employee-hub-menu">
+      <div class="employee-hub-menu-head">
+        <div><h3>เลือกประเภทพนักงาน</h3><p>ข้อมูลสองกลุ่มแยกจากกันและใช้วิธีคำนวณต่างกัน</p></div>
       </div>
-      <div class="settings-grid settings-grid-wide">
-        <button class="settings-tile" data-route="production-employees" type="button">
-          <strong>พนักงานเหมาน้ำหนัก</strong>
-          <span>ใช้ฟังก์ชั่นจัดการพนักงานเดิม สำหรับบันทึกน้ำหนักผลไม้และคิดเงินตามผลผลิต</span>
+      <div class="employee-hub-grid">
+        <button class="employee-hub-card employee-hub-weight" data-route="production-employees" type="button">
+          <span class="employee-hub-card-icon">KG</span>
+          <span class="employee-hub-card-copy"><strong>พนักงานเหมาน้ำหนัก</strong><small>จัดการรายชื่อ กลุ่มรับเงิน และสถานะพนักงาน</small><b>${activeWeightEmployees.toLocaleString("th-TH")} คนใช้งาน</b></span>
+          <span class="employee-hub-arrow">→</span>
         </button>
-        <button class="settings-tile" data-route="time-employees" type="button">
-          <strong>พนักงานตามเวลา</strong>
-          <span>สร้าง แก้ไข ลบพนักงานที่ใช้กับหน้าเวลา พร้อมแยกกลุ่มปกติ/พิเศษและค่า OT รายคน</span>
+        <button class="employee-hub-card employee-hub-time" data-route="time-employees" type="button">
+          <span class="employee-hub-card-icon">HR</span>
+          <span class="employee-hub-card-copy"><strong>พนักงานตามเวลา</strong><small>จัดการรายชื่อ ฐานรายวัน ค่า OT และลำดับเลข</small><b>${activeTimeEmployees.toLocaleString("th-TH")} คนใช้งาน</b></span>
+          <span class="employee-hub-arrow">→</span>
         </button>
       </div>
     </section>
+    </div>
   `;
 }
 
@@ -13275,38 +14741,66 @@ function renderEmployees(user, moduleItem) {
     ? getEmployees().find((employee) => employee.id === editingEmployeeId)
     : null;
 
+  if (employeePageMode === "editor" && canManage) {
+    return `<div class="time-employees-page time-employee-subpage">
+      <button class="time-employee-back" id="backToEmployeeList" type="button">← กลับไปรายชื่อพนักงาน</button>
+      ${employeeMessage ? `<div class="alert ${employeeMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(employeeMessage)}</div>` : ""}
+      ${renderEmployeeForm(editingEmployee)}
+    </div>`;
+  }
+
+  if (employeePageMode === "manage" && canManage) {
+    return `<div class="time-employees-page time-employee-subpage">
+      <button class="time-employee-back" id="backToEmployeeList" type="button">← กลับไปรายชื่อพนักงาน</button>
+      <section class="panel time-employee-workspace">
+        <div class="time-employee-workspace-head">
+          <div><span class="time-employee-step">Edit</span><h2>จัดการพนักงานเหมาน้ำหนัก</h2><p>แก้ไขข้อมูล กลุ่มรับเงิน สถานะ หรือลบพนักงานจากรายการนี้</p></div>
+          <button class="btn btn-primary" id="addEmployee" type="button">+ เพิ่มพนักงาน</button>
+        </div>
+        <div class="table-scroll"><table class="time-employee-table">
+          <thead><tr><th>รหัสพนักงาน</th><th>ชื่อพนักงาน</th><th>แผนก</th><th>กลุ่มรับเงิน</th><th>สถานะ</th><th>จัดการ</th></tr></thead>
+          <tbody>${employees.length ? employees.map((employee) => {
+            const statusClass = employee.status === "Active" ? "badge-success" : "badge-danger";
+            return `<tr><td><strong>${escapeHtml(employee.emp_code)}</strong></td><td>${escapeHtml(employee.fullname)}</td><td>${escapeHtml(employee.department)}</td><td>${renderPayGroupBadge(getEmployeePayGroup(employee))}</td><td><span class="badge ${statusClass}">${escapeHtml(employee.status)}</span></td><td><div class="row-actions"><button class="btn btn-small btn-outline" data-edit-employee="${employee.id}" type="button">แก้ไข</button>${canDelete ? `<button class="btn btn-small btn-danger" data-delete-employee="${employee.id}" type="button">ลบ</button>` : ""}</div></td></tr>`;
+          }).join("") : `<tr><td colspan="6" class="empty-cell">ยังไม่มีพนักงานเหมาน้ำหนัก</td></tr>`}</tbody>
+        </table></div>
+      </section>
+    </div>`;
+  }
+
   return `
-    <section class="panel">
+    <div class="time-employees-page">
+    <section class="panel time-employees-hero">
       <div class="panel-head">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
           <p>${escapeHtml(moduleItem.description)}</p>
         </div>
         <span class="badge ${canManage ? "badge-success" : "badge-warning"}">
-          ${canManage ? "Can add/edit" : "View only"}
+          ${canManage ? "เพิ่มและแก้ไขได้" : "ดูข้อมูลเท่านั้น"}
         </span>
       </div>
-      <div class="metrics-grid metrics-spaced">
-        <div class="metric-card"><span>พนักงานทั้งหมด</span><strong>${allEmployees.length.toLocaleString("th-TH")}</strong><small>ในฐานข้อมูลเครื่องนี้</small></div>
-        <div class="metric-card"><span>ใช้งานอยู่</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>พร้อมเลือกในหน้าผลผลิต</small></div>
-        <div class="metric-card"><span>กลุ่มรับเงิน</span><strong>${payGroups.size.toLocaleString("th-TH")}</strong><small>กลุ่มที่ใช้อยู่</small></div>
-        <div class="metric-card"><span>ผลค้นหา</span><strong>${employees.length.toLocaleString("th-TH")}</strong><small>${employeeSearch ? escapeHtml(employeeSearch) : "ทั้งหมด"}</small></div>
+      <div class="time-employee-overview">
+        <div class="metric-card metric-green"><span>พนักงานทั้งหมด</span><strong>${allEmployees.length.toLocaleString("th-TH")}</strong><small>ฐานพนักงานเหมาน้ำหนัก</small></div>
+        <div class="metric-card metric-blue"><span>ใช้งานอยู่</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>พร้อมเลือกในหน้าผลผลิต</small></div>
+        <div class="metric-card metric-purple"><span>กลุ่มรับเงิน</span><strong>${payGroups.size.toLocaleString("th-TH")}</strong><small>กลุ่มที่ใช้อยู่</small></div>
       </div>
 
       <div class="toolbar">
         <form class="search-form" id="employeeSearchForm">
           <label class="search-box">
-            <span>Search</span>
+            <span>ค้นหาพนักงาน</span>
             <input
               id="employeeSearch"
               name="employeeSearch"
-              placeholder="Search emp_code or fullname"
+              placeholder="ค้นหารหัสหรือชื่อพนักงาน"
               value="${escapeHtml(employeeSearch)}"
             />
           </label>
-          <button class="btn btn-outline" type="submit">Search</button>
-          <button class="btn btn-outline" id="clearEmployeeSearch" type="button">Clear</button>
+          <button class="btn btn-primary" type="submit">ค้นหา</button>
+          <button class="btn btn-outline" id="clearEmployeeSearch" type="button">ล้าง</button>
         </form>
+        <button class="btn btn-outline" data-export-scale-employees="production" type="button">ดาวน์โหลดรายชื่อพนักงานเหมาสำหรับแอปเครื่องชั่ง</button>
       </div>
     </section>
 
@@ -13316,28 +14810,23 @@ function renderEmployees(user, moduleItem) {
         : ""
     }
 
-    ${
-      canManage
-        ? renderEmployeeForm(editingEmployee)
-        : `<section class="panel compact-panel">
-            <p class="muted-text">Your role can view employees only. Add, edit, and delete are restricted.</p>
-          </section>`
-    }
-
-    <section class="table-card">
+    <section class="table-card time-employee-table-card">
+      <div class="time-employee-table-head">
+        <div><h3>รายชื่อพนักงาน</h3><p>พบ ${employees.length.toLocaleString("th-TH")} คน${employeeSearch ? ` จากคำค้น “${escapeHtml(employeeSearch)}”` : ""}</p></div>
+        ${canManage ? `<div class="time-employee-head-actions"><button class="btn btn-outline" id="goToEmployeeManage" type="button">Edit</button><button class="btn btn-primary" id="addEmployee" type="button">+ เพิ่มพนักงาน</button></div>` : ""}
+      </div>
       <div class="table-scroll">
-        <table>
+        <table class="time-employee-table">
           <thead>
             <tr>
               <th>ID</th>
-              <th>Emp Code</th>
-              <th>Fullname</th>
-              <th>Department</th>
-              <th>Pay Group</th>
-              <th>Status</th>
-              <th>Created</th>
-              <th>Updated</th>
-              <th>Actions</th>
+              <th>รหัสพนักงาน</th>
+              <th>ชื่อพนักงาน</th>
+              <th>แผนก</th>
+              <th>กลุ่มรับเงิน</th>
+              <th>สถานะ</th>
+              <th>วันที่สร้าง</th>
+              <th>แก้ไขล่าสุด</th>
             </tr>
           </thead>
           <tbody>
@@ -13345,49 +14834,46 @@ function renderEmployees(user, moduleItem) {
               employees.length
                 ? employees
                     .map((employee) =>
-                      renderEmployeeRow(employee, canManage, canDelete)
+                      renderEmployeeRow(employee, false, false)
                     )
                     .join("")
-                : `<tr><td colspan="9" class="empty-cell">No employees found.</td></tr>`
+                : `<tr><td colspan="8" class="empty-cell">ยังไม่มีพนักงานเหมาน้ำหนัก</td></tr>`
             }
           </tbody>
         </table>
       </div>
     </section>
+    </div>
   `;
 }
 
 function renderEmployeeForm(employee) {
-  const mode = employee ? "Edit employee" : "Add employee";
   const currentPayGroup = employee ? getEmployeePayGroup(employee) : primaryPayGroups[0];
   const selectedPayGroup = currentPayGroup || primaryPayGroups[0];
   const payGroups = [...new Set([...getEmployeePayGroups(), selectedPayGroup])];
 
   return `
-    <section class="panel">
-      <div class="section-title-row">
-        <h3>${mode}</h3>
-        ${
-          employee
-            ? `<button class="btn btn-outline" id="cancelEmployeeEdit" type="button">Cancel edit</button>`
-            : ""
-        }
+    <section class="panel time-employee-editor">
+      <div class="time-employee-editor-head">
+        <span class="time-employee-step">ข้อมูลพนักงาน</span>
+        <h2>${employee ? "แก้ไขพนักงานเหมาน้ำหนัก" : "เพิ่มพนักงานเหมาน้ำหนัก"}</h2>
+        <p>${employee ? `กำลังแก้ไข ${escapeHtml(employee.emp_code)} · ${escapeHtml(employee.fullname)}` : "กรอกข้อมูลพนักงานและกลุ่มรับเงินให้ครบถ้วน"}</p>
       </div>
       <form class="employee-form" id="employeeForm">
         <input type="hidden" name="id" value="${employee ? employee.id : ""}" />
 
         <label class="field">
-          <span>Emp Code</span>
+          <span>รหัสพนักงาน</span>
           <input name="emp_code" inputmode="numeric" maxlength="8" pattern="[0-9]{2,8}" value="${employee ? escapeHtml(employee.emp_code) : ""}" required />
         </label>
 
         <label class="field">
-          <span>Fullname</span>
+          <span>ชื่อพนักงาน</span>
           <input name="fullname" value="${employee ? escapeHtml(employee.fullname) : ""}" required />
         </label>
 
         <label class="field">
-          <span>Department</span>
+          <span>แผนก</span>
           <input name="department" value="${employee ? escapeHtml(employee.department) : ""}" required />
         </label>
 
@@ -13423,7 +14909,7 @@ function renderEmployeeForm(employee) {
         </div>
 
         <label class="field">
-          <span>Status</span>
+          <span>สถานะ</span>
           <select name="status" required>
             ${["Active", "Inactive"]
               .map(
@@ -13435,7 +14921,7 @@ function renderEmployeeForm(employee) {
         </label>
 
         <button class="btn btn-primary form-submit" type="submit">
-          ${employee ? "Save changes" : "Add employee"}
+          ${employee ? "บันทึกการแก้ไข" : "เพิ่มพนักงาน"}
         </button>
       </form>
     </section>
@@ -13456,12 +14942,12 @@ function renderEmployeeRow(employee, canManage, canDelete) {
       <td><span class="badge ${statusClass}">${escapeHtml(employee.status)}</span></td>
       <td>${formatDate(employee.created_at)}</td>
       <td>${formatDate(employee.updated_at)}</td>
-      <td>
+      ${canManage || canDelete ? `<td>
         <div class="row-actions">
           ${
             canManage
               ? `<button class="btn btn-small btn-outline" data-edit-employee="${employee.id}" type="button">Edit</button>`
-              : `<span class="muted-text">View</span>`
+              : ""
           }
           ${
             canDelete
@@ -13469,7 +14955,7 @@ function renderEmployeeRow(employee, canManage, canDelete) {
               : ""
           }
         </div>
-      </td>
+      </td>` : ""}
     </tr>
   `;
 }
@@ -13482,6 +14968,23 @@ function updatePayGroupSelectTone(select) {
 }
 
 function bindEmployeeEvents(user) {
+  document.querySelector("#backToEmployeeList")?.addEventListener("click", () => {
+    employeePageMode = "list";
+    editingEmployeeId = null;
+    employeeMessage = "";
+    render();
+  });
+  document.querySelector("#goToEmployeeManage")?.addEventListener("click", () => {
+    employeePageMode = "manage";
+    employeeMessage = "";
+    render();
+  });
+  document.querySelectorAll("#addEmployee").forEach((button) => button.addEventListener("click", () => {
+    editingEmployeeId = null;
+    employeePageMode = "editor";
+    employeeMessage = "";
+    render();
+  }));
   document.querySelectorAll("[data-pay-group-select]").forEach((select) => {
     updatePayGroupSelectTone(select);
     select.addEventListener("change", () => updatePayGroupSelectTone(select));
@@ -13547,6 +15050,22 @@ function bindEmployeeEvents(user) {
     render();
   });
 
+  document.querySelectorAll('[data-export-scale-employees="production"]').forEach((exportButton) => exportButton.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const count = await exportScaleEmployeeFile("production");
+      employeeMessage = `ส่งออกพนักงานทั้งหมด ${count.toLocaleString('en-US')} คนแล้ว นำไฟล์ JSON เข้าแอปเครื่องชั่งได้ทุกเครื่อง`;
+      employeeMessageType = 'success';
+    } catch (error) {
+      employeeMessage = error instanceof Error ? error.message : 'ส่งออกรายชื่อไม่สำเร็จ';
+      employeeMessageType = 'error';
+    } finally {
+      button.disabled = false;
+      render();
+    }
+  }));
+
   document.querySelector("#clearEmployeeSearch")?.addEventListener("click", () => {
     employeeSearch = "";
     render();
@@ -13610,6 +15129,7 @@ function bindEmployeeEvents(user) {
       }
       employeeMessageType = "success";
       editingEmployeeId = null;
+      employeePageMode = "list";
       render();
     } catch (error) {
       employeeMessage = error instanceof Error ? error.message : "Save failed.";
@@ -13622,6 +15142,7 @@ function bindEmployeeEvents(user) {
     button.addEventListener("click", async () => {
       if (!canManageEmployees(user)) return;
       editingEmployeeId = Number(button.dataset.editEmployee);
+      employeePageMode = "editor";
       employeeMessage = "";
       render();
     });
@@ -13668,8 +15189,53 @@ function renderTimeEmployees(user, moduleItem) {
     ? getTimeEmployees().find((employee) => employee.id === editingTimeEmployeeId)
     : null;
 
+  if (timeEmployeePageMode === "editor" && canManage) {
+    return `<div class="time-employees-page time-employee-subpage">
+      <button class="time-employee-back" id="backToTimeEmployeeList" type="button">← กลับไปรายชื่อพนักงาน</button>
+      ${timeEmployeeMessage ? `<div class="alert ${timeEmployeeMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(timeEmployeeMessage)}</div>` : ""}
+      ${renderTimeEmployeeForm(editingEmployee)}
+    </div>`;
+  }
+
+  if (timeEmployeePageMode === "manage" && canManage) {
+    const numberGroups = new Map();
+    allEmployees.forEach((employee) => {
+      const group = timeEmployeeNumberGroup(employee);
+      if (!numberGroups.has(group.key)) numberGroups.set(group.key, {
+        label: `${getTimeEmployeeTypeOption(employee.employee_type).shortLabel} · ${group.prefix ? `รหัส ${group.prefix}xx` : "รหัส 2 หลัก"}`,
+        employees: []
+      });
+      numberGroups.get(group.key).employees.push(employee);
+    });
+    const groupEmployees = (numberGroups.get(timeEmployeeManageGroup)?.employees || [])
+      .slice().sort((a, b) => Number(a.emp_code) - Number(b.emp_code));
+    return `<div class="time-employees-page time-employee-subpage">
+      <button class="time-employee-back" id="backToTimeEmployeeList" type="button">← กลับไปรายชื่อพนักงาน</button>
+      ${timeEmployeeMessage ? `<div role="status" class="alert ${timeEmployeeMessageType === "error" ? "alert-error" : "alert-success"}">${escapeHtml(timeEmployeeMessage)}</div>` : ""}
+      <section class="panel time-employee-workspace">
+        <div class="time-employee-workspace-head">
+          <div><span class="time-employee-step">Edit</span><h2>จัดการรายชื่อพนักงาน</h2><p>เลือกพนักงานเพื่อจัดลำดับเลข หรือกดแก้ไขเพื่อเปลี่ยนข้อมูลรายบุคคล</p></div>
+          <button class="btn btn-primary" id="openTimeEmployeeRenumber" type="button" disabled>ตรวจสอบและจัดเลข <span id="timeEmployeeSelectedCount">0</span> คน</button>
+        </div>
+        <div class="time-employee-selection-bar">
+          <label>กลุ่มที่จะจัด <select id="timeEmployeeNumberGroup"><option value="">เลือกกลุ่มและชุดรหัสก่อน</option>${[...numberGroups].map(([key, group]) => `<option value="${escapeHtml(key)}" ${timeEmployeeManageGroup === key ? "selected" : ""}>${escapeHtml(group.label)} (${group.employees.length} คน)</option>`).join("")}</select></label>
+          <label><input id="selectAllTimeEmployees" type="checkbox" ${groupEmployees.length ? "" : "disabled"} /> เลือกทุกคนในกลุ่มนี้</label>
+          <span>คงเลขแรกของกลุ่มที่เลือก เช่น 201, 205 → 201, 202 ไม่เปลี่ยนกลุ่มอื่น</span>
+        </div>
+        <div class="table-scroll"><table class="time-employee-table time-employee-pick-table">
+          <thead><tr><th class="select-column"></th><th>เลขพนักงาน</th><th>ชื่อพนักงาน</th><th>กลุ่ม</th><th>ฐานรายวัน</th><th>จัดการ</th></tr></thead>
+          <tbody>${groupEmployees.length ? groupEmployees.map((employee) => {
+            const type = getTimeEmployeeTypeOption(employee.employee_type);
+            return `<tr><td class="select-column"><input class="time-employee-select" data-time-employee-select="${employee.id}" type="checkbox" aria-label="เลือก ${escapeHtml(employee.fullname)}" /></td><td><strong>${escapeHtml(employee.emp_code)}</strong></td><td>${escapeHtml(employee.fullname)}</td><td>${escapeHtml(type.shortLabel || type.label)}</td><td>${type.dailyWage.toLocaleString("th-TH")} บาท</td><td><div class="row-actions"><button class="btn btn-small btn-outline" data-edit-time-employee="${employee.id}" type="button">แก้ไข</button>${canDelete ? `<button class="btn btn-small btn-danger" data-delete-time-employee="${employee.id}" type="button">ลบ</button>` : ""}</div></td></tr>`;
+          }).join("") : `<tr><td colspan="6" class="empty-cell">เลือกกลุ่มด้านบนเพื่อแสดงรายชื่อและจัดเลข</td></tr>`}</tbody>
+        </table></div>
+      </section>
+    </div>`;
+  }
+
   return `
-    <section class="panel">
+    <div class="time-employees-page">
+    <section class="panel time-employees-hero">
       <div class="panel-head">
         <div>
           <h2>${escapeHtml(moduleItem.label)}</h2>
@@ -13679,17 +15245,16 @@ function renderTimeEmployees(user, moduleItem) {
           ${canManage ? "Can add/edit" : "View only"}
         </span>
       </div>
-      <div class="metrics-grid metrics-spaced">
-        <div class="metric-card"><span>พนักงานตามเวลาทั้งหมด</span><strong>${allEmployees.length.toLocaleString("th-TH")}</strong><small>ฐานแยกจากพนักงานน้ำหนัก</small></div>
-        <div class="metric-card"><span>ใช้งานอยู่</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>พร้อมเลือกในหน้าบันทึกเวลา</small></div>
-        <div class="metric-card"><span>กลุ่มพิเศษ</span><strong>${specialEmployees.toLocaleString("th-TH")}</strong><small>รองรับฐาน 347 / 365 / 500</small></div>
-        <div class="metric-card"><span>ผลค้นหา</span><strong>${employees.length.toLocaleString("th-TH")}</strong><small>${timeEmployeeSearch ? escapeHtml(timeEmployeeSearch) : "ทั้งหมด"}</small></div>
+      <div class="time-employee-overview">
+        <div class="metric-card metric-green"><span>พนักงานทั้งหมด</span><strong>${allEmployees.length.toLocaleString("th-TH")}</strong><small>ฐานพนักงานตามเวลา</small></div>
+        <div class="metric-card metric-blue"><span>ใช้งานอยู่</span><strong>${activeEmployees.toLocaleString("th-TH")}</strong><small>พร้อมบันทึกเวลา</small></div>
+        <div class="metric-card metric-purple"><span>กลุ่มพิเศษ</span><strong>${specialEmployees.toLocaleString("th-TH")}</strong><small>ฐาน 347 / 365 / 500</small></div>
       </div>
 
       <div class="toolbar">
         <form class="search-form" id="timeEmployeeSearchForm">
           <label class="search-box">
-            <span>Search</span>
+            <span>ค้นหาพนักงาน</span>
             <input
               id="timeEmployeeSearch"
               name="timeEmployeeSearch"
@@ -13697,10 +15262,13 @@ function renderTimeEmployees(user, moduleItem) {
               value="${escapeHtml(timeEmployeeSearch)}"
             />
           </label>
-          <button class="btn btn-outline" type="submit">Search</button>
-          <button class="btn btn-outline" id="clearTimeEmployeeSearch" type="button">Clear</button>
+          <button class="btn btn-primary" type="submit">ค้นหา</button>
+          <button class="btn btn-outline" id="clearTimeEmployeeSearch" type="button">ล้าง</button>
         </form>
+        <button class="btn btn-outline" data-export-scale-employees="time" type="button">ดาวน์โหลดรายชื่อพนักงานรายวัน (JSON)</button>
+        <button class="btn btn-outline" id="exportTimeEmployeeXml" type="button" aria-describedby="timeXmlNote">เลือกรายชื่อ / ดาวน์โหลด XML (ZIP)</button>
       </div>
+      <p id="timeXmlNote">เลือกเฉพาะพนักงานที่ต้องการเพิ่ม แล้วดาวน์โหลด ENROLLDB.ZIP สำหรับเครื่อง HIP</p>
     </section>
 
     ${
@@ -13709,17 +15277,13 @@ function renderTimeEmployees(user, moduleItem) {
         : ""
     }
 
-    ${
-      canManage
-        ? renderTimeEmployeeForm(editingEmployee)
-        : `<section class="panel compact-panel">
-            <p class="muted-text">Your role can view time employees only. Add, edit, and delete are restricted.</p>
-          </section>`
-    }
-
-    <section class="table-card">
+    <section class="table-card time-employee-table-card">
+      <div class="time-employee-table-head">
+        <div><h3>รายชื่อพนักงาน</h3><p>พบ ${employees.length.toLocaleString("th-TH")} คน${timeEmployeeSearch ? ` จากคำค้น “${escapeHtml(timeEmployeeSearch)}”` : ""}</p></div>
+        ${canManage ? `<div class="time-employee-head-actions"><button class="btn btn-outline" id="goToTimeEmployeeManage" type="button">Edit</button><button class="btn btn-primary" id="addTimeEmployee" type="button">+ เพิ่มพนักงาน</button></div>` : ""}
+      </div>
       <div class="table-scroll">
-        <table>
+        <table class="time-employee-table">
           <thead>
             <tr>
               <th>ID</th>
@@ -13730,19 +15294,19 @@ function renderTimeEmployees(user, moduleItem) {
               <th>OT</th>
               <th>Created</th>
               <th>Updated</th>
-              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             ${
               employees.length
                 ? employees.map((employee) => renderTimeEmployeeRow(employee, canManage, canDelete)).join("")
-                : `<tr><td colspan="9" class="empty-cell">ยังไม่มีพนักงานตามเวลา</td></tr>`
+                : `<tr><td colspan="8" class="empty-cell">ยังไม่มีพนักงานตามเวลา</td></tr>`
             }
           </tbody>
         </table>
       </div>
     </section>
+    </div>
   `;
 }
 
@@ -13750,14 +15314,11 @@ function renderTimeEmployeeForm(employee) {
   const mode = employee ? "แก้ไขพนักงานตามเวลา" : "เพิ่มพนักงานตามเวลา";
   const selectedType = normalizeTimeEmployeeType(employee?.employee_type);
   return `
-    <section class="panel">
-      <div class="section-title-row">
-        <h3>${mode}</h3>
-        ${
-          employee
-            ? `<button class="btn btn-outline" id="cancelTimeEmployeeEdit" type="button">Cancel edit</button>`
-            : ""
-        }
+    <section class="panel time-employee-editor">
+      <div class="time-employee-editor-head">
+        <span class="time-employee-step">ข้อมูลพนักงาน</span>
+        <h2>${mode}</h2>
+        <p>${employee ? `กำลังแก้ไข ${escapeHtml(employee.emp_code)} · ${escapeHtml(employee.fullname)}` : "กรอกข้อมูลพนักงานตามเวลาให้ครบถ้วน"}</p>
       </div>
       <form class="employee-form" id="timeEmployeeForm">
         <input type="hidden" name="id" value="${employee ? employee.id : ""}" />
@@ -13785,19 +15346,28 @@ function renderTimeEmployeeForm(employee) {
         </label>
 
         <label class="field">
+          <span>กลุ่มสมัครงาน</span>
+          <select name="recruitment_group" ${employee ? "" : "required"}>
+            <option value="">${employee ? "ยังไม่ระบุกลุ่ม" : "เลือกกลุ่มสมัครงาน"}</option>
+            ${timeRecruitmentGroupOptions.map((option) => `<option value="${option.id}" ${employee?.recruitment_group === option.id ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+          </select>
+          <small>แยกจากกลุ่มที่ใช้คำนวณค่าแรง</small>
+        </label>
+
+        <label class="field" data-time-ot-rate ${selectedType === "office_347" ? "hidden" : ""}>
           <span>OT บาท/ชม.</span>
           <input name="ot_hourly_rate" type="number" min="0" step="1" value="${employee ? escapeHtml(String(employee.ot_hourly_rate || TIME_OT_HOURLY_RATE)) : TIME_OT_HOURLY_RATE}" required />
         </label>
 
         <button class="btn btn-primary form-submit" type="submit">
-          ${employee ? "Save changes" : "Add time employee"}
+          ${employee ? "บันทึกการแก้ไข" : "เพิ่มพนักงาน"}
         </button>
       </form>
     </section>
   `;
 }
 
-function renderTimeEmployeeRow(employee, canManage, canDelete) {
+function renderTimeEmployeeRow(employee) {
   const typeOption = getTimeEmployeeTypeOption(employee.employee_type);
   return `
     <tr>
@@ -13805,35 +15375,118 @@ function renderTimeEmployeeRow(employee, canManage, canDelete) {
       <td><strong>${escapeHtml(employee.emp_code)}</strong></td>
       <td>${escapeHtml(employee.fullname)}</td>
       <td><span class="badge ${typeOption.category === "special" ? "badge-warning" : "badge-success"}">${escapeHtml(typeOption.shortLabel || typeOption.label)}</span></td>
-      <td>${typeOption.dailyWage.toLocaleString("th-TH")} บาท</td>
-      <td>${(Number(employee.ot_hourly_rate) || TIME_OT_HOURLY_RATE).toLocaleString("th-TH")} บาท/ชม.</td>
+      <td>${typeOption.category === "office" ? "—" : `${typeOption.dailyWage.toLocaleString("th-TH")} บาท`}</td>
+      <td>${typeOption.category === "office" ? "—" : `${(Number(employee.ot_hourly_rate) || TIME_OT_HOURLY_RATE).toLocaleString("th-TH")} บาท/ชม.`}</td>
       <td>${formatDate(employee.created_at)}</td>
       <td>${formatDate(employee.updated_at)}</td>
-      <td>
-        <div class="row-actions">
-          ${
-            canManage
-              ? `<button class="btn btn-small btn-outline" data-edit-time-employee="${employee.id}" type="button">Edit</button>`
-              : `<span class="muted-text">View</span>`
-          }
-          ${
-            canDelete
-              ? `<button class="btn btn-small btn-danger" data-delete-time-employee="${employee.id}" type="button">Delete</button>`
-              : ""
-          }
-        </div>
-      </td>
     </tr>
   `;
 }
 
 function bindTimeEmployeeEvents(user) {
+  document.querySelector('#exportTimeEmployeeXml')?.addEventListener('click', async event => {
+    event.currentTarget.disabled = true;
+    try {
+      await exportTimeEmployeeXml();
+      timeEmployeeMessage = '';
+      timeEmployeeMessageType = 'success';
+    } catch (error) {
+      timeEmployeeMessage = error.message || 'ดาวน์โหลด XML ไม่สำเร็จ';
+      timeEmployeeMessageType = 'error';
+    } finally { render(); }
+  });
+  document.querySelectorAll('[data-export-scale-employees="time"]').forEach((exportButton) => exportButton.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const count = await exportScaleEmployeeFile("time");
+      timeEmployeeMessage = `ดาวน์โหลดพนักงานตามเวลาทั้งหมด ${count.toLocaleString("th-TH")} คนแล้ว เป็นไฟล์รายชื่อเว็บ ยังไม่ใช่ไฟล์ XML สำหรับอัปเข้าเครื่อง HIP`;
+      timeEmployeeMessageType = "success";
+    } catch (error) {
+      timeEmployeeMessage = error instanceof Error ? error.message : "ดาวน์โหลดรายชื่อไม่สำเร็จ";
+      timeEmployeeMessageType = "error";
+    } finally {
+      render();
+    }
+  }));
+  document.querySelector("#timeEmployeeNumberGroup")?.addEventListener("change", (event) => {
+    timeEmployeeManageGroup = event.target.value;
+    timeEmployeeMessage = "";
+    render();
+  });
+  document.querySelector("#backToTimeEmployeeList")?.addEventListener("click", () => {
+    timeEmployeePageMode = "list";
+    editingTimeEmployeeId = null;
+    timeEmployeeMessage = "";
+    render();
+  });
+  document.querySelector("#goToTimeEmployeeManage")?.addEventListener("click", () => {
+    timeEmployeePageMode = "manage";
+    timeEmployeeMessage = "";
+    render();
+  });
+  document.querySelector("#addTimeEmployee")?.addEventListener("click", () => {
+    editingTimeEmployeeId = null;
+    timeEmployeePageMode = "editor";
+    timeEmployeeMessage = "";
+    render();
+  });
+  const selectionBoxes = [...document.querySelectorAll(".time-employee-select")];
+  const selectAllBox = document.querySelector("#selectAllTimeEmployees");
+  const renumberButton = document.querySelector("#openTimeEmployeeRenumber");
+  const updateSelection = () => {
+    const selectedCount = selectionBoxes.filter((box) => box.checked).length;
+    const countLabel = document.querySelector("#timeEmployeeSelectedCount");
+    if (countLabel) countLabel.textContent = String(selectedCount);
+    if (renumberButton) renumberButton.disabled = selectedCount < 2;
+    if (selectAllBox) {
+      selectAllBox.checked = selectedCount > 0 && selectedCount === selectionBoxes.length;
+      selectAllBox.indeterminate = selectedCount > 0 && selectedCount < selectionBoxes.length;
+    }
+  };
+  selectionBoxes.forEach((box) => box.addEventListener("change", updateSelection));
+  selectAllBox?.addEventListener("change", () => {
+    selectionBoxes.forEach((box) => { box.checked = selectAllBox.checked; });
+    updateSelection();
+  });
+  renumberButton?.addEventListener("click", async () => {
+    if (!canManageEmployees(user)) return;
+    const selectedIds = selectionBoxes.filter((box) => box.checked).map((box) => Number(box.dataset.timeEmployeeSelect));
+    try {
+      await hydrateTimeEmployeesFromCloud();
+      const plan = buildTimeEmployeeRenumberPlan(selectedIds);
+      const changes = plan.filter((item) => item.oldCode !== item.newCode);
+      if (!changes.length) {
+        timeEmployeeMessage = "กลุ่มที่เลือกมีหมายเลขเรียงต่อกันอยู่แล้ว";
+        timeEmployeeMessageType = "success";
+        render();
+        return;
+      }
+      const preview = changes.slice(0, 8).map((item) => `${item.oldCode} → ${item.newCode}  ${item.employee.fullname}`).join("\n");
+      const remaining = changes.length > 8 ? `\n...และอีก ${changes.length - 8} คน` : "";
+      const confirmed = window.confirm(`ตรวจสอบลำดับเลขใหม่ (${changes.length} คน)\n\n${preview}${remaining}\n\nยืนยันจัดลำดับเลขเฉพาะกลุ่มที่เลือกหรือไม่?`);
+      if (!confirmed) return;
+      renumberButton.disabled = true;
+      renumberButton.textContent = "กำลังจัดลำดับ...";
+      const changedCount = await apiRenumberTimeEmployees(plan);
+      timeEmployeeMessage = `จัดลำดับหมายเลขพนักงานสำเร็จ ${changedCount} คน`;
+      timeEmployeeMessageType = "success";
+      timeEmployeePageMode = "list";
+      render();
+    } catch (error) {
+      timeEmployeeMessage = error instanceof Error ? error.message : "จัดลำดับหมายเลขพนักงานไม่สำเร็จ";
+      timeEmployeeMessageType = "error";
+      render();
+    }
+  });
+
   document.querySelector("#timeEmployeeSearchForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     timeEmployeeSearch = String(form.get("timeEmployeeSearch") || "");
     try {
-      const data = await cloudApiRequest(`/api/time-employees?search=${encodeURIComponent(timeEmployeeSearch)}`);
+      // Keep the complete cache: group selection and collision checks need all employees.
+      const data = await cloudApiRequest("/api/time-employees");
       const cloudEmployees = Array.isArray(data.data) ? data.data.map(normalizeCloudTimeEmployee) : [];
       saveTimeEmployees(cloudEmployees);
     } catch (error) {
@@ -13857,6 +15510,10 @@ function bindTimeEmployeeEvents(user) {
   document.querySelector("#timeEmployeeForm input[name='emp_code']")?.addEventListener("input", (event) => {
     event.target.value = normalizeTimeEmployeeCodeInput(event.target.value);
   });
+  document.querySelector("#timeEmployeeForm select[name='employee_type']")?.addEventListener("change", (event) => {
+    const field = document.querySelector("[data-time-ot-rate]");
+    if (field) field.hidden = event.target.value === "office_347";
+  });
 
   document.querySelector("#timeEmployeeForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -13879,6 +15536,7 @@ function bindTimeEmployeeEvents(user) {
       emp_code: empCode,
       fullname: String(form.get("fullname") || ""),
       employee_type: String(form.get("employee_type") || "normal"),
+      recruitment_group: normalizeTimeRecruitmentGroup(form.get("recruitment_group")),
       ot_hourly_rate: Number(form.get("ot_hourly_rate")) || TIME_OT_HOURLY_RATE
     };
 
@@ -13899,6 +15557,7 @@ function bindTimeEmployeeEvents(user) {
       }
       timeEmployeeMessageType = "success";
       editingTimeEmployeeId = null;
+      timeEmployeePageMode = "list";
       render();
     } catch (error) {
       timeEmployeeMessage = error instanceof Error ? error.message : "Save failed.";
@@ -13911,6 +15570,7 @@ function bindTimeEmployeeEvents(user) {
     button.addEventListener("click", async () => {
       if (!canManageEmployees(user)) return;
       editingTimeEmployeeId = Number(button.dataset.editTimeEmployee);
+      timeEmployeePageMode = "editor";
       timeEmployeeMessage = "";
       render();
     });
@@ -14148,35 +15808,20 @@ function renderDashboard(moduleItem) {
 }
 
 function renderDashboardBars(pileSummaries, fruitFilter = summaryFruitFilter) {
-  const showGrades = fruitFilter === "all" || fruitFilter === "durian";
-  const showStandardWeights = fruitFilter !== "durian";
-  const maxValue = Math.max(
-    1,
-    ...pileSummaries.map((item) => Math.max(item.water, item.flower, item.gradeTotal || 0))
-  );
-
-  return pileSummaries
-    .map(
-      (item) => `
-        <div class="summary-bar-group">
-          <div class="summary-bars">
-            ${showStandardWeights ? `<div class="summary-bar water" style="height:${Math.max(8, (item.water / maxValue) * 100)}%">
-              <span>${numberText(item.water)}</span>
-            </div>
-            <div class="summary-bar flower" style="height:${Math.max(8, (item.flower / maxValue) * 100)}%">
-              <span>${numberText(item.flower)}</span>
-            </div>` : ""}
-            ${showGrades && (item.gradeTotal || 0) > 0 ? `<div class="summary-bar durian" style="height:${Math.max(8, ((item.gradeTotal || 0) / maxValue) * 100)}%"><span>${numberText(item.gradeTotal)}</span></div>` : ""}
-          </div>
-          <strong>กอง ${item.pile}</strong>
-        </div>`
-    )
-    .join("");
+  const keys = fruitFilter === "all" || isSingleWeightFruit(fruitFilter)
+    ? ["total"] : fruitFilter === "durian" ? ["gradeTotal"] : ["water", "flower"];
+  const maxValue = Math.max(1, ...pileSummaries.flatMap((item) => keys.map((key) => Number(item[key]) || 0)));
+  return pileSummaries.map((item) => '<div class="summary-bar-group"><div class="summary-bars">' +
+    keys.map((key) => {
+      const value = Number(item[key]) || 0;
+      const color = key === "gradeTotal" ? "durian" : key === "flower" ? "flower" : "water";
+      return '<div class="summary-bar ' + color + '" style="height:' + (value / maxValue * 100) + '%"><span>' + numberText(value) + '</span></div>';
+    }).join("") + '</div><strong>กอง ' + escapeHtml(item.pile) + '</strong></div>').join("");
 }
 
 function renderPileSummaryRow(item, fruitFilter = summaryFruitFilter) {
   const showDurianWeight = fruitFilter === "all" || fruitFilter === "durian";
-  const showStandardWeights = fruitFilter !== "durian";
+  const showStandardWeights = fruitFilter !== "durian" && (fruitFilter === "all" || !isSingleWeightFruit(fruitFilter));
   return `
     <tr>
       <td>กอง ${item.pile}</td>
@@ -14193,7 +15838,7 @@ function renderDashboardDetailRow(record, fruitFilter = summaryFruitFilter) {
   const isDurian = isDurianFruit(productionFruitTypeForRecord(record));
   const showFruit = fruitFilter === "all";
   const showDurianWeight = fruitFilter === "all" || fruitFilter === "durian";
-  const showStandardWeights = fruitFilter !== "durian";
+  const showStandardWeights = fruitFilter !== "durian" && (fruitFilter === "all" || !isSingleWeightFruit(fruitFilter));
   const pile = normalizeProductionPileNumber(record.pile_no ?? record.pile);
 
   return `
@@ -14509,12 +16154,48 @@ function renderHomePileRow(pile, maxWeight) {
 
 function homeStorageUsageView() {
   const usedBytes = Number(homeStorageUsage?.used_bytes) || 0;
-  const limitBytes = Number(homeStorageUsage?.limit_bytes) || SUPABASE_FREE_DATABASE_BYTES;
+  const limitBytes = Number(homeStorageUsage?.limit_bytes) || SUPABASE_DATABASE_INCLUDED_BYTES;
   const remainingBytes = Math.max(0, Number(homeStorageUsage?.remaining_bytes) || limitBytes - usedBytes);
   const percent = Math.min(100, Math.max(0, Number(homeStorageUsage?.percent) || 0));
   const warningPercent = Number(homeStorageUsage?.warning_percent) || BACKUP_STORAGE_WARNING_PERCENT;
   const level = percent >= warningPercent ? "critical" : percent >= 70 ? "watch" : percent >= 45 ? "moderate" : "healthy";
   return { usedBytes, limitBytes, remainingBytes, percent, warningPercent, level };
+}
+
+function homeBandwidthUsageView() {
+  const raw = homeStorageUsage?.bandwidth_usage || {};
+  const usedBytes = Number(raw.used_bytes) || 0;
+  const limitBytes = Number(raw.limit_bytes) || SUPABASE_BANDWIDTH_INCLUDED_BYTES;
+  const remainingBytes = Math.max(0, Number(raw.remaining_bytes) || limitBytes - usedBytes);
+  const percent = Math.min(100, Math.max(0, Number(raw.percent) || 0));
+  const warningPercent = Number(raw.warning_percent) || BACKUP_STORAGE_WARNING_PERCENT;
+  const configured = Boolean(raw.configured);
+  const level = percent >= warningPercent ? "critical" : percent >= 70 ? "watch" : percent >= 45 ? "moderate" : "healthy";
+  return { usedBytes, limitBytes, remainingBytes, percent, warningPercent, configured, level };
+}
+
+function renderHomeBandwidthUsage() {
+  const bandwidth = homeBandwidthUsageView();
+  const displayPercent = bandwidth.percent < 0.1 && bandwidth.usedBytes > 0
+    ? "< 0.1"
+    : bandwidth.percent.toLocaleString("th-TH", { maximumFractionDigits: 1 });
+  const fillPercent = Math.max(bandwidth.percent > 0 ? 1 : 0, bandwidth.percent);
+  const label = bandwidth.configured
+    ? `${formatBackupFileSize(bandwidth.usedBytes)} / ${formatBackupFileSize(bandwidth.limitBytes)}`
+    : "รอใส่ค่า SUPABASE_BANDWIDTH_USED_GB";
+  return `
+    <div class="home-storage-subusage is-${bandwidth.level}">
+      <div class="home-storage-subusage-head">
+        <span>Bandwidth / Egress</span>
+        <strong>${bandwidth.configured ? `${displayPercent}%` : "ยังไม่ตั้งค่า"}</strong>
+      </div>
+      <div class="home-storage-subtrack" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(bandwidth.percent)}">
+        <span style="width:${fillPercent}%"></span>
+        <i style="left:${bandwidth.warningPercent}%"></i>
+      </div>
+      <small>${escapeHtml(label)} • โควตา Pro ${formatBackupFileSize(bandwidth.limitBytes)} / รอบบิล</small>
+    </div>
+  `;
 }
 
 function renderHomeStorageUsage() {
@@ -14535,7 +16216,7 @@ function renderHomeStorageUsage() {
       <div class="home-storage-head">
         <div class="home-storage-title">
           <span class="home-storage-mark" aria-hidden="true">DB</span>
-          <div><p>SUPABASE DATABASE</p><h3>พื้นที่จัดเก็บข้อมูล</h3><small>เทียบโควต้า 500 MB • โหมดประหยัด Bandwidth อัปเดตทุก 10 นาที</small></div>
+          <div><p>SUPABASE PRO DATABASE</p><h3>พื้นที่จัดเก็บข้อมูล</h3><small>พื้นที่ฐานข้อมูล 8 GB • Delta Sync ประหยัด Bandwidth • อัปเดตทุก 10 นาที</small></div>
         </div>
         <div class="home-storage-score"><strong>${homeStorageUsageLoading ? "..." : `${displayPercent}%`}</strong><span>${homeStorageUsageError ? "ยังอ่านข้อมูลไม่ได้" : statusText}</span></div>
       </div>
@@ -14543,7 +16224,8 @@ function renderHomeStorageUsage() {
         <span style="width:${fillPercent}%"></span>
         <i style="left:${usage.warningPercent}%"><b>${usage.warningPercent}%</b></i>
       </div>
-      <div class="home-storage-scale"><span>0 MB</span><span>ระดับแจ้งเตือน</span><span>500 MB</span></div>
+      <div class="home-storage-scale"><span>0</span><span>ระดับแจ้งเตือน</span><span>${formatBackupFileSize(usage.limitBytes)}</span></div>
+      ${renderHomeBandwidthUsage()}
       <div class="home-storage-details">
         <div><span>ใช้ไปแล้ว</span><strong>${homeStorageUsage ? formatBackupFileSize(usage.usedBytes) : "-"}</strong></div>
         <div><span>พื้นที่คงเหลือ</span><strong>${homeStorageUsage ? formatBackupFileSize(usage.remainingBytes) : "-"}</strong></div>
@@ -14551,6 +16233,7 @@ function renderHomeStorageUsage() {
         <div><span>อัปเดตล่าสุด</span><strong>${measuredAt}</strong></div>
         <button class="home-storage-refresh" id="homeStorageRefresh" type="button" title="อ่านข้อมูลล่าสุดจาก Supabase" aria-label="อ่านข้อมูลพื้นที่ล่าสุด" ${homeStorageUsageLoading ? "disabled" : ""}>↻</button>
       </div>
+      <div class="home-retention-note"><strong>นโยบายข้อมูล 6 เดือน</strong><span>สำรองและตรวจสอบก่อนลบข้อมูลเก่าทุกครั้ง เพื่อไม่ให้กระทบค่าแรงและรายงานย้อนหลัง</span></div>
       ${homeStorageUsageError ? `<p class="home-storage-error">${escapeHtml(homeStorageUsageError)}</p>` : ""}
     </section>`;
 }
@@ -14623,7 +16306,7 @@ function bindHomeStorageUsageEvents() {
 }
 
 function renderDashboard(user, moduleItem) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateInputValue();
   const dateLabel = new Intl.DateTimeFormat("th-TH", {
     weekday: "long",
     year: "numeric",
@@ -14663,6 +16346,7 @@ function renderDashboard(user, moduleItem) {
           <p>ภาพรวมการทำงานประจำวัน</p>
           <time datetime="${escapeHtml(today)}">${escapeHtml(dateLabel)}</time>
         </div>
+        <div class="home-welcome-fruits" aria-hidden="true"></div>
         <div class="home-welcome-actions">
           <button class="btn btn-primary" type="button" data-route="production">
             <span aria-hidden="true">▣</span> บันทึกผลผลิต
@@ -14727,7 +16411,7 @@ function renderDashboard(user, moduleItem) {
 }
 
 function getTimeSummaryRange() {
-  const fallbackDate = new Date().toISOString().slice(0, 10);
+  const fallbackDate = localDateInputValue();
   const startDate = timeSummaryStartDate || fallbackDate;
   const endDate = timeSummaryEndDate || startDate;
 
@@ -14910,10 +16594,12 @@ function formatBaht(value) {
 }
 
 function getTimeNormalHourlyRate(record) {
+  if (record.employee_type === "office_347") return 0;
   return Number(record.normal_hourly_rate) || ((Number(record.daily_wage) || TIME_DAILY_WAGE) / TIME_STANDARD_HOURS);
 }
 
 function calculateTimeNormalWageAmount(normalHours, record = {}) {
+  if (record.employee_type === "office_347") return 0;
   const dailyWage = Number(record.daily_wage) || TIME_DAILY_WAGE;
   if (dailyWage === TIME_SPECIAL_DAILY_WAGE) {
     const roundedHalfHour = Math.round(normalHours * 2) / 2;
@@ -14931,16 +16617,31 @@ function getTimeReceiptRow(record) {
   const otMinutes = Math.max(0, netMinutes - normalMinutes);
   const normalHours = normalMinutes / 60;
   const otHours = otMinutes / 60;
-  const otHourlyRate = Number(record.ot_hourly_rate) || TIME_OT_HOURLY_RATE;
-  const normalAmount = calculateTimeNormalWageAmount(normalHours, record);
-  const otAmount = otHours * otHourlyRate;
+  const timeEmployees = typeof getTimeEmployees === "function" ? getTimeEmployees() : [];
+  const employee = timeEmployees.find((item) =>
+    (record.employee_id && String(item.id) === String(record.employee_id)) ||
+    (!record.employee_id && String(item.emp_code) === String(record.emp_code || ""))
+  );
+  const otHourlyRate = (typeof getDailyOtOverride === "function" ? getDailyOtOverride(employee || record, record.record_date) : null)
+    || Number(employee?.ot_hourly_rate)
+    || Number(record.ot_hourly_rate)
+    || TIME_OT_HOURLY_RATE;
+  const effectiveRecord = employee ? {
+    ...record,
+    employee_type: employee.employee_type,
+    daily_wage: Number(employee.daily_wage) || Number(record.daily_wage),
+    normal_hourly_rate: (Number(employee.daily_wage) || Number(record.daily_wage) || TIME_DAILY_WAGE) / TIME_STANDARD_HOURS
+  } : record;
+  const normalAmount = calculateTimeNormalWageAmount(normalHours, effectiveRecord);
+  const otAmount = effectiveRecord.employee_type === "office_347" ? 0 : otHours * otHourlyRate;
 
   return {
-    ...record,
+    ...effectiveRecord,
     normalHours,
     otHours,
     normalAmount,
     otAmount,
+    otHourlyRate,
     totalAmount: normalAmount + otAmount
   };
 }
@@ -15040,6 +16741,9 @@ function timeReceiptRowsHtml(rows) {
 
 function renderTimeReceiptPanel(group, range, logoDataUrl, copy = false) {
   const totals = group.totals;
+  if (group.rows.every((row) => row.employee_type === "office_347")) {
+    return `<section class="receipt-panel"><h2>รายงานเวลาทำงาน Office</h2><p>${escapeHtml(group.emp_code)} · ${escapeHtml(group.fullname)} · ${escapeHtml(range.startDate)} - ${escapeHtml(range.endDate)}</p><table class="receipt-table"><thead><tr><th>วันที่</th><th>เข้า</th><th>ออก</th><th>ชั่วโมงปกติ</th><th>ชั่วโมง OT</th></tr></thead><tbody>${group.rows.map((row) => `<tr><td>${escapeHtml(row.record_date)}</td><td>${escapeHtml(row.clock_in)}</td><td>${escapeHtml(row.clock_out)}</td><td>${numberText(row.normalHours)}</td><td>${numberText(row.otHours)}</td></tr>`).join("")}</tbody><tfoot><tr><td colspan="3">รวม</td><td>${numberText(totals.normalHours)}</td><td>${numberText(totals.otHours)}</td></tr></tfoot></table></section>`;
+  }
   const receiptNo = timeReceiptNumber(group.emp_code, range);
   const issuedAt = formatLiveClock();
 
@@ -15644,7 +17348,7 @@ function bindTimeSummaryEvents() {
   const form = document.querySelector("#timeSummaryForm");
   const applyFilter = () => {
     const formData = new FormData(form);
-    timeSummaryStartDate = formData.get("start_date") || new Date().toISOString().slice(0, 10);
+    timeSummaryStartDate = formData.get("start_date") || localDateInputValue();
     timeSummaryEndDate = formData.get("end_date") || timeSummaryStartDate;
     timeSummaryDepartment = formData.get("department") || "all";
     timeSummaryMessage = "";
@@ -15776,6 +17480,12 @@ function exportPersonalTimeSummary() {
 
   const summary = summarizeTimeRecords(records);
   const dailySummaries = getPersonalTimeDailySummaries(records);
+  const wageRows = combineTimeRecordsByEmployeeDate(records).map(getTimeReceiptRow);
+  const wageTotals = wageRows.reduce((totals, row) => ({
+    normal: totals.normal + row.normalAmount,
+    ot: totals.ot + row.otAmount,
+    total: totals.total + row.totalAmount
+  }), { normal: 0, ot: 0, total: 0 });
   const lines = [
     csvRow(["รายงานสรุปเวลาเข้างานรายบุคคล"]),
     csvRow(["พนักงาน", `${context.selectedEmployee.emp_code} - ${context.selectedEmployee.fullname}`]),
@@ -15789,6 +17499,9 @@ function exportPersonalTimeSummary() {
     csvRow(["ชั่วโมงสุทธิ", formatDecimalHours(summary.totalNetMinutes)]),
     csvRow(["มาสาย", summary.lateCount]),
     csvRow(["ออกก่อนเวลา", summary.earlyOutCount]),
+    csvRow(["ค่าแรงปกติ", wageTotals.normal]),
+    csvRow(["ค่า OT", wageTotals.ot]),
+    csvRow(["ค่าแรงรวม", wageTotals.total]),
     csvRow([]),
     csvRow(["สรุปรายวัน"]),
     csvRow(["วันที่", "จำนวนรายการ", "เวลาสุทธิ", "ชั่วโมงสุทธิ", "มาสาย", "ออกก่อนเวลา"])
@@ -15823,6 +17536,14 @@ function exportPersonalTimeSummary() {
       ])
     );
   });
+
+  lines.push(csvRow([]));
+  lines.push(csvRow(["สรุปค่าแรงและ OT รายวัน"]));
+  lines.push(csvRow(["วันที่", "ชั่วโมงปกติ", "ชั่วโมง OT", "OT/ชม.", "เงินปกติ", "เงิน OT", "รวม"]));
+  wageRows.forEach((row) => lines.push(csvRow([
+    row.record_date || "", row.normalHours, row.otHours, row.otHourlyRate,
+    row.normalAmount, row.otAmount, row.totalAmount
+  ])));
 
   downloadTextFile(
     `personal-time-${context.selectedEmployee.emp_code}-${context.range.startDate}-to-${context.range.endDate}.csv`,
@@ -15951,7 +17672,7 @@ function renderPersonalProductionSummaryTab(context) {
   const totals = summarizePersonalRecords(records);
   const dailySummaries = getDailyPersonalSummaries(records);
   const pileSummaries = getPilePersonalSummaries(records);
-  const isDurian = personalReportFruitFilter === "durian";
+  const isSingleWeight = isSingleWeightFruit(personalReportFruitFilter);
   const labels = getProductionFieldLabels(personalReportFruitFilter);
   const selectedFruitLabel = getProductionFruitLabel(personalReportFruitFilter);
   const dailyColumnCount = 4;
@@ -15968,8 +17689,8 @@ function renderPersonalProductionSummaryTab(context) {
       <div class="metric-card metric-green">
         <span>น้ำหนักรวม</span>
         <strong>${numberText(totals.total)} กก.</strong>
-        <small>${isDurian
-          ? `ทุเรียน ${numberText(getDurianGradeTotal(totals.grades))}`
+        <small>${isSingleWeight
+          ? `${escapeHtml(labels.weightShort || selectedFruitLabel)} ${numberText(totals.total)}`
           : `${escapeHtml(labels.waterShort)} ${numberText(totals.water)} | ${escapeHtml(labels.flowerShort)} ${numberText(totals.flower)}`}</small>
       </div>
       <div class="metric-card metric-blue">
@@ -15997,8 +17718,8 @@ function renderPersonalProductionSummaryTab(context) {
             <thead>
               <tr>
                 <th>วันที่</th>
-                ${isDurian
-                  ? `<th>น้ำหนักทุเรียน</th>`
+                ${isSingleWeight
+                  ? `<th>${escapeHtml(labels.weight || `น้ำหนัก${selectedFruitLabel}`)}</th>`
                   : `<th>${escapeHtml(labels.water)}</th><th>${escapeHtml(labels.flower)}</th>`}
                 <th>น้ำหนักรวม</th>
                 <th>รวมเป็นเงิน</th>
@@ -16023,8 +17744,8 @@ function renderPersonalProductionSummaryTab(context) {
               <tr>
                 <th>กอง</th>
                 <th>จำนวนรายการ</th>
-                ${isDurian
-                  ? `<th>น้ำหนักทุเรียน</th>`
+                ${isSingleWeight
+                  ? `<th>${escapeHtml(labels.weight || `น้ำหนัก${selectedFruitLabel}`)}</th>`
                   : `<th>${escapeHtml(labels.water)}</th><th>${escapeHtml(labels.flower)}</th>`}
                 <th>น้ำหนักรวม</th>
                 <th>รวมเป็นเงิน</th>
@@ -16050,6 +17771,14 @@ function renderPersonalTimeSummaryTab(context) {
     : [];
   const summary = summarizeTimeRecords(records);
   const dailySummaries = getPersonalTimeDailySummaries(records);
+  const wageRows = combineTimeRecordsByEmployeeDate(records).map(getTimeReceiptRow);
+  const wageTotals = wageRows.reduce((totals, row) => ({
+    normalHours: totals.normalHours + row.normalHours,
+    otHours: totals.otHours + row.otHours,
+    normalAmount: totals.normalAmount + row.normalAmount,
+    otAmount: totals.otAmount + row.otAmount,
+    totalAmount: totals.totalAmount + row.totalAmount
+  }), { normalHours: 0, otHours: 0, normalAmount: 0, otAmount: 0, totalAmount: 0 });
 
   if (!records.length) {
     return `
@@ -16065,6 +17794,8 @@ function renderPersonalTimeSummaryTab(context) {
       ${renderTimeSummaryMetricCard("เวลาสุทธิรวม", `${formatMinutesToHourText(summary.totalNetMinutes)} ชม.`, `${formatDecimalHours(summary.totalNetMinutes)} ชั่วโมง`, "metric-blue")}
       ${renderTimeSummaryMetricCard("เวลาพักรวม", `${formatMinutesToHourText(summary.totalBreakMinutes)} ชม.`, "หักจากเวลาทำงานตามกติกา", "metric-purple")}
       ${renderTimeSummaryMetricCard("สถานะเวลา", `สาย ${summary.lateCount.toLocaleString("th-TH")} / ออกก่อน ${summary.earlyOutCount.toLocaleString("th-TH")}`, "เทียบเวลา 08:00 - 17:00", "metric-orange")}
+      ${renderTimeSummaryMetricCard("ค่า OT", money(wageTotals.otAmount), `${numberText(wageTotals.otHours)} ชม.`, "metric-purple")}
+      ${renderTimeSummaryMetricCard("ค่าแรงรวม", money(wageTotals.totalAmount), `ปกติ ${money(wageTotals.normalAmount)} + OT ${money(wageTotals.otAmount)}`, "metric-green")}
     </div>
 
     <section class="time-summary-grid">
@@ -16136,6 +17867,14 @@ function renderPersonalTimeSummaryTab(context) {
         </div>
       </section>
     </section>
+
+    <section class="table-card">
+      <div class="table-heading">สรุปค่าแรงและ OT รายวัน</div>
+      <div class="table-scroll"><table>
+        <thead><tr><th>วันที่</th><th>ชม.ปกติ</th><th>ชม.OT</th><th>OT/ชม.</th><th>เงินปกติ</th><th>เงิน OT</th><th>รวม</th></tr></thead>
+        <tbody>${wageRows.map((row) => `<tr><td>${escapeHtml(row.record_date || "-")}</td><td>${numberText(row.normalHours)}</td><td>${numberText(row.otHours)}</td><td>${money(row.otHourlyRate)}</td><td>${money(row.normalAmount)}</td><td>${money(row.otAmount)}</td><td><strong>${money(row.totalAmount)}</strong></td></tr>`).join("")}</tbody>
+      </table></div>
+    </section>
   `;
 }
 
@@ -16193,14 +17932,18 @@ function bindPersonalReportEvents() {
       personalReportFruitFilter = target.value || "mangosteen";
     }
     if (target.id === "personalReportStartDate") {
-      personalReportStartDate = target.value || new Date().toISOString().slice(0, 10);
+      personalReportStartDate = target.value || localDateInputValue();
+      if (personalReportStartDate > personalReportEndDate) personalReportEndDate = personalReportStartDate;
     }
     if (target.id === "personalReportEndDate") {
       personalReportEndDate = target.value || personalReportStartDate;
+      if (personalReportEndDate < personalReportStartDate) personalReportStartDate = personalReportEndDate;
     }
     personalReportMessage = "";
-    personalReportExportMenuOpen = false;
-    render();
+    if (target.id === "personalReportEmployee" || target.id === "personalReportFruit") {
+      personalReportExportMenuOpen = false;
+    }
+    render(true);
   });
 
   document.querySelector("#togglePersonalExportMenu")?.addEventListener("click", () => {
@@ -16396,7 +18139,9 @@ function getSummaryExportFieldsForFruit(section, fruitId = summaryFruitFilter) {
   const labels = fruitId === "all"
     ? { water: "น้ำหนักช่อง 1", flower: "น้ำหนักช่อง 2" }
     : getProductionFieldLabels(fruitId);
-  const visibleFields = fruitId === "durian"
+  const visibleFields = fruitId !== "all" && isSingleWeightFruit(fruitId)
+    ? fields.filter((field) => !["water", "flower", "grades"].includes(field.key))
+    : fruitId === "durian"
     ? fields.filter((field) => !["water", "flower"].includes(field.key))
     : fruitId !== "all"
       ? fields.filter((field) => field.key !== "grades")
@@ -16420,6 +18165,13 @@ function getSummaryExportFieldSelection() {
   return selection;
 }
 
+function getProductionReportCatalog() {
+  return {
+    fruit_labels: Object.fromEntries(productionFruitOptions.map((fruit) => [fruit.id, fruit.label])),
+    fruit_fields: Object.fromEntries(productionFruitOptions.map((fruit) => [fruit.id, { ...getProductionFieldLabels(fruit.id) }]))
+  };
+}
+
 function getSummaryExportPayload(user, format) {
   const exportRange = getSummaryExportRange();
   return {
@@ -16429,8 +18181,11 @@ function getSummaryExportPayload(user, format) {
     printed_by: user?.fullname || "System Admin",
     printed_by_position: getExportPositionLabel(user),
     employees: getEmployees(),
-    production_records: getProductionRecords(),
-    deduction_records: getReportAdjustmentRecords(),
+    production_records: filterProductionRecordsByFruit(
+      getDashboardRecordsForRange(exportRange.startDate, exportRange.endDate), summaryFruitFilter
+    ),
+    ...getProductionReportCatalog(),
+    deduction_records: getAdjustmentRecordsForRange("production", exportRange.startDate, exportRange.endDate),
     export_sections: { ...summaryExportOptions },
     export_fields: getSummaryExportFieldSelection(),
     export_format: format
@@ -16452,7 +18207,8 @@ function renderSummaryAll(moduleItem) {
   const totals = getProductionTotals(records);
   const pileSummaries = getPileSummaries(records);
   const showGrades = summaryFruitFilter === "all" || summaryFruitFilter === "durian";
-  const showStandardWeights = summaryFruitFilter !== "durian";
+  const showStandardWeights = summaryFruitFilter !== "durian" && (summaryFruitFilter === "all" || !isSingleWeightFruit(summaryFruitFilter));
+  const showTotalWeight = summaryFruitFilter === "all" || isSingleWeightFruit(summaryFruitFilter);
   const showFruitColumn = summaryFruitFilter === "all";
   const fruitLabels = summaryFruitFilter === "all"
     ? { water: "น้ำหนักช่อง 1", flower: "น้ำหนักช่อง 2", waterShort: "ช่อง 1", flowerShort: "ช่อง 2" }
@@ -16538,7 +18294,9 @@ function renderSummaryAll(moduleItem) {
         <div class="metric-card metric-green">
           <span>น้ำหนักรวมทั้งหมด</span>
           <strong>${numberText(totals.total)} กก.</strong>
-          <small>${summaryFruitFilter === "durian"
+          <small>${showTotalWeight
+            ? `น้ำหนักรวม ${numberText(totals.total)} กก.`
+            : summaryFruitFilter === "durian"
             ? `ทุเรียน ${numberText(getDurianGradeTotal(totals.grades))} กก.`
             : `${escapeHtml(fruitLabels.waterShort || "น้ำ")} ${numberText(totals.water)} กก. | ${escapeHtml(fruitLabels.flowerShort || "ดอก")} ${numberText(totals.flower)} กก.${showGrades ? ` | ทุเรียน ${numberText(getDurianGradeTotal(totals.grades))} กก.` : ""}`}</small>
         </div>
@@ -16564,8 +18322,9 @@ function renderSummaryAll(moduleItem) {
           <div class="section-title-row">
             <h3>กราฟเปรียบเทียบน้ำหนัก</h3>
             <div class="chart-legend">
-              ${showStandardWeights ? `<span><i class="legend-water"></i>${escapeHtml(fruitLabels.waterShort || "น้ำ")}</span><span><i class="legend-flower"></i>${escapeHtml(fruitLabels.flowerShort || "ดอก")}</span>` : ""}
-              ${showGrades ? `<span><i class="legend-durian"></i>น้ำหนักทุเรียน</span>` : ""}
+              ${showTotalWeight ? `<span><i class="legend-water"></i>น้ำหนักรวม</span>` : ""}
+              ${showStandardWeights && !showTotalWeight ? `<span><i class="legend-water"></i>${escapeHtml(fruitLabels.waterShort || "น้ำ")}</span><span><i class="legend-flower"></i>${escapeHtml(fruitLabels.flowerShort || "ดอก")}</span>` : ""}
+              ${showGrades && !showTotalWeight ? `<span><i class="legend-durian"></i>น้ำหนักทุเรียน</span>` : ""}
             </div>
           </div>
           <div class="summary-chart">
@@ -17062,9 +18821,9 @@ function getTimeGroupReportRecords() {
 
   return combineTimeRecordsByEmployeeDate(records)
     .map((record) => {
-      const employee =
-        employeeMap.get(String(record.employee_id || "")) ||
-        employeeCodeMap.get(String(record.emp_code || ""));
+      const employee = record.employee_id
+        ? employeeMap.get(String(record.employee_id))
+        : employeeCodeMap.get(String(record.emp_code || ""));
       if (!employee) return null;
 
       const typeOption = getTimeEmployeeTypeOption(employee.employee_type || record.employee_type);
@@ -17134,7 +18893,7 @@ function summarizeTimeGroupReportRows(records) {
     summary.normal_amount += Number(record.normal_amount) || 0;
     summary.ot_amount += Number(record.ot_amount) || 0;
     summary.amount += Number(record.total_amount) || 0;
-    if (!summary.deductedEmployees.has(employeeKey)) {
+    if (record.employee_type !== "office_347" && !summary.deductedEmployees.has(employeeKey)) {
       summary.deductedEmployees.add(employeeKey);
       summary.deduction_amount += getDeductionTotalForEmployee(
         "time",
@@ -17195,6 +18954,12 @@ function getTimeGroupReportEmployeeRows(records) {
     row.ot_hours += Number(record.ot_hours) || 0;
     row.amount += Number(record.total_amount) || 0;
     row.net_amount = Math.max(0, Number(row.amount || 0) + Number(row.bonus_amount || 0) - Number(row.deduction_amount || 0));
+    if (record.employee_type === "office_347") {
+      row.amount = 0;
+      row.bonus_amount = 0;
+      row.deduction_amount = 0;
+      row.net_amount = 0;
+    }
   });
   return Array.from(rows.values()).sort((a, b) =>
     `${a.pay_group} ${a.emp_code}`.localeCompare(`${b.pay_group} ${b.emp_code}`, "th")
@@ -17280,6 +19045,7 @@ function renderGroupReportDetailRow(record) {
 }
 
 function renderTimeGroupReportSummaryRow(row) {
+  if (row.pay_group === "กลุ่ม Office") return `<tr><td>${escapeHtml(row.pay_group)}</td><td>${row.employees.size}</td><td>${row.records}</td><td>${escapeHtml(formatMinutesToHourText(row.net_minutes))}</td><td>${numberText(row.normal_hours)}</td><td>${numberText(row.ot_hours)}</td><td colspan="4">—</td></tr>`;
   return `
     <tr>
       <td><strong>${escapeHtml(row.pay_group)}</strong></td>
@@ -17297,6 +19063,7 @@ function renderTimeGroupReportSummaryRow(row) {
 }
 
 function renderTimeGroupReportEmployeeRow(row) {
+  if (row.pay_group === "กลุ่ม Office") return `<tr><td>${escapeHtml(row.pay_group)}</td><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${row.records}</td><td>${escapeHtml(formatMinutesToHourText(row.net_minutes))}</td><td>${numberText(row.normal_hours)}</td><td>${numberText(row.ot_hours)}</td><td colspan="4">—</td></tr>`;
   return `
     <tr>
       <td>${escapeHtml(row.pay_group)}</td>
@@ -17315,6 +19082,7 @@ function renderTimeGroupReportEmployeeRow(row) {
 }
 
 function renderTimeGroupReportDetailRow(record) {
+  if (record.employee_type === "office_347") return `<tr><td>${escapeHtml(record.record_date)}</td><td>กลุ่ม Office</td><td>${escapeHtml(record.emp_code)}</td><td>${escapeHtml(record.fullname)}</td><td>${escapeHtml(record.clock_in)}</td><td>${escapeHtml(record.clock_out)}</td><td>ปกติ ${numberText(record.normal_hours)} ชม. · OT ${numberText(record.ot_hours)} ชม.</td><td colspan="2">—</td></tr>`;
   return `
     <tr>
       <td>${escapeHtml(record.record_date || "-")}</td>
@@ -17469,6 +19237,7 @@ function renderSummaryGroupReport(moduleItem) {
             </label>
           `}
           <button class="btn btn-primary" type="submit">แสดงข้อมูล</button>
+          <button class="btn btn-outline" id="refreshGroupReport" type="button">รีเฟรชข้อมูลจากฐานกลาง</button>
         </form>
       </section>
 
@@ -17484,6 +19253,7 @@ function renderSummaryGroupReport(moduleItem) {
           <label><input type="checkbox" data-group-export-option="details" ${groupReportExportOptions.details ? "checked" : ""} /> รายละเอียดรายการ</label>
         </div>
         <button class="btn btn-primary summary-export-button" id="toggleGroupReportExportMenu" type="button">Export</button>
+        ${isTimeReport ? "" : `<button class="btn btn-outline summary-export-button" id="exportGroupRawExcel" type="button">Export ข้อมูลดิบ</button>`}
         ${
           groupReportExportMenuOpen
             ? `
@@ -17580,6 +19350,7 @@ function getGroupReportPayload(user, format) {
     fruit_type: groupReportFruit,
     group_label: groupReportGroup === "all" ? "ทุกกลุ่ม" : groupReportGroup,
     fruit_label: getProductionFruitLabel(groupReportFruit),
+    ...getProductionReportCatalog(),
     view_mode: groupReportView,
     export_options: { ...groupReportExportOptions },
     withholding_tax_groups: getProductionWithholdingTaxGroups(),
@@ -17677,7 +19448,45 @@ async function exportGroupReport(user, format) {
   render();
 }
 
+async function exportGroupRawExcel(user) {
+  const records = getGroupReportRecords();
+  if (!records.length) {
+    groupReportMessage = "ไม่มีข้อมูลตามตัวกรองที่เลือก จึงยัง Export ข้อมูลดิบไม่ได้";
+    groupReportMessageType = "error";
+    render();
+    return;
+  }
+  groupReportMessage = "กำลังสร้างไฟล์ Excel ข้อมูลดิบจากการกรอกแบบชุด...";
+  groupReportMessageType = "success";
+  render();
+  try {
+    await downloadReport(`${REPORT_API_BASE}/reports/group-report-raw-excel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(getGroupReportPayload(user, "excel"))
+    });
+    groupReportMessage = "Export ข้อมูลดิบจากการกรอกแบบชุดเรียบร้อยแล้ว";
+    groupReportMessageType = "success";
+  } catch (error) {
+    groupReportMessage = error instanceof Error ? error.message : "Export ข้อมูลดิบไม่สำเร็จ";
+    groupReportMessageType = "error";
+  }
+  render();
+}
+
 function bindSummaryGroupReportEvents(user) {
+  document.querySelector("#refreshGroupReport")?.addEventListener("click", async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      await refreshSavedRecordView(groupReportMode);
+      groupReportMessage = "รีเฟรชข้อมูลจากฐานกลางแล้ว";
+      groupReportMessageType = "success";
+    } catch (error) {
+      groupReportMessage = error.message || "รีเฟรชไม่สำเร็จ";
+      groupReportMessageType = "error";
+    }
+    render();
+  });
   document.querySelectorAll("[data-group-report-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       groupReportMode = button.dataset.groupReportMode || "production";
@@ -17692,7 +19501,7 @@ function bindSummaryGroupReportEvents(user) {
 
   document.querySelector("#groupReportForm")?.addEventListener("change", (event) => {
     const form = new FormData(event.currentTarget);
-    groupReportStartDate = form.get("start_date") || new Date().toISOString().slice(0, 10);
+    groupReportStartDate = form.get("start_date") || localDateInputValue();
     groupReportEndDate = form.get("end_date") || groupReportStartDate;
     groupReportGroup = form.get("pay_group") || "all";
     groupReportFruit = groupReportMode === "time" ? "all" : form.get("fruit_type") || "all";
@@ -17721,6 +19530,7 @@ function bindSummaryGroupReportEvents(user) {
 
   document.querySelector("#exportGroupReportPdf")?.addEventListener("click", () => exportGroupReport(user, "pdf"));
   document.querySelector("#exportGroupReportExcel")?.addEventListener("click", () => exportGroupReport(user, "excel"));
+  document.querySelector("#exportGroupRawExcel")?.addEventListener("click", () => exportGroupRawExcel(user));
 }
 
 let inboundData = { fruits: [], prices: [], receipts: [] };
@@ -17729,6 +19539,12 @@ let inboundLoading = false;
 let inboundMessage = "";
 let inboundMessageType = "success";
 let inboundConfirmPayload = null;
+let inboundView = "overview";
+let inboundEntryDraft = null;
+let inboundInventory = { ready: false, balances: [], issues: [], error: "" };
+let inboundIssueDraft = null;
+let inboundIssuePending = null;
+let inboundIssueBusy = false;
 let inboundFilters = { from: "", to: "", supplier: "", fruit: "", search: "" };
 let inboundSelectedReceiptIds = new Set();
 
@@ -17745,7 +19561,7 @@ function inboundActiveFruits() {
   return inboundData.fruits.filter((fruit) => fruit.status === "Active");
 }
 
-function inboundRecommendedPrice(fruitId, dateValue = new Date().toISOString().slice(0, 10)) {
+function inboundRecommendedPrice(fruitId, dateValue = localDateInputValue()) {
   return inboundData.prices
     .filter((price) => Number(price.fruit_id) === Number(fruitId) && String(price.effective_date) <= dateValue)
     .sort((a, b) => `${b.effective_date}|${b.created_at}`.localeCompare(`${a.effective_date}|${a.created_at}`))[0] || null;
@@ -17762,6 +19578,7 @@ function inboundLatestSupplierReceipt(supplier, fruitId) {
 async function loadInboundData(force = false) {
   if (inboundLoading || (inboundLoaded && !force)) return;
   inboundLoading = true;
+  inboundInventory.ready = false;
   try {
     const result = await cloudApiRequest("/api/inbound/bootstrap", { timeoutMs: 20000 });
     inboundData = result.data || { fruits: [], prices: [], receipts: [] };
@@ -17769,6 +19586,14 @@ async function loadInboundData(force = false) {
     inboundSelectedReceiptIds = new Set([...inboundSelectedReceiptIds].filter((id) => availableIds.has(id)));
     inboundLoaded = true;
     inboundMessage = "";
+    try {
+      const snapshot = (await cloudApiRequest("/api/inbound/inventory", { timeoutMs: 20000 })).data;
+      if (!snapshot || !Array.isArray(snapshot.balances) || !Array.isArray(snapshot.issues)) throw new Error("ข้อมูลยอดคงเหลือไม่ครบ กรุณาโหลดใหม่");
+      if (snapshot.issue_schema_version !== 2) throw new Error("กรุณารัน supabase_fruit_stock_issues_migration.sql ฉบับแก้ไขล่าสุด แล้วโหลดข้อมูลใหม่");
+      inboundInventory = { ...snapshot, ready: true, error: "" };
+    } catch (error) {
+      inboundInventory = { ready: false, balances: [], issues: [], error: error.message || "โหลดสต็อกคงเหลือไม่สำเร็จ" };
+    }
   } catch (error) {
     inboundMessage = error.message || "โหลดข้อมูลรับเข้าไม่สำเร็จ";
     inboundMessageType = "error";
@@ -17780,11 +19605,27 @@ async function loadInboundData(force = false) {
 }
 
 function renderInboundHeader(title, subtitle, user, active = "entry") {
-  const canManage = Number(String(getUserLevel(user)).replace(/\D/g, "")) >= 5;
-  return `<header class="inbound-page-head"><div><p class="eyebrow">INBOUND COST</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(subtitle)}</p></div><div class="inbound-head-actions">
-    <button class="btn btn-outline ${active === "manage" ? "is-active" : ""}" data-route="inbound-fruits" type="button" ${canManage ? "" : "disabled"}>จัดการผลไม้ / ราคาแนะนำ</button>
-    <button class="btn btn-outline ${active === "history" ? "is-active" : ""}" data-route="inbound-history" type="button">รายการรับเข้า</button>
-  </div></header>`;
+  const canManage = canOpen(user, "inbound-fruits");
+  const selected = active === "entry" ? inboundView : active;
+  return `${renderStockNavigation("general")}<header class="sl-header"><div class="sl-heading"><span class="sl-icon" aria-hidden="true">◉</span><div><p class="sl-eyebrow">PF STOCK / FRUIT</p><h2>Stock ผลไม้</h2><p>${escapeHtml(subtitle)}</p></div></div><div class="sl-header-actions"><span class="sl-access">รับเข้า · เบิกของ · ราคาซื้อจริง</span><button class="sl-button" data-inbound-refresh type="button" ${inboundLoading ? "disabled" : ""}>${inboundLoading ? "กำลังโหลด…" : "↻ โหลดข้อมูลใหม่"}</button></div></header>
+    ${inboundLoaded ? renderInboundMetrics() : ""}
+    <div class="sl-toolbar"><nav class="sl-tabs" aria-label="หน้าข้อมูล Stock ผลไม้">
+      ${[["overview", "ภาพรวม"], ["entry", "รับเข้า"], ["issue", "เบิกของ"]].map(([view, label]) => `<button class="${selected === view ? "is-active" : ""}" data-inbound-view="${view}" type="button" ${selected === view ? 'aria-current="page"' : ""}>${label}</button>`).join("")}
+      <button class="${selected === "history" ? "is-active" : ""}" data-route="inbound-history" type="button" ${selected === "history" ? 'aria-current="page"' : ""}>ประวัติทั้งหมด</button>
+      <button class="${selected === "manage" ? "is-active" : ""}" data-route="inbound-fruits" type="button" ${selected === "manage" ? 'aria-current="page"' : ""} ${canManage ? "" : "disabled"}>ผลไม้ / ราคาแนะนำ</button>
+    </nav>${canWriteStock(user) && canManage ? '<button class="sl-button is-primary" data-inbound-add-fruit type="button">+ เพิ่มรายการผลไม้</button>' : ""}</div>`;
+}
+
+function renderInboundMetrics() {
+  const receipts = inboundData.receipts;
+  const received = receipts.reduce((sum,row)=>sum+Number(row.weight_kg||0),0);
+  const issued = inboundInventory.ready ? inboundInventory.balances.reduce((sum,row)=>sum+Number(row.issued_weight||0),0) : null;
+  return `<div class="sl-metrics"><article><span>รายการผลไม้</span><strong>${inboundData.fruits.length} <small>ชนิด</small></strong></article><article><span>รับเข้าสะสม</span><strong>${inboundMoney(received)} <small>กก.</small></strong></article><article><span>เบิกสะสม</span><strong>${issued===null?'—':inboundMoney(issued)} <small>กก.</small></strong></article><article><span>คงเหลือ</span><strong>${inboundInventory.ready?inboundMoney(inboundInventory.balances.reduce((sum,row)=>sum+Number(row.balance_weight||0),0)):'—'} <small>กก.</small></strong></article></div>`;
+}
+
+function renderInboundOverview(user) {
+  const rows = inboundInventory.ready ? inboundInventory.balances : inboundData.fruits.map(fruit=>({fruit_id:fruit.id,fruit_name:fruit.name,received_weight:inboundData.receipts.filter(r=>String(r.fruit_id)===String(fruit.id)).reduce((sum,r)=>sum+Number(r.weight_kg||0),0)}));
+  return `${renderInboundHeader("Stock ผลไม้", "รับเข้า · เบิกของ · จำนวนคงเหลือ", user)}${renderInboundStatus()}${inboundInventory.ready?renderInboundBalances():`<section class="sl-panel"><h3>สรุปรับเข้าตามผลไม้</h3><p>${escapeHtml(inboundInventory.error||"ยังไม่มียอดคงเหลือที่ยืนยันได้")}</p><div class="sl-table-scroll"><table class="sl-table"><thead><tr><th>ผลไม้</th><th>รับเข้า (กก.)</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${escapeHtml(r.fruit_name)}</td><td>${inboundMoney(r.received_weight)}</td></tr>`).join("")}</tbody></table></div></section>`}${renderInboundIssueHistory()}`;
 }
 
 function renderInboundStatus() {
@@ -17792,14 +19633,112 @@ function renderInboundStatus() {
   return `<div class="inbound-alert ${inboundMessageType === "error" ? "is-error" : "is-success"}" role="alert">${escapeHtml(inboundMessage)}</div>`;
 }
 
+function renderInboundBalances() {
+  return `<section class="sl-panel"><div class="sl-panel-head"><div><h3>ยอดคงเหลือผลไม้</h3><p>รวมรับเข้าและหักเบิกแล้ว · ตรวจสอบจำนวนตามล็อตที่เหลือ</p></div></div><div class="sl-table-scroll" tabindex="0"><table class="sl-table"><thead><tr><th>ผลไม้</th><th>รับเข้า (กก.)</th><th>เบิก (กก.)</th><th>คงเหลือ (กก.)</th></tr></thead><tbody>${inboundInventory.balances.map(row => `<tr><td>${escapeHtml(row.fruit_name)}</td><td>${inboundMoney(row.received_weight)}</td><td>${inboundMoney(row.issued_weight)}</td><td><strong class="sl-balance">${inboundMoney(row.balance_weight)}</strong></td></tr>`).join("") || '<tr><td colspan="4">ยังไม่มีรายการผลไม้</td></tr>'}</tbody></table></div></section>`;
+}
+
+function renderInboundIssueHistory() {
+  if (!inboundInventory.ready) return "";
+  return `<section class="sl-panel"><div class="sl-panel-head"><div><h3>ประวัติเบิกผลไม้</h3><p>รายการเบิกทั้งหมด · เก็บผู้รับ ผู้บันทึก และจำนวนที่เบิก</p></div></div><div class="sl-table-scroll" tabindex="0"><table class="sl-table"><thead><tr><th>เลขรายการ / วันที่</th><th>ผลไม้</th><th>ผู้รับ / แผนก</th><th>น้ำหนัก (กก.)</th><th>ผู้บันทึก</th><th>หมายเหตุ</th></tr></thead><tbody>${inboundInventory.issues.map(row => `<tr><td>#${escapeHtml(String(row.id))}<br>${escapeHtml(new Date(row.issued_at).toLocaleString("th-TH", { timeZone: "Asia/Bangkok" }))}</td><td>${escapeHtml(row.fruit_name)}</td><td>${escapeHtml(row.recipient)}</td><td>${inboundMoney(row.weight_kg)}</td><td>${escapeHtml(row.created_by || "—")}</td><td>${escapeHtml(row.note || "—")}</td></tr>`).join("") || '<tr><td colspan="6">ยังไม่มีรายการเบิก</td></tr>'}</tbody></table></div></section>`;
+}
+
+let inboundIssueOwner = "";
+function inboundIssueStorageKey(user) {
+  return `pismai-fruit-issue-pending:${user.id || user.username}`;
+}
+
+function renderInboundIssue(user) {
+  const key = inboundIssueStorageKey(user);
+  if (inboundIssueOwner !== key) {
+    inboundIssueOwner = key;
+    inboundIssueDraft = null;
+    inboundIssuePending = null;
+  }
+  try { inboundIssuePending = JSON.parse(sessionStorage.getItem(key) || "null"); } catch (_) { /* Keep an in-memory retry when storage is unavailable. */ }
+  const draft = inboundIssuePending || inboundIssueDraft || {};
+  const locked = inboundIssueBusy || !!inboundIssuePending;
+  const disabled = !canWriteStock(user) || !inboundInventory.ready || inboundLoading || inboundIssueBusy;
+  const fruits = inboundInventory.balances.filter(row => Number(row.balance_weight) > 0 || String(row.fruit_id) === String(draft.fruit_id));
+  return `${renderInboundHeader("Stock ผลไม้", "เบิกผลไม้ให้ผู้รับหรือแผนก โดยตัดล็อตรับเข้าเก่าก่อน", user)}${renderInboundStatus()}
+    ${!inboundInventory.ready ? `<div class="inbound-alert is-error" role="alert">${escapeHtml(inboundInventory.error || "กำลังโหลดสต็อกคงเหลือ")}</div>` : ""}
+    ${inboundIssuePending ? '<div class="inbound-alert" role="status">มีรายการที่รอตรวจสอบผลบันทึก กดลองบันทึกเดิมอีกครั้ง ระบบใช้รหัสเดิมเพื่อไม่ตัดยอดซ้ำ</div>' : ""}
+    ${canWriteStock(user) ? `<section class="panel inbound-entry-card"><h3>เบิกผลไม้</h3><form id="inboundIssueForm" class="inbound-entry-form">
+      <label class="field"><span>วันที่เบิก</span><input name="issued_at" type="datetime-local" value="${escapeHtml(draft.issued_at ? inboundIssueLocalTime(draft.issued_at) : inboundLocalDateTime())}" required ${locked ? "disabled" : ""}></label>
+      <label class="field"><span>ผู้รับ / แผนก</span><input name="recipient" maxlength="160" value="${escapeHtml(draft.recipient || "")}" required ${locked ? "disabled" : ""}></label>
+      <label class="field"><span>ผลไม้</span><select name="fruit_id" required ${locked ? "disabled" : ""}><option value="">เลือกผลไม้</option>${fruits.map(row => `<option value="${escapeHtml(String(row.fruit_id))}" ${String(row.fruit_id) === String(draft.fruit_id) ? "selected" : ""}>${escapeHtml(row.fruit_name)} · เหลือ ${inboundMoney(row.balance_weight)} กก.</option>`).join("")}</select></label>
+      <label class="field"><span>น้ำหนักเบิก (กก.)</span><input name="weight_kg" type="number" min="0.01" max="100000000" step="0.01" value="${escapeHtml(String(draft.weight_kg || ""))}" required ${locked ? "disabled" : ""}></label>
+      <label class="field inbound-note"><span>หมายเหตุ / วัตถุประสงค์</span><textarea name="note" maxlength="1000" rows="3" ${locked ? "disabled" : ""}>${escapeHtml(draft.note || "")}</textarea></label>
+      <p class="inbound-note">ตรวจยอดตามวันที่เบิกอีกครั้งก่อนบันทึก · ต้นทุนคำนวณจากล็อตรับเข้า ไม่เพิ่มค่าใช้จ่ายซ้ำใน PF Accounting</p>
+      <div class="inbound-entry-actions"><button class="btn btn-primary" type="submit" ${disabled ? "disabled" : ""}>${inboundIssueBusy ? "กำลังบันทึก…" : inboundIssuePending ? "ลองบันทึกเดิมอีกครั้ง" : "บันทึกเบิกผลไม้"}</button></div>
+    </form></section>` : '<p class="stock-hub-note">การเบิกผลไม้ใช้สิทธิ์ C4 ขึ้นไป</p>'}${renderInboundIssueHistory()}`;
+}
+
+function inboundIssueLocalTime(value) {
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+function bindInboundIssueEvents(user) {
+  const form = document.querySelector("#inboundIssueForm");
+  if (!form || !canWriteStock(user)) return;
+  form.addEventListener("input", () => { if (!inboundIssuePending) inboundIssueDraft = Object.fromEntries(new FormData(form)); });
+  form.addEventListener("change", () => { if (!inboundIssuePending) inboundIssueDraft = Object.fromEntries(new FormData(form)); });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (inboundIssueBusy || inboundLoading || !inboundInventory.ready) return;
+    const key = inboundIssueStorageKey(user);
+    if (!inboundIssuePending) {
+      const draft = Object.fromEntries(new FormData(form));
+      const weight = Number(draft.weight_kg);
+      const balance = inboundInventory.balances.find(row => String(row.fruit_id) === String(draft.fruit_id));
+      inboundIssueDraft = draft;
+      if (!balance || !Number.isFinite(weight) || weight <= 0 || weight > Number(balance.balance_weight)) {
+        inboundMessage = "น้ำหนักเบิกต้องมากกว่า 0 และไม่เกินยอดคงเหลือ"; inboundMessageType = "error"; render(); return;
+      }
+      inboundIssuePending = { ...draft, fruit_id: Number(draft.fruit_id), weight_kg: weight, issued_at: new Date(draft.issued_at).toISOString(), client_uid: `fruit-issue-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16)).join("")}`}` };
+      try { sessionStorage.setItem(key, JSON.stringify(inboundIssuePending)); } catch (_) { /* In-memory retries retain the same ID. */ }
+    }
+    const pending = { ...inboundIssuePending };
+    inboundIssueBusy = true;
+    render();
+    try {
+      await cloudApiRequest("/api/inbound/issues", { method: "POST", body: JSON.stringify(pending), timeoutMs: 20000 });
+      try { sessionStorage.removeItem(key); } catch (_) { /* Storage may be unavailable. */ }
+      inboundIssuePending = null;
+      inboundIssueDraft = null;
+      await loadInboundData(true);
+      inboundMessage = "บันทึกเบิกผลไม้สำเร็จ";
+      inboundMessageType = "success";
+    } catch (error) {
+      if ([400, 404, 409].includes(error.status)) {
+        inboundIssueDraft = { ...pending, issued_at: inboundIssueLocalTime(pending.issued_at) };
+        inboundIssuePending = null;
+        try { sessionStorage.removeItem(key); } catch (_) { /* Storage may be unavailable. */ }
+      }
+      inboundMessage = error.message || "ยังตรวจสอบผลบันทึกไม่ได้ กรุณาลองรายการเดิมอีกครั้ง";
+      inboundMessageType = "error";
+    } finally {
+      inboundIssueBusy = false;
+      if (["inbound", "inbound-history", "inbound-fruits"].includes(location.hash.replace("#/", ""))) render();
+    }
+  });
+}
+
 function renderInboundEntry(user) {
   if (!inboundLoaded) {
     loadInboundData();
-    return `${renderInboundHeader("รับเข้า", "บันทึกผลไม้ น้ำหนัก ราคาจริง และต้นทุนของแต่ละรายการ", user)}<section class="panel inbound-loading">กำลังโหลดข้อมูลรับเข้า...</section>`;
+    return `${renderInboundHeader("Stock ผลไม้", "บันทึกผลไม้ น้ำหนัก ราคาจริง และต้นทุนของแต่ละรายการ", user)}<section class="panel inbound-loading">กำลังโหลดข้อมูลรับเข้า...</section>`;
+  }
+  if (inboundView === "overview") return renderInboundOverview(user);
+  if (inboundView === "issue") return renderInboundIssue(user);
+  if (!canWriteStock(user)) {
+    const weight = inboundData.receipts.reduce((sum, row) => sum + Number(row.weight_kg || 0), 0);
+    const amount = inboundData.receipts.reduce((sum, row) => sum + Number(row.total_amount || 0), 0);
+    return `${renderInboundHeader("Stock ผลไม้", "ดูข้อมูลรับเข้าผลไม้ ผู้ส่ง น้ำหนัก และราคาจริง", user)}${renderInboundStatus()}<div class="stock-hub-note">สิทธิ์ C3 ดูข้อมูลและส่งออกรายงานได้ การรับเข้าหรือเปลี่ยนราคาใช้สิทธิ์ C4 ขึ้นไป</div><section class="inbound-metrics"><div><span>น้ำหนักรับเข้าสะสม</span><strong>${inboundMoney(weight)}</strong><small>กก. · ไม่ใช่ยอดคงเหลือหลังเบิกผลิต</small></div><div><span>รายการรับเข้า</span><strong>${inboundData.receipts.length.toLocaleString("th-TH")}</strong><small>รายการ</small></div></section>`;
   }
   const fruits = inboundActiveFruits();
   const suppliers = [...new Set(inboundData.receipts.map((row) => row.supplier_name).filter(Boolean))].sort((a, b) => a.localeCompare(b, "th"));
-  return `${renderInboundHeader("รับเข้า", "ผลไม้ชนิดเดียวกันสามารถรับจากคนละผู้ส่งในราคาที่ต่างกันได้", user)}${renderInboundStatus()}
+  return `${renderInboundHeader("Stock ผลไม้", "รับเข้าผลไม้จากผู้ส่ง พร้อมน้ำหนัก ราคาจริง และต้นทุนที่เชื่อม PF Accounting", user)}${renderInboundStatus()}
     <section class="panel inbound-entry-card">
       <form id="inboundEntryForm" class="inbound-entry-form">
         <label class="field"><span>วันที่รับเข้า</span><input name="received_at" type="datetime-local" value="${inboundLocalDateTime()}" required /></label>
@@ -17808,11 +19747,11 @@ function renderInboundEntry(user) {
         <div class="inbound-price-hint" id="inboundPriceHint">เลือกผู้ส่งและผลไม้เพื่อดูราคาล่าสุดหรือราคาแนะนำ</div>
         <label class="field"><span>น้ำหนัก (กก.)</span><input name="weight_kg" type="number" min="0.01" max="100000000" step="0.01" inputmode="decimal" placeholder="0.00" required /></label>
         <label class="field"><span>ราคาต่อกิโล <small>แก้ไขได้</small></span><div class="inbound-price-input"><input name="price_per_kg" type="number" min="0.01" max="1000000" step="0.01" inputmode="decimal" placeholder="0.00" required /><b>ราคาของรายการนี้</b></div></label>
-        <div class="inbound-total"><span>ยอดเงิน</span><strong id="inboundCalculatedTotal">0.00</strong><b>บาท</b><small id="inboundFormula">0.00 กก. × 0.00 บาท = 0.00 บาท</small></div>
+        <p class="inbound-note">กรอกราคาตามเอกสารรับเข้า ข้อมูลการเงินจะแสดงใน PF Accounting</p>
         <label class="field inbound-note"><span>หมายเหตุ</span><textarea name="note" maxlength="1000" rows="3" placeholder="รายละเอียดที่ต้องการจดจำ (ไม่บังคับ)"></textarea></label>
         <div class="inbound-entry-actions"><button class="btn btn-outline" type="reset">ล้างข้อมูล</button><button class="btn btn-primary" type="submit" ${fruits.length ? "" : "disabled"}>ตรวจสอบก่อนบันทึก</button></div>
       </form>
-      ${fruits.length ? "" : `<div class="inbound-empty-callout">ยังไม่มีผลไม้ที่เปิดใช้งาน ผู้มีสิทธิ์ C5 ขึ้นไปต้องเพิ่มผลไม้และตั้งราคาแนะนำก่อน</div>`}
+      ${fruits.length ? "" : `<div class="inbound-empty-callout">ยังไม่มีผลไม้ที่เปิดใช้งาน ผู้มีสิทธิ์ C4 ขึ้นไปต้องเพิ่มผลไม้และตั้งราคาแนะนำก่อน</div>`}
     </section>
     ${inboundConfirmPayload ? renderInboundConfirmation() : ""}`;
 }
@@ -17821,7 +19760,7 @@ function renderInboundConfirmation() {
   const row = inboundConfirmPayload;
   return `<div class="inbound-modal-backdrop" data-close-inbound-confirm><section class="inbound-confirm" role="dialog" aria-modal="true" aria-labelledby="inboundConfirmTitle" data-inbound-confirm-panel>
     <button class="inbound-modal-close" data-close-inbound-confirm type="button">×</button><h3 id="inboundConfirmTitle">ตรวจสอบรายการ</h3><p>กรุณาตรวจสอบก่อนบันทึกลงฐานข้อมูลกลาง</p>
-    <dl><div><dt>ผู้ส่ง</dt><dd>${escapeHtml(row.supplier_name)}</dd></div><div><dt>ผลไม้</dt><dd>${escapeHtml(row.fruit_name)}</dd></div><div><dt>น้ำหนัก</dt><dd>${inboundMoney(row.weight_kg)} กก.</dd></div><div><dt>ราคาจริง</dt><dd>${inboundMoney(row.price_per_kg)} บาท/กก.</dd></div><div class="is-total"><dt>ยอดเงิน</dt><dd>${inboundMoney(row.total_amount)} บาท</dd></div></dl>
+    <dl><div><dt>ผู้ส่ง</dt><dd>${escapeHtml(row.supplier_name)}</dd></div><div><dt>ผลไม้</dt><dd>${escapeHtml(row.fruit_name)}</dd></div><div><dt>น้ำหนัก</dt><dd>${inboundMoney(row.weight_kg)} กก.</dd></div></dl>
     <div class="inbound-lock-note">ราคานี้จะถูกเก็บถาวรกับรายการ และไม่เปลี่ยนตามราคาแนะนำในอนาคต</div>
     <div class="inbound-confirm-actions"><button class="btn btn-outline" data-close-inbound-confirm type="button">กลับไปแก้ไข</button><button class="btn btn-primary" id="confirmInboundSave" type="button">ยืนยันบันทึกรับเข้า</button></div>
   </section></div>`;
@@ -17829,12 +19768,13 @@ function renderInboundConfirmation() {
 
 function renderInboundFruitManagement(user) {
   if (!inboundLoaded) { loadInboundData(); return `${renderInboundHeader("จัดการผลไม้ / ราคาแนะนำ", "ราคานี้เป็นค่าเริ่มต้นและผู้บันทึกแก้ราคาจริงได้", user, "manage")}<section class="panel inbound-loading">กำลังโหลดข้อมูล...</section>`; }
+  if (!canWriteStock(user)) return `${renderInboundHeader("ผลไม้ / ราคาแนะนำ", "ดูราคาแนะนำปัจจุบัน การตั้งราคาใหม่ใช้สิทธิ์ C4 ขึ้นไป", user, "manage")}${renderInboundStatus()}<section class="panel"><div class="inbound-fruit-list">${inboundData.fruits.map(fruit => { const price = inboundRecommendedPrice(fruit.id); return `<article><strong>${escapeHtml(fruit.name)}</strong><small>${price ? `เริ่มใช้ ${escapeHtml(price.effective_date)}` : ""}</small></article>`; }).join("") || '<p class="empty-cell">ยังไม่มีผลไม้</p>'}</div></section>`;
   const fruits = inboundData.fruits;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateInputValue();
   return `${renderInboundHeader("จัดการผลไม้ / ราคาแนะนำ", "ราคาแนะนำช่วยกรอกเร็วขึ้น แต่ไม่บังคับราคาของรายการรับเข้า", user, "manage")}${renderInboundStatus()}
     <section class="inbound-management-grid">
       <div class="panel inbound-master-panel"><h3>เพิ่มผลไม้ใหม่</h3><form id="inboundFruitForm" class="inbound-inline-form"><label class="field"><span>ชื่อผลไม้</span><input name="name" maxlength="100" placeholder="เช่น มังคุด" required /></label><button class="btn btn-primary" type="submit">เพิ่มผลไม้</button></form>
-        <div class="inbound-fruit-list"><h3>ผลไม้และราคาปัจจุบัน</h3>${fruits.map((fruit) => { const price = inboundRecommendedPrice(fruit.id, today); return `<article><div><strong>${escapeHtml(fruit.name)}</strong><span class="badge">${fruit.status === "Active" ? "ใช้งาน" : "เลิกใช้งาน"}</span></div><b>${price ? `${inboundMoney(price.price_per_kg)} บาท/กก.` : "ยังไม่มีราคาแนะนำ"}</b><small>${price ? `เริ่มใช้ ${escapeHtml(price.effective_date)}` : "ตั้งราคาเพื่อช่วยกรอกอัตโนมัติ"}</small><button class="btn btn-outline" data-price-fruit="${fruit.id}" type="button">ตั้งราคาใหม่</button></article>`; }).join("") || `<p class="empty-cell">ยังไม่มีผลไม้</p>`}</div>
+        <div class="inbound-fruit-list"><h3>รายการผลไม้</h3>${fruits.map((fruit) => { const price = inboundRecommendedPrice(fruit.id, today); return `<article><div><strong>${escapeHtml(fruit.name)}</strong><span class="badge">${fruit.status === "Active" ? "ใช้งาน" : "เลิกใช้งาน"}</span></div><small>${price ? `เริ่มใช้ ${escapeHtml(price.effective_date)}` : "ตั้งราคาเพื่อช่วยกรอกอัตโนมัติ"}</small><button class="btn btn-outline" data-price-fruit="${fruit.id}" type="button">ตั้งราคาใหม่</button></article>`; }).join("") || `<p class="empty-cell">ยังไม่มีผลไม้</p>`}</div>
       </div>
       <div class="panel inbound-price-panel"><h3>ตั้งราคาแนะนำใหม่</h3><p>ราคาเก่าจะยังอยู่ในประวัติ และไม่กระทบรายการที่บันทึกแล้ว</p><form id="inboundPriceForm">
         <label class="field"><span>ผลไม้</span><select name="fruit_id" required><option value="">เลือกผลไม้</option>${inboundActiveFruits().map((fruit) => `<option value="${fruit.id}">${escapeHtml(fruit.name)}</option>`).join("")}</select></label>
@@ -17864,13 +19804,13 @@ function renderInboundHistory(user) {
   const suppliers = [...new Set(inboundData.receipts.map((row) => row.supplier_name).filter(Boolean))].sort((a, b) => a.localeCompare(b, "th"));
   const selectedRows = inboundData.receipts.filter((row) => inboundSelectedReceiptIds.has(Number(row.id)));
   const allVisibleSelected = rows.length > 0 && rows.every((row) => inboundSelectedReceiptIds.has(Number(row.id)));
-  return `${renderInboundHeader("รายการรับเข้า", "ผลไม้ชนิดเดียวกันสามารถรับคนละราคาได้ โดยเก็บราคาจริงแยกทุกรายการ", user, "history")}${renderInboundStatus()}
-    <section class="inbound-metrics"><div><span>น้ำหนักตามตัวกรอง</span><strong>${inboundMoney(totalWeight)}</strong><small>กก.</small></div><div><span>ยอดเงินตามตัวกรอง</span><strong>${inboundMoney(totalAmount)}</strong><small>บาท</small></div><div><span>จำนวนรายการ</span><strong>${rows.length.toLocaleString("th-TH")}</strong><small>รายการ</small></div></section>
+  return `${renderInboundHeader("รายการรับเข้า", "ตรวจสอบรายการรับเข้าผลไม้ ผู้ส่ง และจำนวนย้อนหลัง", user, "history")}${renderInboundStatus()}
+    <section class="inbound-metrics"><div><span>น้ำหนักตามตัวกรอง</span><strong>${inboundMoney(totalWeight)}</strong><small>กก.</small></div><div><span>จำนวนรายการ</span><strong>${rows.length.toLocaleString("th-TH")}</strong><small>รายการ</small></div></section>
     <section class="panel inbound-history-panel"><form id="inboundFilterForm" class="inbound-filters"><label><span>จากวันที่</span><input name="from" type="date" value="${escapeHtml(inboundFilters.from)}" /></label><label><span>ถึงวันที่</span><input name="to" type="date" value="${escapeHtml(inboundFilters.to)}" /></label><label><span>ผู้ส่ง</span><select name="supplier"><option value="">ทั้งหมด</option>${suppliers.map((name) => `<option ${inboundFilters.supplier === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label><label><span>ผลไม้</span><select name="fruit"><option value="">ทั้งหมด</option>${inboundData.fruits.map((fruit) => `<option value="${fruit.id}" ${inboundFilters.fruit === String(fruit.id) ? "selected" : ""}>${escapeHtml(fruit.name)}</option>`).join("")}</select></label><label class="is-search"><span>ค้นหา</span><input name="search" type="search" value="${escapeHtml(inboundFilters.search)}" placeholder="ชื่อผู้ส่ง หรือหมายเหตุ" /></label><button class="btn btn-primary" type="submit">ค้นหา</button><button class="btn btn-outline" id="clearInboundFilters" type="button">ล้างตัวกรอง</button></form>
       <div class="inbound-selection-bar"><div><strong>เลือกแล้ว <span id="inboundSelectedCount">${selectedRows.length.toLocaleString("th-TH")}</span> รายการ</strong><small>รายการที่ติ๊กจะถูกรวมอยู่ในฟอร์มเดียวกัน</small></div><div><button class="btn btn-outline" id="printSelectedInbound" type="button" ${selectedRows.length ? "" : "disabled"}>พิมพ์</button><button class="btn btn-outline" id="exportSelectedInboundExcel" type="button" ${selectedRows.length ? "" : "disabled"}>Excel</button><button class="btn btn-primary" id="exportSelectedInboundPdf" type="button" ${selectedRows.length ? "" : "disabled"}>PDF</button></div></div>
-      <div class="inbound-info-strip">ข้อมูลราคาที่แสดงคือราคาจริง ณ ตอนรับเข้า และจะไม่เปลี่ยนตามราคาแนะนำใหม่</div>
-      <div class="table-scroll"><table class="inbound-table"><thead><tr><th class="inbound-check-cell"><input id="selectAllInboundVisible" type="checkbox" ${allVisibleSelected ? "checked" : ""} aria-label="เลือกทุกรายการที่แสดง" /></th><th>วันเวลา</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th class="is-price">ราคา/กก.</th><th>ยอดเงิน</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row) => `<tr class="${inboundSelectedReceiptIds.has(Number(row.id)) ? "is-selected" : ""}"><td class="inbound-check-cell"><input class="inbound-row-check" type="checkbox" value="${Number(row.id)}" ${inboundSelectedReceiptIds.has(Number(row.id)) ? "checked" : ""} aria-label="เลือกรายการรับเข้า ${Number(row.id)}" /></td><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td><strong>${escapeHtml(row.supplier_name)}</strong></td><td>${escapeHtml(row.fruit_name)}</td><td class="number-cell">${inboundMoney(row.weight_kg)}</td><td class="number-cell is-price"><strong>${inboundMoney(row.price_per_kg)}</strong></td><td class="number-cell"><strong>${inboundMoney(row.total_amount)}</strong></td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("") || `<tr><td colspan="9" class="empty-cell">ไม่พบรายการรับเข้า</td></tr>`}</tbody><tfoot><tr><th></th><th colspan="3">รวมทั้งหมด</th><th>${inboundMoney(totalWeight)} กก.</th><th></th><th>${inboundMoney(totalAmount)} บาท</th><th colspan="2">${rows.length.toLocaleString("th-TH")} รายการ</th></tr></tfoot></table></div>
-    </section>`;
+      <div class="inbound-info-strip">แสดงจำนวนรับเข้าและประวัติการทำงาน · รายละเอียดการเงินอยู่ใน PF Accounting</div>
+      <div class="table-scroll"><table class="inbound-table"><thead><tr><th class="inbound-check-cell"><input id="selectAllInboundVisible" type="checkbox" ${allVisibleSelected ? "checked" : ""} aria-label="เลือกทุกรายการที่แสดง" /></th><th>วันเวลา</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row) => `<tr class="${inboundSelectedReceiptIds.has(Number(row.id)) ? "is-selected" : ""}"><td class="inbound-check-cell"><input class="inbound-row-check" type="checkbox" value="${Number(row.id)}" ${inboundSelectedReceiptIds.has(Number(row.id)) ? "checked" : ""} aria-label="เลือกรายการรับเข้า ${Number(row.id)}" /></td><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td><strong>${escapeHtml(row.supplier_name)}</strong></td><td>${escapeHtml(row.fruit_name)}</td><td class="number-cell">${inboundMoney(row.weight_kg)}</td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("") || `<tr><td colspan="7" class="empty-cell">ไม่พบรายการรับเข้า</td></tr>`}</tbody><tfoot><tr><th></th><th colspan="3">รวมทั้งหมด</th><th>${inboundMoney(totalWeight)} กก.</th><th colspan="2">${rows.length.toLocaleString("th-TH")} รายการ</th></tr></tfoot></table></div>
+    </section>${renderInboundIssueHistory()}`;
 }
 
 function inboundSelectedRows() {
@@ -17889,7 +19829,7 @@ function printSelectedInboundReceipts() {
     render();
     return;
   }
-  popup.document.write(`<!doctype html><html lang="th"><head><meta charset="utf-8"><title>รายการรับเข้าที่เลือก</title><style>@page{size:A4 landscape;margin:12mm}body{font-family:"Sarabun","Noto Sans Thai",sans-serif;color:#1f2937}h1{margin:0;color:#0f766e;font-size:22px}p{margin:4px 0 14px;color:#667085}table{width:100%;border-collapse:collapse;font-size:10px}th,td{padding:7px;border:1px solid #cfd6df;vertical-align:top}th{color:#fff;background:#0f766e}td.num{text-align:right}tfoot td{font-weight:700;background:#ecfdf3}.meta{display:flex;justify-content:space-between}.no-print{margin-bottom:12px}@media print{.no-print{display:none}}</style></head><body><button class="no-print" onclick="window.print()">พิมพ์เอกสาร</button><div class="meta"><div><h1>ฟอร์มรวมรายการรับเข้าที่เลือก</h1><p>Pitsamai Frozen Fruits • ${rows.length.toLocaleString("th-TH")} รายการ</p></div><p>พิมพ์เมื่อ ${escapeHtml(new Date().toLocaleString("th-TH"))}</p></div><table><thead><tr><th>#</th><th>วันเวลา</th><th>เลขที่</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th>ราคา/กก.</th><th>ยอดเงิน</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td>IN-${String(row.id).padStart(6, "0")}</td><td>${escapeHtml(row.supplier_name)}</td><td>${escapeHtml(row.fruit_name)}</td><td class="num">${inboundMoney(row.weight_kg)}</td><td class="num">${inboundMoney(row.price_per_kg)}</td><td class="num">${inboundMoney(row.total_amount)}</td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("")}</tbody><tfoot><tr><td colspan="5">รวม ${rows.length.toLocaleString("th-TH")} รายการ</td><td class="num">${inboundMoney(totalWeight)} กก.</td><td></td><td class="num">${inboundMoney(totalAmount)} บาท</td><td colspan="2"></td></tr></tfoot></table></body></html>`);
+  popup.document.write(`<!doctype html><html lang="th"><head><meta charset="utf-8"><title>รายการรับเข้าที่เลือก</title><style>@page{size:A4 landscape;margin:12mm}body{font-family:"Sarabun","Noto Sans Thai",sans-serif;color:#1f2937}h1{margin:0;color:#0f766e;font-size:22px}p{margin:4px 0 14px;color:#667085}table{width:100%;border-collapse:collapse;font-size:10px}th,td{padding:7px;border:1px solid #cfd6df;vertical-align:top}th{color:#fff;background:#0f766e}td.num{text-align:right}tfoot td{font-weight:700;background:#ecfdf3}.meta{display:flex;justify-content:space-between}.no-print{margin-bottom:12px}@media print{.no-print{display:none}}</style></head><body><button class="no-print" onclick="window.print()">พิมพ์เอกสาร</button><div class="meta"><div><h1>ฟอร์มรวมรายการรับเข้าที่เลือก</h1><p>Pitsamai Frozen Fruits • ${rows.length.toLocaleString("th-TH")} รายการ</p></div><p>พิมพ์เมื่อ ${escapeHtml(new Date().toLocaleString("th-TH"))}</p></div><table><thead><tr><th>#</th><th>วันเวลา</th><th>เลขที่</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td>IN-${String(row.id).padStart(6, "0")}</td><td>${escapeHtml(row.supplier_name)}</td><td>${escapeHtml(row.fruit_name)}</td><td class="num">${inboundMoney(row.weight_kg)}</td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("")}</tbody><tfoot><tr><td colspan="5">รวม ${rows.length.toLocaleString("th-TH")} รายการ</td><td class="num">${inboundMoney(totalWeight)} กก.</td><td colspan="2"></td></tr></tfoot></table></body></html>`);
   popup.document.close();
   popup.focus();
   window.setTimeout(() => popup.print(), 250);
@@ -17915,29 +19855,46 @@ async function exportSelectedInbound(format) {
 }
 
 function bindInboundEvents(user, route) {
+  document.querySelector("[data-inbound-refresh]")?.addEventListener("click", () => loadInboundData(true));
+  document.querySelectorAll("[data-inbound-view]").forEach(button => button.addEventListener("click", () => {
+    inboundView = button.dataset.inboundView;
+    if (location.hash === "#/inbound") render(); else location.hash = "#/inbound";
+  }));
+  document.querySelector("[data-inbound-add-fruit]")?.addEventListener("click", () => {
+    if (route !== "inbound-fruits") location.hash = "#/inbound-fruits";
+    else document.querySelector('#inboundFruitForm input[name="name"]')?.focus();
+  });
   if (!inboundLoaded) return;
+  if (!canWriteStock(user) && route !== "inbound-history") return;
   if (route === "inbound") {
+    bindInboundIssueEvents(user);
     const form = document.querySelector("#inboundEntryForm");
+    if (form && inboundEntryDraft) {
+      Object.entries(inboundEntryDraft).forEach(([key, value]) => { if (form.elements.namedItem(key)) form.elements.namedItem(key).value = value; });
+      form.elements.price_per_kg.dataset.edited = "1";
+    }
+    const remember = () => { if (form) inboundEntryDraft = Object.fromEntries(new FormData(form)); };
+    form?.addEventListener("input", remember);
+    form?.addEventListener("change", () => queueMicrotask(remember));
     const calculate = () => {
       const weight = Number(form?.elements.weight_kg.value || 0), price = Number(form?.elements.price_per_kg.value || 0), total = Math.round(weight * price * 100) / 100;
       const totalNode = document.querySelector("#inboundCalculatedTotal"), formula = document.querySelector("#inboundFormula");
       if (totalNode) totalNode.textContent = inboundMoney(total); if (formula) formula.textContent = `${inboundMoney(weight)} กก. × ${inboundMoney(price)} บาท = ${inboundMoney(total)} บาท`;
     };
+    calculate();
     const suggest = () => {
-      if (!form) return; const fruitId = form.elements.fruit_id.value, supplier = form.elements.supplier_name.value.trim(), date = String(form.elements.received_at.value).slice(0, 10);
-      const prior = inboundLatestSupplierReceipt(supplier, fruitId), recommended = inboundRecommendedPrice(fruitId, date), chosen = prior || recommended;
+      if (!form) return;
       const hint = document.querySelector("#inboundPriceHint");
-      if (chosen && !form.elements.price_per_kg.dataset.edited) form.elements.price_per_kg.value = Number(chosen.price_per_kg).toFixed(2);
-      if (hint) hint.textContent = prior ? `ครั้งล่าสุด: ${supplier} รับผลไม้นี้ราคา ${inboundMoney(prior.price_per_kg)} บาท/กก. — ใช้ราคานี้หรือแก้ไขได้` : recommended ? `ราคาแนะนำปัจจุบัน ${inboundMoney(recommended.price_per_kg)} บาท/กก. — แก้ไขราคาของรายการนี้ได้` : "ยังไม่มีราคาแนะนำ กรุณากรอกราคาจริงของรายการนี้";
+      if (hint) hint.textContent = "กรอกราคาจริงตามเอกสารของรายการนี้";
       calculate();
     };
     form?.elements.fruit_id.addEventListener("change", () => { form.elements.price_per_kg.dataset.edited = ""; suggest(); });
     form?.elements.supplier_name.addEventListener("change", suggest); form?.elements.received_at.addEventListener("change", suggest);
     form?.elements.weight_kg.addEventListener("input", calculate); form?.elements.price_per_kg.addEventListener("input", () => { form.elements.price_per_kg.dataset.edited = "1"; calculate(); });
-    form?.addEventListener("reset", () => window.setTimeout(() => { form.elements.received_at.value = inboundLocalDateTime(); calculate(); }, 0));
+    form?.addEventListener("reset", () => { inboundEntryDraft = null; window.setTimeout(() => { form.elements.received_at.value = inboundLocalDateTime(); form.elements.price_per_kg.dataset.edited = ""; calculate(); }, 0); });
     form?.addEventListener("submit", (event) => { event.preventDefault(); const data = new FormData(form), fruit = inboundData.fruits.find((item) => String(item.id) === String(data.get("fruit_id"))); const weight = Number(data.get("weight_kg")), price = Number(data.get("price_per_kg")); if (!fruit || !String(data.get("supplier_name")).trim() || weight <= 0 || price <= 0) return; inboundConfirmPayload = { received_at: new Date(String(data.get("received_at"))).toISOString(), supplier_name: String(data.get("supplier_name")).trim(), fruit_id: Number(fruit.id), fruit_name: fruit.name, weight_kg: weight, price_per_kg: price, total_amount: Math.round(weight * price * 100) / 100, note: String(data.get("note") || "") }; render(); });
     document.querySelectorAll("[data-close-inbound-confirm]").forEach((node) => node.addEventListener("click", (event) => { if (event.target.closest("[data-inbound-confirm-panel]") && !event.target.hasAttribute("data-close-inbound-confirm")) return; inboundConfirmPayload = null; render(); }));
-    document.querySelector("#confirmInboundSave")?.addEventListener("click", async (event) => { const button = event.currentTarget; button.disabled = true; button.textContent = "กำลังบันทึก..."; try { const payload = { ...inboundConfirmPayload, client_uid: `inbound-${Date.now()}-${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)}` }; delete payload.fruit_name; delete payload.total_amount; await cloudApiRequest("/api/inbound/receipts", { method: "POST", body: JSON.stringify(payload), timeoutMs: 20000 }); inboundConfirmPayload = null; inboundMessage = "บันทึกรายการรับเข้าสำเร็จ"; inboundMessageType = "success"; await loadInboundData(true); } catch (error) { inboundMessage = error.message; inboundMessageType = "error"; render(); } });
+    document.querySelector("#confirmInboundSave")?.addEventListener("click", async (event) => { const button = event.currentTarget; button.disabled = true; button.textContent = "กำลังบันทึก..."; try { const payload = { ...inboundConfirmPayload, client_uid: `inbound-${Date.now()}-${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)}` }; delete payload.fruit_name; delete payload.total_amount; await cloudApiRequest("/api/inbound/receipts", { method: "POST", body: JSON.stringify(payload), timeoutMs: 20000 }); inboundConfirmPayload = null; inboundEntryDraft = null; inboundMessage = "บันทึกรายการรับเข้าสำเร็จ"; inboundMessageType = "success"; await loadInboundData(true); } catch (error) { inboundMessage = error.message; inboundMessageType = "error"; render(); } });
   }
   if (route === "inbound-fruits") {
     document.querySelector("#inboundFruitForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const button = event.currentTarget.querySelector("button"); button.disabled = true; try { await cloudApiRequest("/api/inbound/fruits", { method: "POST", body: JSON.stringify({ name: new FormData(event.currentTarget).get("name") }) }); inboundMessage = "เพิ่มผลไม้สำเร็จ"; inboundMessageType = "success"; await loadInboundData(true); } catch (error) { inboundMessage = error.message; inboundMessageType = "error"; render(); } });
@@ -17963,17 +19920,25 @@ function bindInboundEvents(user, route) {
 }
 
 window.addEventListener("hashchange", render);
+document.addEventListener("focusout", () => {
+  window.setTimeout(() => {
+    if (timeRenderPending && !isEditingFormField()) renderConfirmedTimeChange();
+  }, 0);
+});
 window.addEventListener("focus", () => {
   refreshOnlineUsers();
+  refreshSharedFruitPiles();
   refreshLiveStateFromCloud({ renderWhenIdle: true });
   window.SecretRoom?.refreshNotifications?.();
 });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     refreshOnlineUsers();
+    refreshSharedFruitPiles();
     refreshLiveStateFromCloud({ renderWhenIdle: true });
     window.SecretRoom?.refreshNotifications?.();
   }
 });
 startLiveClock();
+startTimeChangeWatch();
 render();

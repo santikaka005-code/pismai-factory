@@ -493,6 +493,9 @@ do $$ declare table_name text; begin
 end $$;
 grant usage,select on all sequences in schema public to service_role;
 grant execute on function public.ac_assert_balanced(uuid) to service_role;
+-- SECURITY DEFINER mutations must pass the web server's signed-session checks.
+revoke execute on function public.ac_post_journal(uuid,text) from public, anon, authenticated;
+revoke execute on function public.ac_close_period(uuid,text) from public, anon, authenticated;
 grant execute on function public.ac_post_journal(uuid,text) to service_role;
 grant execute on function public.ac_close_period(uuid,text) to service_role;
 

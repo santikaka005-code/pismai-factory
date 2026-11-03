@@ -1,0 +1,17 @@
+#hipRosterDialog { width:min(850px,94vw); max-height:90vh; overflow:auto; padding:24px; border:1px solid #bad1c7; border-radius:16px; color:#183f35; background:white; }
+#hipRosterDialog::backdrop { background:#132b36aa; }
+#hipRosterDialog .scanner-head, #hipRosterDialog .hip-roster-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; }
+#hipRosterDialog h2 { font-size:22px; margin:0; }
+#hipRosterDialog button, #hipRosterDialog input { font:inherit; padding:9px 12px; border:1px solid #a6bcb4; border-radius:8px; }
+#hipRosterDialog button { cursor:pointer; background:#edf7f1; color:#183f35; }
+#hipRosterDialog button:disabled { opacity:.5; cursor:default; }
+#hipRosterDialog label { display:flex; flex-direction:column; gap:8px; margin:16px 0; }
+#hipRosterDialog .scanner-table { max-height:42vh; overflow:auto; margin-top:12px; }
+#hipRosterDialog table { width:100%; border-collapse:collapse; }
+#hipRosterDialog th, #hipRosterDialog td { text-align:left; padding:10px; border-bottom:1px solid #dce7e1; }
+#hipRosterDialog th { position:sticky; top:0; background:#edf7f1; }
+#hipRosterDialog input[type=checkbox] { width:20px; height:20px; accent-color:#147d68; }
+#hipRosterDialog [data-download] { background:#147d68; color:white; }
+#hipRosterDialog [data-message] { white-space:pre-wrap; }
+#hipRosterDialog .hip-roster-download { display:flex; justify-content:center; padding:12px 0; position:sticky; bottom:0; background:white; }
+#hipRosterDialog [data-download] { min-width:220px; font-weight:600; padding:12px 24px; }

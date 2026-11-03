@@ -49,7 +49,7 @@
   `id, employee_id, emp_code, pile_no, water_weight, flower_weight, water_rate, flower_rate, water_amount, flower_amount, total_amount, record_date, record_time, created_by, updated_by, status, created_at, updated_at`
 - จำลอง API สำหรับ fast input:
   `apiGetEmployeeByCode`, `apiCreateProductionRecord`, `apiGetLatestProductionRecords`, `apiCheckProductionDuplicate`
-- Fast Input รองรับ pile no 1-5, ค้นหาพนักงานอัตโนมัติเมื่อกรอก code ครบ 5 ตัว, Ctrl+S เพื่อบันทึก, Esc เพื่อล้างฟอร์ม, Enter เพื่อไปช่องถัดไป
+- Fast Input รองรับ pile no 1-6, ค้นหาพนักงานอัตโนมัติเมื่อกรอก code ครบ 5 ตัว, Ctrl+S เพื่อบันทึก, Esc เพื่อล้างฟอร์ม, Enter เพื่อไปช่องถัดไป
 - หลังบันทึกจะคง pile no เดิม ล้าง employee code / water / flower และ focus กลับไปที่ employee code
 - แสดง latest production records 10 รายการ
 - Report Export สำหรับ Admin และ HR

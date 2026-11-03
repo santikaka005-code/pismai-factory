@@ -1,0 +1,49 @@
+#scannerImportDialog { width: min(1100px, 96vw); max-height: 90vh; overflow: auto; border: 1px solid #ccd5dd; border-radius: 16px; padding: 24px; color: #183029; background: #fff; }
+#scannerImportDialog::backdrop { background: #132b36aa; }
+#scannerImportDialog .scanner-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+#scannerImportDialog label { display: inline-flex; flex-direction: column; gap: 5px; margin: 8px; }
+#scannerImportDialog input, #scannerImportDialog select, #scannerImportDialog button { font: inherit; padding: 8px; border: 1px solid #a6bcb4; border-radius: 6px; }
+#scannerImportDialog button { cursor: pointer; margin: 4px; background: #eff8f4; }
+#scannerImportDialog button:disabled { opacity: .5; cursor: default; }
+#scannerImportDialog [data-message] { background: #fff4d3; padding: 12px; white-space: pre-wrap; }
+#scannerImportDialog [data-message]:empty { display: none; }
+#scannerImportDialog .scanner-table { overflow: auto; max-height: 48vh; }
+#scannerImportDialog table { width: 100%; border-collapse: collapse; }
+#scannerImportDialog th, #scannerImportDialog td { padding: 10px; border-bottom: 1px solid #dce7e1; text-align: left; vertical-align: top; }
+#scannerImportDialog pre { max-height: 250px; overflow: auto; background: #f3f6f5; padding: 12px; }
+.time-data-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.time-page .btn.time-data-button { width: auto; min-width: 0; min-height: 34px; padding: 6px 10px; font-size: 12px; line-height: 1.4; border-radius: 8px; white-space: nowrap; }
+.time-remote-badge { font-size: 10px; color: #6b6244; background: #fff1c8; border-radius: 4px; padding: 2px 4px; margin-left: 3px; }
+#scannerRemoteDialog { box-sizing: border-box; width: min(560px, 94vw); max-height: 90vh; overflow: auto; border: 1px solid #ccd5dd; border-radius: 16px; padding: 24px; color: #183029; background: #fff; }
+#scannerRemoteDialog::backdrop { background: #132b36aa; }
+#scannerRemoteDialog .scanner-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#scannerRemoteDialog h2 { font-size: 20px; margin: 0; }
+#scannerRemoteDialog label { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; }
+#scannerRemoteDialog input, #scannerRemoteDialog button { font: inherit; padding: 8px 10px; border: 1px solid #b6c9c0; border-radius: 8px; }
+#scannerRemoteDialog .scanner-connection-status { padding: 10px; background: #fff4d3; border-radius: 8px; }
+#scannerRemoteDialog .scanner-local-note { color: #5c6f66; font-size: 13px; }
+#scannerRemoteDialog .scanner-remote-footer { display: flex; flex-wrap: wrap; gap: 8px; }
+#scannerRemoteDialog button:disabled { opacity: .5; cursor: not-allowed; }
+#scannerRemoteDialog .scanner-empty { margin-top: 18px; padding: 16px; background: #edf7f1; border-radius: 10px; }
+#scannerRemoteDialog .scanner-remote-table { max-height: 300px; overflow: auto; margin-top: 14px; }
+#scannerRemoteDialog table { width: 100%; border-collapse: collapse; }
+#scannerRemoteDialog td, #scannerRemoteDialog th { padding: 8px; text-align: left; border-bottom: 1px solid #dce7e1; }
+.time-data-panel { padding: 24px; background: linear-gradient(130deg, #f2faf7, #fff 65%); border: 1px solid #d6e6df; }
+.time-data-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
+.time-data-heading h3 { font-size: 24px; margin: 4px 0 8px; color: #183f35; }
+.time-data-heading p { color: #62746d; margin: 0; }
+.time-data-date { min-width: 180px; }
+.time-data-tools { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.time-data-tool { display: flex; flex-direction: column; align-items: flex-start; padding: 20px; background: #fff; border: 1px solid #dfeae5; border-radius: 14px; }
+.time-data-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: #eaf5ef; color: #267458; font-size: 24px; }
+.time-data-tool h4 { margin: 14px 0 8px; color: #25483b; }
+.time-data-tool p { flex: 1; margin: 0 0 18px; font-size: 13px; line-height: 1.7; color: #62746d; }
+.time-data-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; padding-top: 20px; font-size: 13px; color: #587064; }
+.time-data-summary strong { color: #21654a; }
+.time-data-summary small { margin-left: auto; }
+@media (max-width: 760px) {
+  .time-data-heading { align-items: stretch; flex-direction: column; }
+  .time-data-tools { grid-template-columns: 1fr; }
+  .time-data-panel { padding: 16px; }
+  .time-data-summary small { margin-left: 0; width: 100%; }
+}

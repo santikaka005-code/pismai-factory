@@ -2,6 +2,44 @@
   "use strict";
 
   const LOCAL_KEY = "pismai_pf_payment_allocations_v1";
+  let deductionsExpanded = false;
+  let stockExpanded = false;
+  let financeExpanded = false;
+  const canAccessStockSummary = user => ["C6", "C7"].includes(user?.level);
+  const stockViews = ["stock-overview", "stock-cold", "stock-packaging", "stock-prices"];
+  function stockSidebar(view) {
+    return `<button type="button" data-pf-toggle-stock aria-expanded="${stockExpanded}" aria-controls="pf-stock-submenu" class="acr-parent"><span>▣</span><span>สรุปสต็อก</span><span class="acr-chevron">${stockExpanded ? "▾" : "▸"}</span></button><div id="pf-stock-submenu" class="acr-submenu" ${stockExpanded ? "" : "hidden"}>${[["stock-overview", "ภาพรวมมูลค่า"], ["stock-cold", "ห้องเย็น"], ["stock-packaging", "บรรจุภัณฑ์"], ["stock-prices", "ตั้งราคาขาย"]].map(([id, label]) => `<button type="button" data-view="${id}" class="${view === id ? "active" : ""}" ${view === id ? 'aria-current="page"' : ""}>${label}</button>`).join("")}</div>`;
+  }
+  function sidebar({ view = "", deductionTab = "", accounting = true, deductions = true, user = null } = {}) {
+    const links = [["allocation", "▦", "จัดสรรเงินจ่าย"], ["export", "⇩", "Export / พิมพ์"], ["percentage", "%", "ปรับเปอร์เซ็นต์"], ["graph", "▥", "กราฟเปรียบเทียบ"], ["cost", "⌁", "วิเคราะห์ต้นทุน"], ["billing", "+", "เปิดบิล"], ["document-editor", "▤", "ปรับแต่งเอกสาร"]];
+    return `<aside class="acr-rail acr-stable-rail"><div class="acr-logo">PF</div><div class="acr-rail-brand">PF Accounting<small>จัดการเงินและรอบจ่าย</small></div><nav aria-label="เมนู PF Accounting">${deductions ? `<button type="button" data-pf-toggle-deductions aria-expanded="${deductionsExpanded}" aria-controls="pf-deduction-submenu" class="acr-parent ${deductionTab ? "is-current" : ""}"><span aria-hidden="true">−</span><span>บันทึกหักเงิน/เบี้ยขยัน</span><span class="acr-chevron" aria-hidden="true">${deductionsExpanded ? "▾" : "▸"}</span></button><div id="pf-deduction-submenu" class="acr-submenu" ${deductionsExpanded ? "" : "hidden"}>${[["production", "หักเงิน"], ["bonus", "ลงเบี้ยขยัน"], ["daily-ot", "ปรับ OT รายวัน"], ["approval", "อนุมัติหักเงิน"]].map(([tab, label]) => `<button type="button" data-deduction-tab="${tab}" class="${deductionTab === tab || tab === "production" && deductionTab === "time" ? "active" : ""}" ${deductionTab === tab || tab === "production" && deductionTab === "time" ? 'aria-current="page"' : ""}>${label}</button>`).join("")}</div>` : ""}${accounting ? `<button type="button" data-pf-toggle-finance aria-expanded="${financeExpanded}" aria-controls="pf-finance-submenu" class="acr-parent"><span aria-hidden="true">฿</span><span>การเงิน</span><span class="acr-chevron" aria-hidden="true">${financeExpanded ? "▾" : "▸"}</span></button><div id="pf-finance-submenu" class="acr-submenu" ${financeExpanded ? "" : "hidden"}>${links.map(([id, icon, label]) => `<button type="button" data-view="${id}" class="${view === id ? "active" : ""}" ${view === id ? 'aria-current="page"' : ""}><span aria-hidden="true">${icon}</span><span>${label}</span></button>`).join("")}</div>` : ""}${accounting && canAccessStockSummary(user) ? stockSidebar(view) : ""}</nav><button class="acr-exit" type="button" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside>`;
+  }
+  function bindSidebar(root) {
+    root.querySelector("[data-pf-toggle-finance]")?.addEventListener("click", (event) => {
+      financeExpanded = !financeExpanded;
+      event.currentTarget.setAttribute("aria-expanded", String(financeExpanded));
+      const submenu = root.querySelector("#pf-finance-submenu");
+      if (submenu) submenu.hidden = !financeExpanded;
+      const arrow = event.currentTarget.querySelector(".acr-chevron");
+      if (arrow) arrow.textContent = financeExpanded ? "▾" : "▸";
+    });
+    root.querySelector("[data-pf-toggle-stock]")?.addEventListener("click", (event) => {
+      stockExpanded = !stockExpanded;
+      event.currentTarget.setAttribute("aria-expanded", String(stockExpanded));
+      const submenu = root.querySelector("#pf-stock-submenu");
+      if (submenu) submenu.hidden = !stockExpanded;
+      const arrow = event.currentTarget.querySelector(".acr-chevron");
+      if (arrow) arrow.textContent = stockExpanded ? "▾" : "▸";
+    });
+    root.querySelector("[data-pf-toggle-deductions]")?.addEventListener("click", (event) => {
+      deductionsExpanded = !deductionsExpanded;
+      event.currentTarget.setAttribute("aria-expanded", String(deductionsExpanded));
+      const submenu = root.querySelector("#pf-deduction-submenu");
+      if (submenu) submenu.hidden = !deductionsExpanded;
+      const arrow = event.currentTarget.querySelector(".acr-chevron");
+      if (arrow) arrow.textContent = deductionsExpanded ? "▾" : "▸";
+    });
+  }
   const levelNumber = (user) => Number(String(user?.level || "C1").replace(/\D/g, "")) || 1;
   const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
   const money = (value) => `฿${(Number(value) || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -31,6 +69,46 @@
     return currentWeek();
   }
 
+  function createBillingPrototype() {
+    if (window.PfColdSales) {
+      const live = window.PfColdSales.create();
+      const preview = window.PfBillingPrototype?.create();
+      return {attach(el) {
+        el.innerHTML = '<div class="acr-page"><div data-live-bills></div><details class="pfb-no-print"><summary>ระบบตัวอย่างเดิม: ใบเสร็จ / ลูกค้า / บริษัท / ภาษี (ไม่เชื่อมบิลจริง)</summary><div data-preview-bills></div></details></div>';
+        live.attach(el.querySelector('[data-live-bills]'));
+        preview?.attach(el.querySelector('[data-preview-bills]'));
+      }};
+    }
+    if (window.PfBillingPrototype) return window.PfBillingPrototype.create();
+    const products = [{name:'มะม่วงแช่แข็ง',lot:'DEMO-01',boxes:80,price:900},{name:'ทุเรียนแช่แข็ง',lot:'DEMO-02',boxes:40,price:2400},{name:'สับปะรดแช่แข็ง',lot:'DEMO-03',boxes:60,price:700}];
+    const draft = {customer:'',product:'0',boxes:'1',price:'900'};
+    const bills = [];
+    const customers = [];
+    let selectedCustomer = '', customerSearch = '', customerEditing = '';
+    let customerDraft = {name:'',address:'',taxId:'',phone:'',email:'',branch:''};
+    const customerFields = [['name','ชื่อลูกค้า / บริษัท'],['address','ที่อยู่สำหรับออกบิล'],['taxId','เลขประจำตัวผู้เสียภาษี'],['branch','สาขา'],['phone','เบอร์ติดต่อ'],['email','อีเมล']];
+    function customerMarkup() {
+      const matches = customers.filter(c=>[c.name,c.taxId,c.phone,c.id].join(' ').toLocaleLowerCase().includes(customerSearch.toLocaleLowerCase()));
+      const selected = customers.find(c=>c.id===selectedCustomer);
+      const history = bills.filter(b=>b.customerId===selectedCustomer);
+      return `<section class="pfs-panel pfb-form"><h2>${customerEditing?'แก้ไขข้อมูลลูกค้า':'เพิ่มข้อมูลลูกค้า'}</h2><p>ข้อมูลตัวอย่างเท่านั้น ไม่เก็บถาวร · ใช้รหัสลูกค้าแยกประวัติแม้ชื่อซ้ำกัน</p><form data-customer-form><div class="pfb-fields">${customerFields.map(([key,label])=>`<label>${label}${key==='name'?' *':''}<input data-customer-field="${key}" name="${key}" ${key==='name'?'required':''} ${key==='taxId'?'inputmode="numeric" pattern="[0-9]{13}" title="กรอกตัวเลข 13 หลัก หรือเว้นว่าง" maxlength="13"':key==='email'?'type="email" maxlength="160"':'maxlength="300"'} value="${escapeHtml(customerDraft[key])}"></label>`).join('')}</div><button type="submit" class="pfs-button pfs-primary">${customerEditing?'บันทึกการแก้ไขตัวอย่าง':'เพิ่มลูกค้าตัวอย่าง'}</button>${customerEditing?'<button type="button" class="pfs-button" data-customer-new>ยกเลิกแก้ไข</button>':''}</form></section><section class="pfs-panel"><h2>ค้นหาลูกค้าและประวัติการซื้อ</h2><form data-customer-search class="pfs-toolbar"><label>ชื่อ / รหัสลูกค้า / เลขผู้เสียภาษี / เบอร์โทร<input name="query" value="${escapeHtml(customerSearch)}" placeholder="ค้นหาลูกค้า"></label><button class="pfs-button" type="submit">ค้นหา</button></form>${matches.map(c=>`<article class="pfb-order"><div><strong>${escapeHtml(c.name)}</strong><p>${c.id} · ${escapeHtml(c.taxId||'ไม่ระบุเลขผู้เสียภาษี')} · ${escapeHtml(c.phone||'ไม่ระบุเบอร์โทร')}</p><small>เปิดบิล ${bills.filter(b=>b.customerId===c.id).length} ครั้ง (จำลอง)</small></div><button type="button" class="pfs-button" data-customer-select="${c.id}">ดูข้อมูลและประวัติ</button></article>`).join('')||'<p class="pfs-empty">ไม่พบลูกค้า ลองเพิ่มข้อมูลหรือเปลี่ยนคำค้น</p>'}</section>${selected?`<section class="pfs-panel"><header class="pfs-panel-head"><div><h2>${escapeHtml(selected.name)}</h2><p>${selected.id}</p></div><div class="pfs-switch"><button type="button" class="pfs-button" data-customer-edit="${selected.id}">แก้ไขข้อมูล</button><button type="button" class="pfs-button pfs-primary" data-customer-bill="${selected.id}">เปิดบิลให้ลูกค้านี้</button></div></header>${customerFields.slice(1).map(([key,label])=>`<p>${label}: ${escapeHtml(selected[key]||'—')}</p>`).join('')}<div class="pfs-notice">เปิดบิล ${history.length} ครั้ง · รวม ${money(history.reduce((n,b)=>n+b.total,0))} · ตัดของแล้ว ${history.filter(b=>b.done).length} ครั้ง (ทั้งหมดเป็นตัวอย่าง)</div><h3>ประวัติการซื้อ</h3>${history.map(b=>`<article class="pfb-order"><div><strong>${b.id} · ${escapeHtml(b.date)}</strong><p>${products[b.product].name} · ${b.boxes} กล่อง · ${b.boxes*20} กก. · ${money(b.total)}</p><p>ชื่อบนบิล: ${escapeHtml(b.customer)}</p><span>${b.done?'ตัดของแล้ว (จำลอง)':'รอตัดของ (จำลอง)'}</span></div></article>`).join('')||'<p>ยังไม่มีประวัติการซื้อ</p>'}</section>`:''}`;
+    }
+
+    let root, tab = 'form', notice = '';
+    const amount = () => Number(draft.boxes) * Number(draft.price);
+    const available = index => products[index].boxes - bills.filter(b=>b.product===Number(index)).reduce((n,b)=>n+b.boxes,0);
+    function paint() {
+      root.innerHTML = `<section class="acr-page pfs-page"><header class="acr-page-head"><div><p>PF ACCOUNTING / การเงิน</p><h1>เปิดบิล</h1><span>ขายสินค้าจาก Stock ห้องเย็น</span></div></header><div class="pfs-notice">โหมดตัวอย่าง · ข้อมูลสมมติทั้งหมด ไม่บันทึกขาย ไม่แจ้งเตือนจริง และไม่ตัดสต็อก · ออกจาก PF Accounting หรือรีเฟรชแล้วเริ่มใหม่</div><div class="pfs-switch"><button type="button" data-bill-tab="form" aria-pressed="${tab==='form'}">เปิดบิลขาย</button><button type="button" data-bill-tab="customers" aria-pressed="${tab==='customers'}">ลูกค้า / ประวัติการซื้อ</button><button type="button" data-bill-tab="queue" aria-pressed="${tab==='queue'}">คิวห้องเย็นจำลอง (${bills.filter(b=>!b.done).length})</button></div>${notice?`<p class="pfs-notice" role="status">${escapeHtml(notice)}</p>`:''}${tab==='customers'?customerMarkup():tab==='form'?`<form data-bill-form class="pfs-panel pfb-form"><h2>รายละเอียดการขาย</h2><p>เลือกสินค้า → ระบุจำนวนและราคา → ส่งให้หัวหน้า Stock ตรวจและตัดของ</p><label>ลูกค้า<select name="customer" required><option value="">เลือกลูกค้า</option>${customers.map(c=>`<option value="${c.id}" ${draft.customer===c.id?'selected':''}>${escapeHtml(c.name)} · ${c.id}</option>`).join('')}</select></label><button type="button" class="pfs-button" data-bill-tab="customers">เพิ่มลูกค้า / ดูประวัติ</button><label>สินค้า / ล็อตตัวอย่าง<select name="product">${products.map((p,i)=>`<option value="${i}" ${draft.product===String(i)?'selected':''}>${p.name} · ${p.lot}</option>`).join('')}</select></label><p>พร้อมขายจำลอง <b data-bill-available>${available(draft.product)}</b> กล่อง · 20 กก./กล่อง · เฉพาะสินค้าของบริษัท</p><div class="pfb-fields"><label>จำนวนกล่อง<input name="boxes" type="number" min="1" max="${available(draft.product)}" step="1" required value="${escapeHtml(draft.boxes)}"></label><label>ราคาขายต่อกล่อง (บาท)<input name="price" type="number" min="0" max="1000000" step="0.01" required value="${escapeHtml(draft.price)}"></label></div><div class="pfs-notice">น้ำหนัก <b data-bill-weight>${Number(draft.boxes)*20}</b> กก. · รวม <b data-bill-total>${money(amount())}</b></div><button class="pfs-button pfs-primary" type="submit">ทดลองเปิดบิลและส่งคิวห้องเย็น</button><p>เมื่อส่งแล้ว สินค้าจะถูกกันไว้ในตัวอย่าง จนหัวหน้า Stock ยืนยันตัดของ</p></form>`:`<section class="pfs-panel"><h2>Stock ห้องเย็น — คิวขายจำลอง</h2><p>ตัวอย่างการแจ้งเตือนที่หัวหน้า Stock จะเห็น หลังฝ่ายการเงินเปิดบิล</p>${bills.length?bills.map((b,i)=>`<article class="pfb-order"><div><strong>${b.id} · ${escapeHtml(b.customer)}</strong><p>${products[b.product].name} · ${products[b.product].lot}</p><p>${b.boxes} กล่อง · ${b.boxes*20} กก. · ${money(b.total)}</p><span>${b.done?'ตัดของแล้ว (จำลอง)':'รอหัวหน้า Stock ตัดของ'}</span></div>${b.done?'':`<button type="button" class="pfs-button" data-bill-confirm="${i}">ทดลองยืนยันตัดของ</button>`}</article>`).join(''):'<p class="pfs-empty">ยังไม่มีบิลตัวอย่าง ลองเปิดบิลขายก่อน</p>'}</section>`}</section>`;
+    }
+    function attach(target) {
+      root=target;paint();
+      root.onclick=e=>{const button=e.target.closest('button');if(!button)return;if(button.hasAttribute('data-customer-new')){customerEditing='';customerDraft={name:'',address:'',taxId:'',phone:'',email:'',branch:''};paint();return}if(button.dataset.customerSelect){selectedCustomer=button.dataset.customerSelect;paint();return}if(button.dataset.customerEdit){const c=customers.find(c=>c.id===button.dataset.customerEdit);customerEditing=c.id;customerDraft={...c};paint();return}if(button.dataset.customerBill){draft.customer=button.dataset.customerBill;tab='form';paint();return}if(button.dataset.billTab){tab=button.dataset.billTab;notice='';paint()}if(button.hasAttribute('data-bill-confirm')){const bill=bills[Number(button.dataset.billConfirm)];if(bill&&!bill.done){bill.done=true;notice=`${bill.id} ยืนยันตัดของแล้วในตัวอย่างเท่านั้น`;paint()}}};
+      root.oninput=e=>{if(e.target.dataset.customerField){customerDraft[e.target.dataset.customerField]=e.target.value;return}if(!(e.target.name in draft)||!e.target.closest('[data-bill-form]'))return;draft[e.target.name]=e.target.value;if(e.target.name==='product'){draft.price=String(products[Number(draft.product)].price);paint();return}root.querySelector('[data-bill-total]').textContent=money(amount());root.querySelector('[data-bill-weight]').textContent=Number(draft.boxes)*20;};
+      root.onsubmit=e=>{if(e.target.matches('[data-customer-search]')){e.preventDefault();customerSearch=e.target.elements.query.value.trim();paint();return}if(e.target.matches('[data-customer-form]')){e.preventDefault();if(!e.target.checkValidity()||!customerDraft.name.trim())return;const fields=Object.fromEntries(customerFields.map(([key])=>[key,customerDraft[key].trim()]));const existing=customers.find(c=>c.id===customerEditing);if(existing)Object.assign(existing,fields);else customers.push({id:`CUS-${String(customers.length+1).padStart(4,'0')}`,...fields});selectedCustomer=existing?.id||customers[customers.length-1].id;draft.customer=selectedCustomer;customerEditing='';customerDraft={name:'',address:'',taxId:'',phone:'',email:'',branch:''};customerSearch='';notice='บันทึกข้อมูลลูกค้าในตัวอย่างแล้ว (ยังไม่เก็บถาวร)';paint();return}if(!e.target.matches('[data-bill-form]'))return;e.preventDefault();const boxes=Number(draft.boxes),price=Number(draft.price);if(!customers.some(c=>c.id===draft.customer)||!Number.isInteger(boxes)||boxes<1||boxes>available(draft.product)||!Number.isFinite(price)||price<0||price>1000000||!e.target.checkValidity())return;bills.unshift({id:`DEMO-${String(bills.length+1).padStart(4,'0')}`,customerId:draft.customer,customer:customers.find(c=>c.id===draft.customer).name,customerSnapshot:{...customers.find(c=>c.id===draft.customer)},date:new Date().toLocaleString('th-TH',{timeZone:'Asia/Bangkok'}),product:Number(draft.product),boxes,total:Math.round(boxes*price*100)/100,done:false});draft.boxes='1';tab='queue';notice='ส่งบิลเข้าคิวห้องเย็นจำลองแล้ว ยังไม่มีการขายหรือตัดสต็อกจริง';paint()};
+    }
+    return {attach};
+  }
+
   function readLocalWeek(startDate, endDate) {
     try { return JSON.parse(localStorage.getItem(LOCAL_KEY) || "{}")[`${startDate}:${endDate}`] || {}; }
     catch { return {}; }
@@ -48,8 +126,10 @@
     sessionStorage.removeItem("pismai_accounting_access_v1");
     if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) return options.onExit?.();
 
+    const stockAllowed = canAccessStockSummary(user);
     const week = currentWeek();
-    const state = { view: "allocation", kind: "production", exportScope: "all", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, adjustments: {}, expanded: new Set(), loading: true, message: "", messageType: "success", percentBasis: "money", percentKind: "production", percentGroup: "all", percentMode: "add", percentValue: 0, graphPreset: "week", graphStartDate: week.startDate, graphEndDate: week.endDate, graphData: null, graphLoading: false, graphDrill: "", costPreset: "week", costStartDate: week.startDate, costEndDate: week.endDate, costData: null, costLoading: false };
+    const state = { view: ["allocation", "export", "percentage", "graph", "cost", "billing", "document-editor", ...stockViews].includes(options.initialView) ? options.initialView : "allocation", kind: "production", exportScope: "all", startDate: week.startDate, endDate: week.endDate, group: "all", rows: [], allocations: {}, adjustments: {}, expanded: new Set(), loading: true, message: "", messageType: "success", percentBasis: "money", percentKind: "production", percentGroup: "all", percentMode: "add", percentValue: 0, graphPreset: "week", graphStartDate: week.startDate, graphEndDate: week.endDate, graphData: null, graphLoading: false, graphDrill: "", costPreset: "week", costStartDate: week.startDate, costEndDate: week.endDate, costData: null, costLoading: false };
+    if (!stockAllowed && stockViews.includes(state.view)) state.view = "allocation";
     const methodOf = (row) => state.allocations[row.employee_key] === "transfer" ? "transfer" : "cash";
     const adjustmentOf = (row) => Number(state.adjustments[row.employee_key] || 0);
     const adjustedNet = (row) => Math.max(0, Math.round((Number(row.net_amount || 0) + adjustmentOf(row)) * 100) / 100);
@@ -68,17 +148,22 @@
       return group === "*" ? `${kindLabel}ทุกกลุ่ม` : `${kindLabel} - ${group}`;
     }
 
+    let loadVersion = 0;
     async function load() {
+      const version = ++loadVersion;
       state.loading = true;
       state.message = "";
       paint();
       try {
-        state.rows = await Promise.resolve(options.getWeeklyRows?.(state.startDate, state.endDate) || []);
+        const rows = await Promise.resolve(options.getWeeklyRows?.(state.startDate, state.endDate) || []);
+        if (version !== loadVersion) return;
         let saved = readLocalWeek(state.startDate, state.endDate);
         try {
           const cloud = await options.loadAllocations?.(state.startDate, state.endDate);
           if (cloud && typeof cloud === "object") saved = { ...saved, ...cloud };
         } catch (error) { console.warn("PF allocation cloud load failed; using local copy.", error); }
+        if (version !== loadVersion) return;
+        state.rows = rows;
         state.allocations = {};
         state.adjustments = {};
         state.rows.forEach((row) => {
@@ -89,9 +174,10 @@
           }
         });
       } catch (error) {
+        if (version !== loadVersion) return;
         state.message = error instanceof Error ? error.message : "โหลดข้อมูลรอบจ่ายไม่สำเร็จ";
         state.messageType = "error";
-      } finally { state.loading = false; paint(); }
+      } finally { if (version === loadVersion) { state.loading = false; paint(); } }
     }
 
     async function loadCostAnalysis() {
@@ -143,10 +229,12 @@
       paint();
     }
 
-    async function exportFile(method, format) {
-      const rows = scopedExportRows().filter((row) => methodOf(row) === method);
+    async function exportFile(format) {
+      if (state.loading) return;
+      const method = "all";
+      const rows = scopedExportRows();
       if (!rows.length) {
-        state.message = `ไม่มีรายการ${method === "cash" ? "เงินสด" : "เงินโอน"}สำหรับ Export`;
+        state.message = "ไม่มีรายการในกลุ่มและช่วงวันที่ที่เลือกสำหรับ Export";
         state.messageType = "error";
         return paint();
       }
@@ -154,7 +242,7 @@
       state.messageType = "success";
       paint();
       try {
-        await options.exportPayments?.(format, method, { start_date: state.startDate, end_date: state.endDate, payment_method: method, scope_label: exportScopeLabel(), rows: rows.map((row, index) => ({ ...row, net_amount: adjustedNet(row), sequence: index + 1, payment_method: method })), printed_by: user?.fullname || user?.username || "System Admin", printed_by_position: String(user?.level || "C4") });
+        await options.exportPayments?.(format, method, { start_date: state.startDate, end_date: state.endDate, payment_method: method, scope_label: exportScopeLabel(), rows: rows.map((row, index) => ({ ...row, net_amount: adjustedNet(row), sequence: index + 1, payment_method: methodOf(row) })), printed_by: user?.fullname || user?.username || "System Admin", printed_by_position: String(user?.level || "C4") });
         state.message = `Export ${format === "excel" ? "Excel" : "PDF"} เรียบร้อยแล้ว`;
         options.onAudit?.("PF_PAYMENT_EXPORT", `Export ${method} ${format} ${state.startDate} - ${state.endDate}`);
       } catch (error) {
@@ -189,7 +277,7 @@
     }
 
     function exportCard(method, label, rows) {
-      return `<article class="acr-export-card ${method}"><div><span>${method === "cash" ? "CASH" : "BANK TRANSFER"}</span><h2>${label}</h2><p>${rows.length} คน · ${money(sum(rows))}</p></div><div class="acr-export-actions"><button type="button" data-export-method="${method}" data-export-format="excel">Export Excel</button><button type="button" data-export-method="${method}" data-export-format="pdf">Export PDF / พิมพ์</button></div></article>`;
+      return `<article class="acr-export-card ${method}"><div><span>${method === "cash" ? "CASH" : "BANK TRANSFER"}</span><h2>${label}</h2><p>${rows.length} คน · ${money(sum(rows))}</p></div></article>`;
     }
 
     function exportMarkup() {
@@ -198,7 +286,7 @@
       const transferRows = rows.filter((row) => methodOf(row) === "transfer");
       const productionGroups = [...new Set(state.rows.filter((row) => row.employee_kind === "production").map((row) => row.group_label))].sort((a, b) => a.localeCompare(b, "th"));
       const timeGroups = [...new Set(state.rows.filter((row) => row.employee_kind === "time").map((row) => row.group_label))].sort((a, b) => a.localeCompare(b, "th"));
-      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF ACCOUNTING</p><h1>Export รายการจ่ายเงิน</h1><span>แยกเอกสารเงินสดและเงินโอนตามการจัดสรรล่าสุด</span></div><div class="acr-period-static">${escapeHtml(state.startDate)} ถึง ${escapeHtml(state.endDate)}</div></header><div class="acr-export-filter"><label>ขอบเขตรายงาน<select data-export-scope><option value="all" ${state.exportScope === "all" ? "selected" : ""}>พนักงานทั้งหมด</option><optgroup label="พนักงานเหมา"><option value="production::*" ${state.exportScope === "production::*" ? "selected" : ""}>พนักงานเหมาทุกกลุ่ม</option>${productionGroups.map((group) => `<option value="production::${escapeHtml(group)}" ${state.exportScope === `production::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup><optgroup label="พนักงานเวลา"><option value="time::*" ${state.exportScope === "time::*" ? "selected" : ""}>พนักงานเวลาทุกกลุ่ม</option>${timeGroups.map((group) => `<option value="time::${escapeHtml(group)}" ${state.exportScope === `time::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup></select></label><div><span>กำลังแสดง</span><strong>${escapeHtml(exportScopeLabel())}</strong><small>${rows.length} คน</small></div></div><div class="acr-export-summary"><strong>ยอดสุทธิรวม ${money(sum(rows))}</strong><span>เงินสด ${money(sum(cashRows))} + เงินโอน ${money(sum(transferRows))}</span></div><div class="acr-export-grid">${exportCard("cash", "รายการจ่ายเงินสด", cashRows)}${exportCard("transfer", "รายการจ่ายเงินโอน", transferRows)}</div><section class="acr-export-preview"><div class="acr-list-head"><div><h2>ตัวอย่างรายการที่จะส่งออก</h2><span>ไฟล์จะแสดงขอบเขต “${escapeHtml(exportScopeLabel())}” บนเอกสาร</span></div></div><div class="acr-table-wrap"><table><thead><tr><th>ลำดับ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>ประเภท</th><th>กลุ่ม</th><th>วิธีจ่าย</th><th class="acr-number">ยอดสุทธิ</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${row.employee_kind === "time" ? "พนักงานเวลา" : "พนักงานเหมา"}</td><td>${escapeHtml(row.group_label)}</td><td>${methodOf(row) === "cash" ? "เงินสด" : "เงินโอน"}</td><td class="acr-number"><strong>${money(adjustedNet(row))}</strong></td></tr>`).join("")}</tbody></table></div></section></section>`;
+      return `<section class="acr-page"><header class="acr-page-head"><div><p>PF ACCOUNTING</p><h1>Export รายการจ่ายเงิน</h1><span>เลือกกลุ่มและช่วงวันที่ รวมเงินสดและเงินโอนในเอกสารเดียว</span></div><div class="acr-period"><label>เริ่มต้น<input type="date" data-export-start-date value="${state.startDate}"></label><label>สิ้นสุด<input type="date" data-export-end-date min="${state.startDate}" value="${state.endDate}"></label></div></header><div class="acr-export-filter"><label>ขอบเขตรายงาน<select data-export-scope><option value="all" ${state.exportScope === "all" ? "selected" : ""}>พนักงานทั้งหมด</option><optgroup label="พนักงานเหมา"><option value="production::*" ${state.exportScope === "production::*" ? "selected" : ""}>พนักงานเหมาทุกกลุ่ม</option>${productionGroups.map((group) => `<option value="production::${escapeHtml(group)}" ${state.exportScope === `production::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup><optgroup label="พนักงานเวลา"><option value="time::*" ${state.exportScope === "time::*" ? "selected" : ""}>พนักงานเวลาทุกกลุ่ม</option>${timeGroups.map((group) => `<option value="time::${escapeHtml(group)}" ${state.exportScope === `time::${group}` ? "selected" : ""}>${escapeHtml(group)}</option>`).join("")}</optgroup></select></label><div><span>กำลังแสดง</span><strong>${escapeHtml(exportScopeLabel())}</strong><small>${rows.length} คน</small></div></div><div class="acr-export-summary"><strong>ยอดสุทธิรวม ${money(sum(rows))}</strong><span>เงินสด ${money(sum(cashRows))} + เงินโอน ${money(sum(transferRows))}</span></div><div class="acr-export-grid">${exportCard("cash", "รายการจ่ายเงินสด", cashRows)}${exportCard("transfer", "รายการจ่ายเงินโอน", transferRows)}</div><div class="acr-export-actions acr-export-download"><label>รูปแบบไฟล์<select data-export-format-choice><option value="pdf">PDF / พิมพ์</option><option value="excel">Excel</option></select></label><button type="button" data-export-combined ${state.loading ? "disabled" : ""}>Export รวมเงินสดและเงินโอน</button></div><section class="acr-export-preview"><div class="acr-list-head"><div><h2>ตัวอย่างรายการที่จะส่งออก</h2><span>ไฟล์จะแสดงขอบเขต “${escapeHtml(exportScopeLabel())}” บนเอกสาร</span></div></div><div class="acr-table-wrap"><table><thead><tr><th>ลำดับ</th><th>รหัส</th><th>ชื่อพนักงาน</th><th>ประเภท</th><th>กลุ่ม</th><th>วิธีจ่าย</th><th class="acr-number">ยอดสุทธิ</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.emp_code)}</td><td>${escapeHtml(row.fullname)}</td><td>${row.employee_kind === "time" ? "พนักงานเวลา" : "พนักงานเหมา"}</td><td>${escapeHtml(row.group_label)}</td><td>${methodOf(row) === "cash" ? "เงินสด" : "เงินโอน"}</td><td class="acr-number"><strong>${money(adjustedNet(row))}</strong></td></tr>`).join("")}</tbody></table></div></section></section>`;
     }
 
     function percentageMarkup() {
@@ -254,6 +342,7 @@
     }
 
     function costAnalysisMarkup() {
+      if (!stockAllowed) return '<section class="acr-page"><h1>วิเคราะห์ต้นทุน</h1><p>ข้อมูลต้นทุนสต็อกสำหรับผู้บริหารสิทธิ์ C6–C7</p></section>';
       const data = state.costData || { rows: [], totals: {} };
       const totals = data.totals || {};
       const yieldPercent = Number(totals.inbound_weight || 0) > 0 ? (Number(totals.output_weight || 0) / Number(totals.inbound_weight || 0)) * 100 : 0;
@@ -266,15 +355,30 @@
         <section class="acr-export-preview acr-cost-table"><div class="acr-list-head"><div><h2>เปรียบเทียบตามชนิดผลไม้</h2><span>ค่าแรงเวลาจัดสรรตามสัดส่วนน้ำหนักผลผลิต เพื่อใช้เป็นข้อมูลสนับสนุน ไม่ใช่รายการบัญชีที่ผ่านการรับรอง</span></div></div>${state.costLoading ? `<div class="acr-empty">กำลังรวมข้อมูลจากทั้งระบบ...</div>` : data.rows.length ? `<div class="acr-table-wrap"><table><thead><tr><th>ผลไม้</th><th>เปรียบเทียบน้ำหนัก</th><th class="acr-number">รับเข้า</th><th class="acr-number">ปลายทาง</th><th class="acr-number">อัตราแปรรูป</th><th class="acr-number">มูลค่ารับเข้า</th><th class="acr-number">ค่าแรงรวม</th><th class="acr-number">ต้นทุน/กก.</th></tr></thead><tbody>${data.rows.map((row) => `<tr><td><strong>${escapeHtml(row.fruit_label)}</strong></td><td><div class="acr-weight-bars"><i style="width:${Math.max(1,(Number(row.inbound_weight || 0)/maxWeight)*100)}%"><span>รับเข้า</span></i><i class="out" style="width:${Math.max(1,(Number(row.output_weight || 0)/maxWeight)*100)}%"><span>ปลายทาง</span></i></div></td><td class="acr-number">${Number(row.inbound_weight || 0).toLocaleString("th-TH", { maximumFractionDigits: 2 })}</td><td class="acr-number">${Number(row.output_weight || 0).toLocaleString("th-TH", { maximumFractionDigits: 2 })}</td><td class="acr-number">${Number(row.yield_percent || 0).toFixed(1)}%</td><td class="acr-number">${money(row.inbound_cost)}</td><td class="acr-number">${money(Number(row.production_labor || 0) + Number(row.time_labor_allocated || 0))}</td><td class="acr-number"><strong>${money(row.total_cost_per_output_kg)}</strong></td></tr>`).join("")}</tbody></table></div>` : `<div class="acr-empty">ยังไม่มีข้อมูลรับเข้าหรือผลผลิตในช่วงที่เลือก</div>`}</section></section>`;
     }
 
+    let stockController = null;
+    let documentEditor = null;
+    const billingPrototype = createBillingPrototype();
     function paint() {
-      const content = state.view === "allocation" ? allocationMarkup() : state.view === "export" ? exportMarkup() : state.view === "percentage" ? percentageMarkup() : state.view === "graph" ? graphDashboardMarkup() : costAnalysisMarkup();
-      root.innerHTML = `<main class="acr-shell"><aside class="acr-rail"><div class="acr-logo">PF</div><div class="acr-rail-brand">PF Accounting<small>สิทธิ์ C4 ขึ้นไป</small></div><nav><button type="button" data-view="allocation" class="${state.view === "allocation" ? "active" : ""}"><span>▦</span>จัดสรรเงินจ่าย</button><button type="button" data-view="export" class="${state.view === "export" ? "active" : ""}"><span>⇩</span>Export / พิมพ์</button><button type="button" data-view="percentage" class="${state.view === "percentage" ? "active" : ""}"><span>%</span>ปรับเปอร์เซ็นต์</button><button type="button" data-view="graph" class="${state.view === "graph" ? "active" : ""}"><span>▥</span>กราฟเปรียบเทียบ</button><button type="button" data-view="cost" class="${state.view === "cost" ? "active" : ""}"><span>⌁</span>วิเคราะห์ต้นทุน</button></nav><button class="acr-exit" type="button" data-ac-exit>↩<span>กลับระบบหลัก</span></button></aside><div class="acr-workspace">${content}${state.message ? `<div class="acr-toast ${state.messageType}">${escapeHtml(state.message)}</div>` : ""}</div></main>`;
+      const sidebarScroll = root.querySelector(".acr-stable-rail")?.scrollTop || 0;
+      const content = state.view === "document-editor" ? `<div data-pf-document-root></div>` : state.view === "billing" ? `<div data-pf-billing-root></div>` : stockViews.includes(state.view) ? `<div data-pf-stock-root></div>` : state.view === "allocation" ? allocationMarkup() : state.view === "export" ? exportMarkup() : state.view === "percentage" ? percentageMarkup() : state.view === "graph" ? graphDashboardMarkup() : costAnalysisMarkup();
+      root.innerHTML = `<main class="acr-shell">${sidebar({ user, view: state.view, deductions: Boolean(options.onOpenDeductions) })}<div class="acr-workspace">${content}${state.message ? `<div class="acr-toast ${state.messageType}">${escapeHtml(state.message)}</div>` : ""}</div></main>`;
+      const rail = root.querySelector(".acr-stable-rail");
+      if (rail) rail.scrollTop = sidebarScroll;
       bind();
+      if (state.view === "document-editor") { if (!documentEditor) documentEditor = window.PfDocumentEditor.create(); documentEditor.attach(root.querySelector("[data-pf-document-root]")); }
+      if (state.view === "billing") billingPrototype.attach(root.querySelector("[data-pf-billing-root]"));
+      if (stockViews.includes(state.view)) {
+        if (!stockController) stockController = window.PfStockSummary.create({ request: options.stockRequest, navigate: (view) => { state.view = view; paint(); } });
+        stockController.attach(root.querySelector("[data-pf-stock-root]"), state.view);
+      }
     }
 
     function bind() {
+      bindSidebar(root);
+      root.querySelectorAll("[data-deduction-tab]").forEach((button) => button.addEventListener("click", () => options.onOpenDeductions?.(button.dataset.deductionTab)));
       root.querySelector("[data-ac-exit]")?.addEventListener("click", () => options.onExit?.());
       root.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
+        if (!stockAllowed && stockViews.includes(button.dataset.view)) return;
         state.view = button.dataset.view;
         paint();
         if (state.view === "graph" && !state.graphData && !state.graphLoading) loadGraphDashboard();
@@ -366,13 +470,22 @@
         state.group = "all";
         load();
       });
-      root.querySelectorAll("[data-export-method]").forEach((button) => button.addEventListener("click", () => exportFile(button.dataset.exportMethod, button.dataset.exportFormat)));
+      root.querySelector("[data-export-combined]")?.addEventListener("click", () => exportFile(root.querySelector("[data-export-format-choice]")?.value === "excel" ? "excel" : "pdf"));
+      root.querySelectorAll("[data-export-start-date], [data-export-end-date]").forEach((input) => input.addEventListener("change", (event) => {
+        if (!event.target.value) return paint();
+        if (input.hasAttribute("data-export-start-date")) state.startDate = event.target.value;
+        else state.endDate = event.target.value;
+        if (state.endDate < state.startDate) state.endDate = state.startDate;
+        load();
+      }));
       root.querySelector("[data-export-scope]")?.addEventListener("change", (event) => { state.exportScope = event.target.value || "all"; paint(); });
     }
 
     paint();
     load();
+    if (state.view === "graph") loadGraphDashboard();
+    if (state.view === "cost") loadCostAnalysis();
   }
 
-  window.AccountingControl = { render };
+  window.AccountingControl = { render, sidebar, bindSidebar, createBillingPrototype, canAccessStockSummary };
 })();

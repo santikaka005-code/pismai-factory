@@ -12,14 +12,18 @@ import secrets
 import threading
 import time
 import textwrap
+from decimal import Decimal, ROUND_HALF_UP
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse, unquote
 from xml.sax.saxutils import escape as xml_escape
+import desktop_import as desktop_file
+import request_security
 
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as ExcelImage
@@ -54,6 +58,7 @@ THAI_FONT = "Helvetica"
 THAI_FONT_BOLD = "Helvetica-Bold"
 TIME_SPECIAL_DAILY_WAGE = 365
 DURIAN_GRADES = ("A", "B", "C", "D", "E")
+SINGLE_WEIGHT_FRUITS = {"durian", "pomelo", "coconut"}
 TIME_SPECIAL_WAGE_TABLE = {
     2: 91,
     2.5: 114,
@@ -72,9 +77,24 @@ TIME_SPECIAL_WAGE_TABLE = {
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 BACKUP_ACCESS_CODE = os.environ.get("BACKUP_ACCESS_CODE", "1150")
+DATABASE_MIGRATION_CODE = "1001"
 SESSION_SIGNING_SECRET = os.environ.get("SESSION_SIGNING_SECRET") or SUPABASE_SERVICE_ROLE_KEY or secrets.token_hex(32)
+time_change_condition = threading.Condition()
+time_change_revision = secrets.token_hex(16)
+
+
+def notify_time_change() -> None:
+    global time_change_revision
+    with time_delta_cache_lock:
+        time_delta_cache.clear()
+    with time_change_condition:
+        time_change_revision = secrets.token_hex(16)
+        time_change_condition.notify_all()
+
+
+desktop_file_import_lock = threading.Lock()
 ACCOUNTING_COMPANY_KEY = os.environ.get("ACCOUNTING_COMPANY_KEY", "pismai-main")
-BACKUP_TABLES = [
+DATABASE_MIGRATION_TABLES = [
     "account_users",
     "employees",
     "time_employees",
@@ -95,13 +115,36 @@ BACKUP_TABLES = [
     "inbound_fruits",
     "inbound_fruit_prices",
     "inbound_receipts",
+    "inbound_issues",
+    "inbound_issue_allocations",
+    "cold_stock_locations",
+    "cold_stock_pallets",
+    "cold_stock_movements",
+    "cold_sale_orders",
+    "cold_sale_lines",
+    "cold_sale_allocations",
+    "cold_sale_events",
+    "stock_items",
+    "stock_movements",
+]
+BACKUP_TABLES = [
+    "production_sessions",
+    "production_records",
+    "time_records",
+    "deduction_records",
+    "deduction_applications",
+    "production_save_queue",
+    "production_save_queue_events",
+    "time_save_queue",
+    "time_save_queue_events",
+    "issue_reports",
 ]
 QUEUE_BACKUP_TABLES = [
     "production_save_queue", "production_save_queue_events",
     "time_save_queue", "time_save_queue_events",
 ]
 MAIN_CLEAR_TABLES = [
-    "inbound_receipts",
+    "issue_reports",
     "deduction_applications",
     "deduction_records",
     "time_records",
@@ -117,8 +160,10 @@ SECRET_CHAT_ATTACHMENT_BUCKET = "secret-chat-attachments"
 SECRET_CHAT_ATTACHMENT_PREFIX = "__PISMAI_CHAT_ATTACHMENT_V1__"
 SECRET_CHAT_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
 SECRET_CHAT_ATTACHMENT_TYPES = {"image/png", "image/jpeg", "image/webp", "application/pdf"}
-SUPABASE_FREE_DATABASE_BYTES = 500 * 1024 * 1024
+SUPABASE_DATABASE_INCLUDED_BYTES = 8 * 1024 * 1024 * 1024
+SUPABASE_BANDWIDTH_INCLUDED_BYTES = 250 * 1024 * 1024 * 1024
 DATABASE_STORAGE_WARNING_PERCENT = 85
+SUPABASE_BANDWIDTH_WARNING_PERCENT = 85
 LIVE_STATE_TABLES = {
     "production_sessions",
     "production_records",
@@ -128,12 +173,178 @@ LIVE_STATE_TABLES = {
 ONLINE_USER_TIMEOUT_SECONDS = 45
 STORAGE_USAGE_CACHE_SECONDS = 15
 online_user_lock = threading.Lock()
+fruit_pile_settings_lock = threading.Lock()
+FRUIT_PILE_SETTINGS_BUCKET = "pismai-factory-settings"
+stock_sale_prices_lock = threading.Lock()
+STOCK_SALE_PRICES_PATH = f"object/{FRUIT_PILE_SETTINGS_BUCKET}/stock-sale-prices.json"
+
+
+def read_stock_sale_prices():
+    status, body = secret_chat_storage_request("GET", STOCK_SALE_PRICES_PATH)
+    if status == 404 or (isinstance(body, dict) and (str(body.get("statusCode")) == "404" or body.get("message") in ("Bucket not found", "Object not found"))):
+        return 200, {"prices": {}}
+    if status >= 400:
+        return status, body
+    if not isinstance(body, dict) or not isinstance(body.get("prices"), dict):
+        return 502, {"error": "ข้อมูลราคาขายไม่ถูกต้อง"}
+    return 200, body
+
+
+def save_stock_sale_price(payload, actor):
+    if not isinstance(payload, dict):
+        return 400, {"error": "ข้อมูลไม่ถูกต้อง"}
+    item_id = str(payload.get("item_id", ""))
+    raw_price = payload.get("price")
+    try:
+        if not re.fullmatch(r"[1-9][0-9]{0,17}", item_id) or isinstance(raw_price, bool) or raw_price is None or str(raw_price).strip() == "":
+            raise ValueError()
+        price = float(raw_price)
+        if not math.isfinite(price) or not 0 <= price <= 1000000000 or abs(price - round(price, 4)) > 0.00000001:
+            raise ValueError()
+    except (ValueError, TypeError):
+        return 400, {"error": "กรุณาระบุสินค้าและราคาขายตั้งแต่ 0 ถึง 1,000,000,000 บาท ทศนิยมไม่เกิน 4 ตำแหน่ง"}
+    status, items = supabase_request("GET", f"stock_items?id=eq.{item_id}&category=eq.packaging&select=id,name,unit&limit=1")
+    if status >= 400:
+        return status, items
+    if not isinstance(items, list) or not items:
+        return 404, {"error": "ไม่พบรายการบรรจุภัณฑ์"}
+    # Merge one product at a time so editing another product never replaces it.
+    with stock_sale_prices_lock:
+        status, document = read_stock_sale_prices()
+        if status >= 400:
+            return status, document
+        key = f"packaging:{item_id}"
+        previous = document["prices"].get(key) or {}
+        if str(payload.get("revision") or "") != str(previous.get("revision") or ""):
+            return 409, {"error": "ราคานี้ถูกแก้ไขแล้ว กรุณาโหลดข้อมูลล่าสุดก่อนบันทึก"}
+        record = {"price": round(price, 4), "unit": items[0]["unit"], "revision": secrets.token_hex(16), "updated_at": datetime.now(timezone.utc).isoformat(), "updated_by": actor.get("fullname") or actor.get("username") or "", "previous_price": previous.get("price")}
+        document["prices"][key] = record
+        status, body = secret_chat_storage_request("POST", "bucket", json.dumps({"id": FRUIT_PILE_SETTINGS_BUCKET, "name": FRUIT_PILE_SETTINGS_BUCKET, "public": False}).encode())
+        if status >= 400 and status != 409 and "already exists" not in supabase_error_text(body).lower():
+            return status, body
+        status, body = secret_chat_storage_request("POST", STOCK_SALE_PRICES_PATH, json.dumps(document, ensure_ascii=False).encode(), upsert=True)
+        return (200, record) if status < 400 else (status, body)
+
+
+def accounting_stock_summary():
+    status, items = supabase_get_all("stock_items?category=eq.packaging&select=id,name,specification,size,unit,balance_qty,updated_at&order=id.asc")
+    if status >= 400:
+        return status, items
+    if not isinstance(items, list):
+        return 502, {"error": "รูปแบบข้อมูลสต็อกไม่ถูกต้อง"}
+    status, prices = read_stock_sale_prices()
+    if status >= 400:
+        return status, prices
+    rows = []
+    total = 0.0
+    unpriced = 0
+    for item in items:
+        saved = prices["prices"].get(f"packaging:{item['id']}") or {}
+        sale_price = saved.get("price")
+        valid = isinstance(sale_price, (int, float)) and not isinstance(sale_price, bool) and math.isfinite(sale_price) and sale_price >= 0 and saved.get("unit") == item.get("unit")
+        quantity = safe_float(item.get("balance_qty"))
+        value = float((Decimal(str(quantity)) * Decimal(str(sale_price))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) if valid else None
+        total += value or 0
+        if not valid and quantity > 0:
+            unpriced += 1
+        rows.append({**item, "sale_price": sale_price if valid else None, "sale_value": value, "price_revision": saved.get("revision", ""), "price_updated_at": saved.get("updated_at"), "price_updated_by": saved.get("updated_by")})
+    return 200, {"packaging": {"items": rows, "priced_value": round(total, 2), "unpriced_in_stock": unpriced}, "cold_storage": {"status": "not_connected", "message": "Stock ห้องเย็นยังเป็นหน้าทดลอง จึงยังไม่เชื่อมข้อมูลจริงและไม่นำตัวเลขสมมติมารวมมูลค่า"}, "as_of": datetime.now(timezone.utc).isoformat()}
+
+
+def stock_operational_data(value, actor):
+    """Stock staff can submit prices but cannot retrieve financial history/totals."""
+    if account_level_number((actor or {}).get("level")) >= 6:
+        return value
+    financial = {"unit_price", "price_per_kg", "total_amount", "total_cost", "average_unit_cost", "inventory_value", "inventory_value_after", "received_value", "issued_value", "sale_price", "sale_value"}
+    if isinstance(value, list):
+        return [stock_operational_data(item, actor) for item in value]
+    if isinstance(value, dict):
+        return {key: ([] if key == "prices" else stock_operational_data(item, actor)) for key, item in value.items() if key not in financial}
+    return value
+
+
+def accounting_stock_costs():
+    sections = []
+    for category, title in [("packaging", "บรรจุภัณฑ์"), ("supplies", "เบ็ดเตล็ด"), ("office", "สำนักงาน")]:
+        status, data = supabase_request("POST", "rpc/stock_inventory_snapshot", {"p_category": category})
+        sections.append({"id": category, "title": title, **(data if status < 400 and isinstance(data, dict) else {"error": "โหลดข้อมูลหมวดนี้ไม่สำเร็จ"})})
+    status, fruit = supabase_request("POST", "rpc/fruit_stock_snapshot", {})
+    receipt_status, receipts = supabase_get_all("inbound_receipts?select=*&order=received_at.desc")
+    sections.insert(0, {"id": "fruit", "title": "ผลไม้", **({**fruit, "receipts": receipts} if status < 400 and receipt_status < 400 and isinstance(fruit, dict) and isinstance(receipts, list) else {"error": "โหลดข้อมูลผลไม้ไม่สำเร็จ"})})
+    status, cold = supabase_request("POST", "rpc/cold_stock_snapshot", {})
+    return {"sections": sections, "cold": cold if status < 400 and isinstance(cold, dict) else None}
+
+
+def read_shared_fruit_piles():
+    status, body = secret_chat_storage_request("GET", f"object/{FRUIT_PILE_SETTINGS_BUCKET}/fruit-piles.json")
+    if status == 404 or (isinstance(body, dict) and (str(body.get("statusCode")) == "404" or body.get("message") in ("Bucket not found", "Object not found"))):
+        return 200, None
+    if status >= 400:
+        return status, body
+    if not isinstance(body, dict) or not isinstance(body.get("piles"), list):
+        return 502, {"error": "Invalid shared fruit pile settings"}
+    return 200, body
+
+
+def update_shared_fruit_piles(payload):
+    def validate(pile):
+        if not isinstance(pile, dict):
+            raise ValueError("ข้อมูลกองไม่ถูกต้อง")
+        number = pile.get("number")
+        if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 99:
+            raise ValueError("หมายเลขกองต้องเป็นเลข 1-99")
+        color = str(pile.get("color", ""))
+        name = str(pile.get("name", "")).strip()
+        if not name or len(name) > 40 or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            raise ValueError("ชื่อหรือสีกองไม่ถูกต้อง")
+        return {"number": number, "name": name, "color": color.lower(), "visible": pile.get("visible") is not False}
+
+    try:
+        action = payload.get("action")
+        if action not in ("migrate", "update"):
+            raise ValueError("Invalid pile action")
+        incoming = [validate(p) for p in payload.get("piles", [])]
+        deleted = payload.get("deleted", []) if action == "update" else []
+        if not isinstance(deleted, list) or any(type(n) is not int or not 1 <= n <= 99 for n in deleted):
+            raise ValueError("Invalid deleted pile numbers")
+    except (ValueError, TypeError) as error:
+        return 400, {"error": str(error)}
+    with fruit_pile_settings_lock:
+        status, current = read_shared_fruit_piles()
+        if status >= 400:
+            return status, current
+        if current is None:
+            colors = ["#1d4ed8", "#dc2626", "#111111", "#7e22ce", "#15803d", "#92400e"]
+            current = {"piles": [{"number": i, "name": f"กอง {i}", "color": c, "visible": True} for i, c in enumerate(colors, 1)], "deleted": []}
+            if action == "migrate" and incoming:
+                current["piles"] = incoming
+        piles = {p["number"]: p for p in current["piles"]}
+        tombstones = set(current.get("deleted", []))
+        for p in incoming:
+            n = p["number"]
+            if action == "update" or (n not in piles and n not in tombstones):
+                piles[n] = p
+                tombstones.discard(n)
+        for n in deleted:
+            piles.pop(n, None)
+            tombstones.add(n)
+        if not any(p["visible"] for p in piles.values()):
+            return 400, {"error": "ต้องเปิดใช้งานอย่างน้อย 1 กอง"}
+        saved = {"piles": sorted(piles.values(), key=lambda p: p["number"]), "deleted": sorted(tombstones), "updated_at": datetime.now(timezone.utc).isoformat()}
+        status, body = secret_chat_storage_request("POST", "bucket", json.dumps({"id": FRUIT_PILE_SETTINGS_BUCKET, "name": FRUIT_PILE_SETTINGS_BUCKET, "public": False}).encode())
+        if status >= 400 and status != 409 and "already exists" not in supabase_error_text(body).lower():
+            return status, body
+        status, body = secret_chat_storage_request("POST", f"object/{FRUIT_PILE_SETTINGS_BUCKET}/fruit-piles.json", json.dumps(saved, ensure_ascii=False).encode(), upsert=True)
+        return (200, saved) if status < 400 else (status, body)
+
+
 storage_usage_lock = threading.Lock()
 live_state_sync_lock = threading.Lock()
 production_record_insert_lock = threading.Lock()
 backup_clear_lock = threading.Lock()
 deduction_record_insert_lock = threading.Lock()
 time_record_insert_lock = threading.Lock()
+save_queue_identity_insert_lock = threading.Lock()
 production_save_queue_wakeup = threading.Event()
 production_save_queue_worker_id = f"render-{os.getpid()}-{secrets.token_hex(4)}"
 time_save_queue_wakeup = threading.Event()
@@ -142,6 +353,10 @@ time_queue_recovery_lock = threading.Lock()
 time_queue_last_recovery_at = 0.0
 online_user_sessions: dict[str, dict] = {}
 storage_usage_cache: dict = {"expires_at": 0.0, "data": None}
+production_delta_cache: dict[str, tuple[float, dict]] = {}
+production_delta_cache_lock = threading.Lock()
+time_delta_cache: dict[str, tuple[float, dict]] = {}
+time_delta_cache_lock = threading.Lock()
 production_record_next_id: int | None = None
 deduction_record_next_id: int | None = None
 time_record_next_id: int | None = None
@@ -159,6 +374,26 @@ SYSTEM_ACCOUNT_PROFILES = {
 SYSTEM_ACCOUNT_USERNAMES = {username.lower() for username in SYSTEM_ACCOUNT_PROFILES}
 
 
+def env_float(name: str, default: float = 0.0) -> float:
+    raw = os.environ.get(name, "")
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def env_int(name: str, default: int = 0) -> int:
+    raw = os.environ.get(name, "")
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 def session_token(account: dict) -> str:
     payload = {
         "sub": str(account.get("id", "")),
@@ -166,6 +401,7 @@ def session_token(account: dict) -> str:
         "fullname": str(account.get("fullname", "")),
         "level": str(account.get("user_level", "C1")),
         "role": str(account.get("role", "")),
+        "auth": hmac.new(SESSION_SIGNING_SECRET.encode(), str(account.get('password_hash') or '').encode(), hashlib.sha256).hexdigest(),
         "exp": int(time.time()) + 12 * 60 * 60,
     }
     encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
@@ -182,6 +418,20 @@ def verify_session_token(token: str) -> dict | None:
         padded = encoded + "=" * (-len(encoded) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
         if int(payload.get("exp", 0)) <= int(time.time()):
+            return None
+        status, accounts = supabase_request(
+            "GET", f"account_users?id=eq.{quote(str(payload.get('sub') or ''), safe='')}&select=id,username,fullname,user_level,role,status,password_hash&limit=1",
+            timeout_seconds=5,
+        )
+        if status >= 400 or not isinstance(accounts, list) or len(accounts) != 1:
+            return None
+        account = accounts[0]
+        current_auth = hmac.new(SESSION_SIGNING_SECRET.encode(), str(account.get('password_hash') or '').encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(str(payload.get('auth') or ''), current_auth):
+            return None
+        if account.get("status") != "Active" or account.get("username") != payload.get("username"):
+            return None
+        if str(account.get("user_level")) != payload.get("level") or str(account.get("role")) != payload.get("role"):
             return None
         return payload
     except (ValueError, TypeError, json.JSONDecodeError):
@@ -250,6 +500,12 @@ def production_record_owned_by_actor(record: dict, actor: dict, actor_account: d
     return bool(owner and owner in aliases)
 
 
+def production_rows_visible_to_actor(rows, actor):
+    if account_level_number(actor.get('level')) >= 2:
+        return rows
+    return [row for row in rows if production_record_owned_by_actor(production_record_raw_payload(row), actor, actor)]
+
+
 def production_record_within_self_edit_window(
     record: dict,
     actor: dict,
@@ -284,9 +540,354 @@ def inbound_actor_name(actor: dict) -> str:
     return inbound_clean_text(actor.get("username"), 120) or "unknown"
 
 
-def inbound_authorized_actor(handler: BaseHTTPRequestHandler) -> dict | None:
+def inbound_authorized_actor(handler: BaseHTTPRequestHandler, *, write: bool = True) -> dict | None:
     actor = secret_room_actor(handler)
-    return actor if actor and account_level_number(actor.get("level")) >= 5 else None
+    return actor if actor and account_level_number(actor.get("level")) >= 4 else None
+
+
+STOCK_CATEGORIES = {"packaging", "supplies", "office"}
+STOCK_MIGRATION = "supabase_stock_inventory_migration.sql"
+FRUIT_ISSUES_MIGRATION = "supabase_fruit_stock_issues_migration.sql"
+COLD_STOCK_MIGRATION = "supabase_cold_room_stock_migration.sql"
+
+
+def cold_stock_error(status: int, body: object) -> tuple[int, dict]:
+    code = str(body.get("code") or "") if isinstance(body, dict) else ""
+    if code in {"PGRST202", "PGRST205", "42P01", "42883"}:
+        return 503, {"error": "ยังไม่ได้ติดตั้งฐานข้อมูลห้องเย็น กรุณารัน " + COLD_STOCK_MIGRATION}
+    raw = supabase_error_text(body)
+    for marker, message, result in [
+        ("SALE_RESERVED", "พาเลตนี้รอขาย กรุณายืนยันจากออเดอร์รอตัดขายโดย C5–C7", 409),
+        ("COLD_RETRY_CONFLICT", "รหัสรายการนี้เคยบันทึกด้วยข้อมูลอื่นแล้ว", 409),
+        ("COLD_OCCUPIED", "ตำแหน่งนี้มีพาเลตแล้ว กรุณาโหลดใหม่และเลือกช่องว่าง", 409),
+        ("COLD_STALE", "พาเลตถูกเปลี่ยนแปลงโดยรายการอื่น กรุณาโหลดข้อมูลใหม่", 409),
+        ("COLD_INSUFFICIENT", "จำนวนกล่องคงเหลือไม่พอ กรุณาโหลดข้อมูลใหม่", 409),
+        ("COLD_NOT_FOUND", "ไม่พบพาเลต", 404),
+        ("COLD_LOCATION", "ไม่พบตำแหน่งจัดเก็บ", 400),
+        ("COLD_RECIPIENT", "กรุณาระบุผู้รับหรือปลายทางจ่ายออก", 400),
+        ("COLD_INVALID", "ข้อมูลห้องเย็นไม่ถูกต้อง กรุณาตรวจข้อมูลอีกครั้ง", 400),
+    ]:
+        if marker in raw:
+            return result, {"error": message}
+    return status, {"error": "อ่านหรือบันทึกสต็อกห้องเย็นไม่สำเร็จ กรุณาลองใหม่"}
+
+
+def cold_sale_error(status: int, body: object) -> tuple[int, dict]:
+    code = str(body.get("code") or "") if isinstance(body, dict) else ""
+    if code in {"PGRST202", "PGRST205", "42P01", "42883"}:
+        return 503, {"error": "ยังไม่ได้ติดตั้งระบบจองขาย กรุณารัน supabase_cold_sales_migration.sql"}
+    raw = supabase_error_text(body)
+    messages = {
+        "SALE_FULL_BOX": "น้ำหนักต้องครบจำนวนกล่องตามน้ำหนักต่อกล่องของสินค้า",
+        "SALE_INSUFFICIENT": "สินค้าว่างไม่พอหรือถูกจองแล้ว กรุณาโหลดข้อมูลใหม่",
+        "SALE_REASON": "กรุณาระบุเหตุผลเมื่อเปลี่ยนพาเลตจากแผน FIFO",
+        "SALE_QUANTITY": "จำนวนกล่องต้องตรงกับน้ำหนักในใบวางบิลทุกสินค้า",
+        "SALE_WRONG_PRODUCT": "สินค้าและน้ำหนักต่อกล่องไม่ตรงกับใบวางบิล",
+        "SALE_STALE": "ออเดอร์หรือสินค้าถูกเปลี่ยนแปลง กรุณาโหลดข้อมูลใหม่",
+        "SALE_RETRY_CONFLICT": "รหัสรายการนี้เคยใช้กับข้อมูลอื่นแล้ว",
+        "SALE_DUPLICATE": "กรุณารวมสินค้าชนิดและน้ำหนักต่อกล่องเดียวกันเป็นรายการเดียว",
+        "SALE_NOT_FOUND": "ไม่พบออเดอร์",
+        "SALE_INVALID": "ข้อมูลออเดอร์ไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง",
+    }
+    for marker, message in messages.items():
+        if marker in raw:
+            return (404 if marker == "SALE_NOT_FOUND" else 409 if marker in {"SALE_INSUFFICIENT", "SALE_STALE", "SALE_RETRY_CONFLICT"} else 400), {"error": message}
+    return (400 if code in {"22007", "22008", "22P02", "22003"} else status), {"error": "อ่านหรือบันทึกออเดอร์ไม่สำเร็จ กรุณาตรวจสอบแล้วลองใหม่"}
+
+
+def fruit_issue_payload(payload: dict, actor: dict) -> dict:
+    fruit_id = payload.get("fruit_id")
+    if isinstance(fruit_id, bool) or not re.fullmatch(r"[1-9]\d{0,17}", str(fruit_id or "")):
+        raise ValueError("กรุณาเลือกผลไม้")
+    uid = stock_text(payload, "client_uid", 160, required=True)
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", uid):
+        raise ValueError("รหัสรายการไม่ถูกต้อง")
+    try:
+        issued_at = datetime.fromisoformat(str(payload.get("issued_at") or "").replace("Z", "+00:00"))
+        if issued_at.tzinfo is None:
+            issued_at = issued_at.replace(tzinfo=timezone(timedelta(hours=7)))
+    except (ValueError, TypeError):
+        raise ValueError("วันที่เบิกไม่ถูกต้อง") from None
+    return {"p_client_uid": uid, "p_fruit_id": int(fruit_id),
+            "p_weight_kg": stock_decimal(payload.get("weight_kg"), "น้ำหนักเบิก", 2),
+            "p_recipient": stock_text(payload, "recipient", 160, required=True),
+            "p_note": stock_text(payload, "note", 1000),
+            "p_issued_at": issued_at.astimezone(timezone.utc).isoformat(),
+            "p_actor": inbound_actor_name(actor)}
+
+
+def fruit_issue_error(status: int, body: object) -> tuple[int, dict]:
+    code = str(body.get("code") or "") if isinstance(body, dict) else ""
+    if code in {"PGRST202", "PGRST205", "42P01", "42883"}:
+        return 503, {"error": "ยังไม่พร้อมเบิกผลไม้ กรุณารัน " + FRUIT_ISSUES_MIGRATION,
+                     "migration": FRUIT_ISSUES_MIGRATION}
+    raw = supabase_error_text(body)
+    for marker, message, http_status in [
+        ("FRUIT_INSUFFICIENT", "ยอดผลไม้คงเหลือ ณ วันที่เบิกไม่พอ กรุณาโหลดข้อมูลล่าสุด", 409),
+        ("FRUIT_IDEMPOTENCY_CONFLICT", "รหัสนี้เคยบันทึกด้วยข้อมูลอื่นแล้ว กรุณาเริ่มรายการใหม่", 409),
+        ("FRUIT_NOT_FOUND", "ไม่พบผลไม้ที่เลือก", 404),
+        ("FRUIT_INVALID_INPUT", "ข้อมูลเบิกผลไม้ไม่ถูกต้อง", 400),
+    ]:
+        if marker in raw:
+            return http_status, {"error": message}
+    return status, {"error": "อ่านหรือบันทึกสต็อกผลไม้ไม่สำเร็จ กรุณาลองใหม่"}
+
+
+def stock_text(payload: dict, key: str, maximum: int, *, required: bool = False) -> str:
+    value = re.sub(r"\s+", " ", str(payload.get(key) or "").strip())
+    if (required and not value) or len(value) > maximum:
+        raise ValueError(f"ข้อมูล {key} ต้องมีความยาว {'1' if required else '0'}-{maximum} ตัวอักษร")
+    return value
+
+
+def stock_category(value: object) -> str:
+    category = str(value or "").strip()
+    if category not in STOCK_CATEGORIES:
+        raise ValueError("ประเภทสต็อกไม่ถูกต้อง")
+    return category
+
+
+def stock_decimal(value: object, key: str, places: int, *, allow_zero: bool = False) -> str:
+    """Pass exact decimal strings to PostgreSQL; never round or accept NaN/Infinity."""
+    try:
+        if isinstance(value, bool) or len(str(value)) > 80:
+            raise ValueError()
+        result = Decimal(str(value))
+        quantum = Decimal(1).scaleb(-places)
+        if not result.is_finite() or result < 0 or (not allow_zero and result == 0) or result > 1_000_000_000:
+            raise ValueError()
+        if result != result.quantize(quantum):
+            raise ValueError()
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"{key} ต้องเป็นตัวเลข{'ตั้งแต่ศูนย์' if allow_zero else 'มากกว่าศูนย์'} ไม่เกิน 1,000,000,000 และทศนิยมไม่เกิน {places} ตำแหน่ง") from None
+    # Canonical fixed-point output also bounds zero values with huge exponents.
+    return format(result.quantize(quantum), "f").rstrip("0").rstrip(".") if places else format(result, "f")
+
+
+def stock_item_payload(payload: dict, actor: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("ข้อมูลสินค้าต้องเป็น JSON object")
+    return {
+        "p_category": stock_category(payload.get("category")),
+        "p_name": stock_text(payload, "name", 160, required=True),
+        "p_specification": stock_text(payload, "specification", 200),
+        "p_size": stock_text(payload, "size", 120),
+        "p_unit": stock_text(payload, "unit", 40, required=True),
+        "p_actor": inbound_actor_name(actor),
+    }
+
+
+def stock_movement_payload(payload: dict, actor: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("ข้อมูลรายการต้องเป็น JSON object")
+    category = stock_category(payload.get("category"))
+    item_id = payload.get("item_id")
+    if isinstance(item_id, bool) or not re.fullmatch(r"[1-9]\d{0,17}", str(item_id or "")):
+        raise ValueError("กรุณาเลือกสินค้า")
+    movement_type = str(payload.get("type") or "")
+    if movement_type not in {"receipt", "issue"}:
+        raise ValueError("ประเภทรายการต้องเป็นรับเข้าหรือเบิกออก")
+    client_uid = stock_text(payload, "client_uid", 160, required=True)
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", client_uid):
+        raise ValueError("รหัสป้องกันรายการซ้ำไม่ถูกต้อง กรุณาเปิดแบบฟอร์มใหม่")
+    occurred_on = str(payload.get("occurred_on") or "").strip()
+    try:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", occurred_on):
+            raise ValueError()
+        datetime.strptime(occurred_on, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        raise ValueError("วันที่รายการไม่ถูกต้อง") from None
+    return {
+        "p_category": category, "p_item_id": int(item_id), "p_type": movement_type,
+        "p_quantity": stock_decimal(payload.get("quantity"), "จำนวน", 3),
+        "p_unit_price": stock_decimal(payload.get("unit_price"), "ราคาต่อหน่วย", 4, allow_zero=True) if movement_type == "receipt" else None,
+        "p_delivery_note": stock_text(payload, "delivery_note", 120),
+        "p_supplier": stock_text(payload, "supplier", 160, required=movement_type == "receipt"),
+        "p_recipient": stock_text(payload, "recipient", 160, required=movement_type == "issue"),
+        "p_note": stock_text(payload, "note", 1000), "p_occurred_on": occurred_on,
+        "p_client_uid": client_uid, "p_actor": inbound_actor_name(actor),
+    }
+
+
+def stock_api_error(status: int, body: object) -> tuple[int, dict]:
+    raw = supabase_error_text(body)
+    code = str(body.get("code") or "") if isinstance(body, dict) else ""
+    if code in {"PGRST202", "PGRST205", "42P01", "42883"}:
+        return 503, {"error": "ยังไม่ได้ติดตั้งตารางสต็อก กรุณารัน SQL migration ก่อนใช้งาน", "migration": STOCK_MIGRATION}
+    for marker, message, http_status in [
+        ("STOCK_INSUFFICIENT", "ยอดคงเหลือไม่พอสำหรับการเบิก กรุณาโหลดข้อมูลล่าสุด", 409),
+        ("STOCK_IDEMPOTENCY_CONFLICT", "รหัสรายการนี้เคยใช้กับข้อมูลอื่นแล้ว กรุณาเปิดแบบฟอร์มใหม่", 409),
+        ("STOCK_ITEM_NOT_FOUND", "ไม่พบสินค้าในประเภทสต็อกนี้", 404),
+        ("STOCK_INVALID", "ข้อมูลรายการสต็อกไม่ถูกต้อง", 400),
+    ]:
+        if marker in raw:
+            return http_status, {"error": message}
+    if code == "23505":
+        return 409, {"error": "สินค้าชื่อ ขนาด รายละเอียด และหน่วยนี้มีอยู่แล้ว กรุณาเลือกจากรายการเดิม"}
+    return status, {"error": "บันทึกหรืออ่านข้อมูลสต็อกไม่สำเร็จ กรุณาลองใหม่", "detail": body}
+
+
+def account_management_actor(handler: BaseHTTPRequestHandler, *, delete: bool = False) -> dict | None:
+    actor = verify_session_token(handler.headers.get("X-Session-Token", ""))
+    if not actor:
+        return None
+    level = account_level_number(actor.get("level"))
+    role = str(actor.get("role") or "").strip().lower()
+    administrator = level >= 5 or role == "developer"
+    return actor if administrator else None
+
+
+def legacy_request_minimum_level(method: str, path: str, payload: dict | None = None) -> int | None:
+    """Guard older endpoints with the same levels already enforced by the UI.
+
+    Newer endpoints retain their own, more specific checks below. Reading shared
+    caches requires a login because several ordinary pages hydrate these caches.
+    A bulk cache upload must not bypass the production editor's ownership window.
+    """
+    payload = payload or {}
+    if path.startswith("/api/secret-room/") or path.startswith("/api/issue-reports"):
+        return 3
+    if path == "/api/backup" or path.startswith("/api/backup/"):
+        return 6
+    if method == "POST" and (path == "/api/production-records/batch-date" or re.fullmatch(r"/api/production-records/\d+", path)):
+        return 3
+    if path.startswith("/reports/"):
+        return 5 if path == "/reports/time-full-export-excel" else 3 if path.startswith('/reports/time-') else 2
+    if path == "/api/online-users":
+        return 1
+    if method == "GET":
+        if path.startswith('/api/time-save-queue'):
+            return 3
+        if path == '/api/accounts':
+            return 5
+        if path in {'/api/time-employees', '/api/deductions', '/api/deduction-applications'}:
+            return 3
+        if path in {"/api/audit-logs/snapshot", "/api/audit-logs/delta"}:
+            return 5
+        if path in {
+            "/api/state", "/api/employees", "/api/time-employees", "/api/accounts",
+            "/api/wage-rates", "/api/deductions", "/api/deduction-applications",
+            "/api/production-records/snapshot", "/api/production-records/delta",
+            "/api/time-records/snapshot", "/api/time-records/delta",
+        }:
+            return 1
+    if method in {"POST", "PUT", "DELETE"}:
+        if path in {"/api/employees", "/api/time-employees"}:
+            return 5 if method == "DELETE" else 4
+        if path in {"/api/employees/sync", "/api/time-employees/sync", "/api/wage-rates/sync"}:
+            return 4
+        if path in {"/api/deductions", "/api/deductions/sync", "/api/deduction-applications/apply"}:
+            return 4
+        if path == "/api/production-records/bulk-sync":
+            return 1 if str(payload.get("mode") or "upsert").strip().lower() == "insert" else 4
+        if path == "/api/time-records/bulk-sync":
+            return 4
+        if path == "/api/time-save-queue/enqueue" or re.fullmatch(r"/api/time-save-queue/\d+/(verify|retry|edit-retry)", path):
+            return 4
+        if path in {"/api/cleanup-test-data", "/api/production-records/delete-by-date", "/api/admin/remove-superseded-production-records"}:
+            return 4
+        if path == "/api/production-records/verify":
+            return 1
+        if path == "/api/state":
+            table = str(payload.get("table") or "").strip()
+            return 4 if table in {"production_records", "time_records"} else 1
+    return None
+
+
+def authorize_legacy_request(handler: BaseHTTPRequestHandler, method: str, path: str, payload: dict | None = None) -> bool:
+    if method in {'POST', 'PUT'} and path in {'/api/accounts', '/api/accounts/sync'}:
+        manager = account_management_actor(handler)
+        if not manager:
+            handler.send_json({'error': 'Administrator session is required.'}, 403)
+            return False
+        entries = (payload or {}).get('accounts', []) if path.endswith('/sync') else [payload or {}]
+        if not isinstance(entries, list):
+            handler.send_json({'error': 'Invalid accounts.'}, 400)
+            return False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                handler.send_json({'error': 'Invalid account.'}, 400)
+                return False
+            requested = str(entry.get('level') or entry.get('user_level') or 'C1').upper()
+            if requested not in {'C1', 'C2', 'C3', 'C4', 'C5', 'C6'} or account_level_number(requested) > account_level_number(manager.get('level')):
+                handler.send_json({'error': 'ไม่สามารถกำหนดสิทธิ์บัญชีสูงกว่าผู้จัดการบัญชีได้'}, 403)
+                return False
+    if path in {"/api/accounting/stock-summary", "/api/accounting/stock-sale-price", "/api/accounting/stock-costs"}:
+        actor = verify_session_token(handler.headers.get("X-Session-Token", ""))
+        if not actor or actor.get("level") not in {"C6", "C7"}:
+            handler.send_json({"error": "Stock summary access requires C6 or C7."}, 403)
+            return False
+    minimum = legacy_request_minimum_level(method, path, payload)
+    if minimum is None:
+        return True
+    actor = verify_session_token(handler.headers.get("X-Session-Token", ""))
+    if not actor:
+        handler.send_json({"error": "A signed-in session is required."}, 401)
+        return False
+    if account_level_number(actor.get("level")) < minimum:
+        handler.send_json({"error": f"C{minimum} or higher is required for this action."}, 403)
+        return False
+    handler.authorized_legacy_actor = actor
+    if method == "POST" and path in {"/api/employees", "/api/time-employees", "/api/deductions"}:
+        payload["created_by"] = str(actor.get("username") or "").strip()
+        payload["updated_by"] = str(actor.get("username") or "").strip()
+    return True
+
+
+def client_audit_signature(row: dict, *, actor_username: str | None = None) -> tuple:
+    timestamp = str(row.get("created_at") or "")
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            timestamp = parsed.astimezone(timezone.utc).isoformat()
+    except (ValueError, TypeError):
+        pass
+    return (actor_username if actor_username is not None else str(row.get("created_by") or ""),
+            str(row.get("action") or ""), str(row.get("module") or ""),
+            str(row.get("description") or row.get("detail") or ""), timestamp)
+
+
+def sync_client_audit_rows(payloads: list[dict], actor: dict) -> tuple[int, dict]:
+    """Append browser events without trusting local IDs or rewriting history.
+
+    The caller holds live_state_sync_lock, so overlapping browser retries cannot
+    insert the same fingerprint concurrently in this server process.
+    """
+    synced = []
+    username = str(actor.get("username") or "").strip()
+    uid_field = quote("metadata->>client_uid", safe="")
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        row = live_state_row("audit_logs", payload)
+        signature = client_audit_signature(row, actor_username=username)
+        uid = "client:" + hashlib.sha256(json.dumps(signature, ensure_ascii=False).encode("utf-8")).hexdigest()
+        status, existing = supabase_request("GET", f"audit_logs?{uid_field}=eq.{quote(uid)}&select=*&limit=1")
+        if status >= 400:
+            return status, {"error": existing}
+        if isinstance(existing, list) and existing:
+            synced.append(existing[0])
+            continue
+        # C6/C7 caches can also contain server-written events or another user's
+        # history. Recognize an unchanged central event before pinning identity.
+        if re.fullmatch(r"[1-9]\d*", str(row.get("id") or "")):
+            status, existing = supabase_request("GET", f"audit_logs?id=eq.{row['id']}&select=*&limit=1")
+            if status >= 400:
+                return status, {"error": existing}
+            if isinstance(existing, list) and existing and client_audit_signature(existing[0]) == client_audit_signature(row):
+                synced.append(existing[0])
+                continue
+        row.pop("id", None)
+        row["created_by"] = username
+        row["user_fullname"] = actor.get("fullname") or username
+        row["metadata"] = {**row.get("metadata", {}), "created_by": username,
+                           "user_fullname": row["user_fullname"], "username": username,
+                           "client_uid": uid, "client_event": True}
+        status, saved = insert_audit_log_compatible(row)
+        if status >= 400:
+            return status, {"error": saved}
+        synced.extend(saved if isinstance(saved, list) else [saved])
+    return 200, {"synced": synced}
 
 
 def inbound_audit(handler: BaseHTTPRequestHandler, actor: dict, action: str, detail: str, metadata: dict) -> tuple[int, object]:
@@ -517,11 +1118,14 @@ def ensure_system_accounts() -> None:
         }
         status, existing = supabase_request(
             "GET",
-            f"account_users?username=eq.{quote(username)}&select=id&limit=1",
+            f"account_users?username=eq.{quote(username)}&select=id,password_hash,fullname,role,user_level,status&limit=1",
         )
         if status >= 400:
             continue
         if isinstance(existing, list) and existing:
+            current = existing[0]
+            if verify_password(profile['password'], str(current.get('password_hash') or '')) and all(current.get(key) == account[key] for key in ('fullname', 'role', 'user_level', 'status')):
+                continue
             supabase_request(
                 "PATCH",
                 f"account_users?username=eq.{quote(username)}",
@@ -565,9 +1169,14 @@ def time_employee_from_payload(payload: dict) -> dict:
         "special_365": 365,
         "special_347": 347,
         "special_500": 500,
+        "education_347": 347,
+        "office_347": 0,
     }
     daily_wage = payload.get("daily_wage", type_daily_wages.get(employee_type, 347))
     ot_hourly_rate = payload.get("ot_hourly_rate", 50)
+    if employee_type == "office_347":
+        daily_wage = 0
+        ot_hourly_rate = 0
     employee = {
         "emp_code": str(payload.get("emp_code", "")).strip(),
         "fullname": str(payload.get("fullname", "")).strip(),
@@ -578,6 +1187,9 @@ def time_employee_from_payload(payload: dict) -> dict:
         "note": str(payload.get("note", "")).strip() or None,
         "created_by": str(payload.get("created_by", "")).strip() or None,
     }
+    # Older clients omit this field; do not erase an existing assignment on PATCH.
+    if "recruitment_group" in payload:
+        employee["recruitment_group"] = str(payload.get("recruitment_group") or "").strip() or None
     if payload.get("id") not in [None, ""]:
         employee["id"] = payload.get("id")
     return employee
@@ -637,6 +1249,35 @@ def is_unique_constraint_error(body: object, constraint_name: str) -> bool:
     return "duplicate key value" in text and constraint_name.lower() in text
 
 
+def insert_identity_row_compatible(
+    table: str,
+    row: dict,
+    constraint_name: str,
+    *,
+    prefer: str = "return=representation",
+    timeout_seconds: int = 5,
+) -> tuple[int, object]:
+    """Insert an identity row, recovering when a restored table has a stale sequence."""
+    clean_row = {key: value for key, value in row.items() if key != "id"}
+    status, body = supabase_request(
+        "POST", table, clean_row, prefer=prefer, timeout_seconds=timeout_seconds,
+    )
+    if status < 400 or not is_unique_constraint_error(body, constraint_name):
+        return status, body
+
+    # Backup restores may preserve IDs without advancing the identity sequence.
+    # Serialize the fallback in this process and explicitly use the next free ID.
+    with save_queue_identity_insert_lock:
+        for _ in range(3):
+            explicit_row = {**clean_row, "id": next_table_id(table)}
+            status, body = supabase_request(
+                "POST", table, explicit_row, prefer=prefer, timeout_seconds=timeout_seconds,
+            )
+            if status < 400 or not is_unique_constraint_error(body, constraint_name):
+                return status, body
+    return status, body
+
+
 def strip_durian_columns(rows: list[dict]) -> list[dict]:
     return [
         {
@@ -677,6 +1318,12 @@ def production_record_raw_payload(row: dict) -> dict:
     return raw if isinstance(raw, dict) else row
 
 
+def production_record_is_single_weight(row: dict) -> bool:
+    raw = production_record_raw_payload(row)
+    fruit_type = str(row.get("fruit_type") or raw.get("fruit_type") or "mangosteen")
+    return fruit_type in SINGLE_WEIGHT_FRUITS or str(row.get("production_mode") or raw.get("production_mode") or "") == "single"
+
+
 def production_record_client_uid(row: dict) -> str:
     raw = production_record_raw_payload(row)
     return str(raw.get("client_uid") or row.get("client_uid") or "").strip()
@@ -691,7 +1338,7 @@ def production_record_duplicate_signature(row: dict) -> str:
     raw = production_record_raw_payload(row)
     fruit_type = str(row.get("fruit_type") or raw.get("fruit_type") or "mangosteen")
     pile = production_pile_number(raw) or production_pile_number(row) or ""
-    if fruit_type == "durian":
+    if production_record_is_single_weight(row):
         weights = production_grade_weights(raw if raw.get("grade_weights") is not None else row)
         weight_key = {grade: round(weights[grade], 3) for grade in DURIAN_GRADES}
     else:
@@ -715,7 +1362,7 @@ def production_record_duplicate_signature(row: dict) -> str:
 def production_record_weight_total(row: dict) -> float:
     raw = production_record_raw_payload(row)
     fruit_type = str(row.get("fruit_type") or raw.get("fruit_type") or "mangosteen")
-    if fruit_type == "durian":
+    if production_record_is_single_weight(row):
         return production_grade_total(raw if raw.get("grade_weights") is not None else row)
     return (
         safe_float(row.get("water_weight", raw.get("water_weight", raw.get("water", 0))))
@@ -738,15 +1385,35 @@ def production_batch_group_key(row: dict) -> str:
     return f"time:{row.get('record_time') or raw.get('record_time') or row.get('created_at') or raw.get('created_at') or ''}"
 
 
+def production_record_weight_channels(row: dict) -> dict[str, float]:
+    raw = production_record_raw_payload(row)
+    fruit_type = str(row.get("fruit_type") or raw.get("fruit_type") or "mangosteen")
+    if production_record_is_single_weight(row):
+        weights = production_grade_weights(raw if raw.get("grade_weights") is not None else row)
+        return {f"grade_{grade}": weights[grade] for grade in DURIAN_GRADES if weights[grade] > 0}
+    water = safe_float(row.get("water_weight", raw.get("water_weight", raw.get("water", 0))))
+    flower = safe_float(row.get("flower_weight", raw.get("flower_weight", raw.get("flower", 0))))
+    return {
+        channel: weight
+        for channel, weight in (("water", water), ("flower", flower))
+        if weight > 0
+    }
+
+
 def production_batch_summary(rows: list[dict]) -> dict:
-    piles: dict[str, float] = {}
+    piles: dict[str, dict[str, float]] = {}
     for row in rows:
         raw = production_record_raw_payload(row)
         pile = str(production_pile_number(raw) or production_pile_number(row) or "")
         if not pile:
             continue
-        piles[pile] = piles.get(pile, 0.0) + production_record_weight_total(row)
-    return {"piles": piles, "total": sum(piles.values())}
+        pile_channels = piles.setdefault(pile, {})
+        for channel, weight in production_record_weight_channels(row).items():
+            pile_channels[channel] = pile_channels.get(channel, 0.0) + weight
+    return {
+        "piles": piles,
+        "total": sum(weight for channels in piles.values() for weight in channels.values()),
+    }
 
 
 def near_duplicate_batch_error(insert_rows: list[dict], existing_rows: list[dict]) -> dict | None:
@@ -761,11 +1428,22 @@ def near_duplicate_batch_error(insert_rows: list[dict], existing_rows: list[dict
         existing_summary = production_batch_summary(group_rows)
         if set(existing_summary["piles"].keys()) != incoming_piles:
             continue
+        # A water entry and a flower entry (or different durian grades) are
+        # separate production types even for the same employee and pile.
+        if any(
+            set(incoming_summary["piles"][pile].keys())
+            != set(existing_summary["piles"][pile].keys())
+            for pile in incoming_piles
+        ):
+            continue
         similarity = production_similarity_ratio(incoming_summary["total"], existing_summary["total"])
         if similarity < 0.5:
             continue
         same_exact = all(
-            abs(incoming_summary["piles"].get(pile, 0.0) - existing_summary["piles"].get(pile, 0.0)) < 0.05
+            all(
+                abs(weight - existing_summary["piles"][pile].get(channel, 0.0)) < 0.05
+                for channel, weight in incoming_summary["piles"][pile].items()
+            )
             for pile in incoming_piles
         )
         if same_exact:
@@ -811,14 +1489,127 @@ def production_duplicate_lookup_rows(insert_rows: list[dict]) -> tuple[int, list
 
 
 def production_duplicate_response_row(existing_row: dict, incoming_row: dict) -> dict:
-    response_row = dict(existing_row)
-    incoming_raw = production_record_raw_payload(incoming_row)
-    if isinstance(incoming_raw, dict):
-        response_row["raw_payload"] = {**incoming_raw, "id": existing_row.get("id")}
-    return response_row
+    # Return persisted facts. Never make an old row appear to contain new data.
+    return dict(existing_row)
 
 
-def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, dict | list | str | None]:
+def desktop_result_error(expected: list[dict], actual: list[dict]) -> str | None:
+    if len(expected) != len(actual):
+        return "จำนวนรายการที่บันทึกจริงไม่ครบตามคิว"
+    ids = [row.get("id") for row in actual]
+    if any(value is None for value in ids) or len(set(ids)) != len(ids):
+        return "คิวอ้างถึงรหัสรายการจริงซ้ำกัน"
+    by_uid = {production_record_client_uid(row): row for row in actual}
+    if len(by_uid) != len(actual):
+        return "รหัสรายการนำเข้าซ้ำในฐานกลาง"
+    for row in expected:
+        saved = by_uid.get(production_record_client_uid(row))
+        if saved is None:
+            return "มีรหัสรายการนำเข้าที่ยังไม่ได้บันทึกจริง"
+        try:
+            if desktop_file.row_identity(row) != desktop_file.row_identity(saved):
+                return "ข้อมูลรายการจริงไม่ตรงกับต้นฉบับที่เข้าคิว"
+        except (ValueError, TypeError, ArithmeticError):
+            return "ข้อมูลอ้างอิงรายการจริงไม่สมบูรณ์"
+        if abs(production_record_weight_total(row) - production_record_weight_total(saved)) > 0.00001:
+            return "น้ำหนักที่บันทึกจริงไม่ตรงกับคิว"
+    return None
+
+
+def desktop_lookup_records(rows: list[dict]):
+    result = []
+    uids = sorted({production_record_client_uid(row) for row in rows})
+    if not all(uids) or len(uids) != len(rows):
+        return 409, {"error": "รหัสการรับข้อมูลภายในคิวไม่ครบหรือซ้ำกัน"}
+    for offset in range(0, len(uids), 40):
+        values = ','.join(uids[offset:offset + 40])
+        status, found = supabase_get_all(
+            'production_records?raw_payload->>client_uid=in.(' + quote(values, safe=',:.-') + ')&select=*')
+        if status >= 400 or not isinstance(found, list):
+            return status if status >= 400 else 502, {"error": found}
+        result.extend(found)
+    return 200, result
+
+
+def desktop_capture_conflict(rows):
+    """Detect reused captures even across renamed, partial and legacy files."""
+    groups = {}
+    for row in rows:
+        meta = production_record_raw_payload(row).get('desktop_import') or {}
+        station, capture = str(meta.get('station_id') or ''), str(meta.get('capture_id') or '')
+        if not station or not capture:
+            return 'ข้อมูลอ้างอิงสถานีหรือรอบชั่งไม่ครบ'
+        groups.setdefault(station, {})[capture] = row
+    for station, captures in groups.items():
+        values = list(captures)
+        for offset in range(0, len(values), 40):
+            # JSON-quoted values prevent filter metacharacters from changing the query.
+            wanted = ','.join(json.dumps(v) for v in values[offset:offset + 40])
+            status, existing = supabase_get_all('production_records?raw_payload->desktop_import->>station_id=eq.' + quote(station, safe='') + '&raw_payload->desktop_import->>capture_id=in.(' + quote(wanted, safe='') + ')&select=*')
+            if status >= 400 or not isinstance(existing, list):
+                return 'ยังตรวจรอบชั่งซ้ำจากฐานกลางไม่ได้'
+            for saved in existing:
+                meta = production_record_raw_payload(saved).get('desktop_import') or {}
+                incoming = captures.get(str(meta.get('capture_id') or ''))
+                if incoming is not None and (production_record_client_uid(incoming) != production_record_client_uid(saved) or desktop_file.row_identity(incoming) != desktop_file.row_identity(saved)):
+                    return 'พบรอบชั่งเดิมที่บันทึกไว้แล้วด้วยรหัสหรือข้อมูลต่างกัน กรุณาตรวจคิวเดิมก่อนนำเข้า เพื่อไม่คิดน้ำหนักซ้ำ'
+    return None
+
+
+def insert_desktop_records(rows: list[dict]):
+    """Keep all occurrences in an accepted file; retry only the same event IDs."""
+    conflict = desktop_capture_conflict(rows)
+    if conflict:
+        return 409, {'error': conflict}
+    status, existing = desktop_lookup_records(rows)
+    if status >= 400:
+        return status, existing
+    existing_uids = {production_record_client_uid(row) for row in existing}
+    matched = [row for row in rows if production_record_client_uid(row) in existing_uids]
+    if matched:
+        error = desktop_result_error(matched, existing)
+        if error:
+            return 409, {"error": error, "duplicate_guard": "desktop_identity_conflict"}
+    pending = [row for row in rows if production_record_client_uid(row) not in existing_uids]
+    if pending:
+        # Legacy Desktop rows also need event-based keys when repairing an old queue.
+        saved_at = datetime.now(timezone.utc).isoformat()
+        # Keep capture time in desktop_import.recorded_at; delta sync follows
+        # the database write time, not the old export or queue creation time.
+        pending = [{**row, "updated_at": saved_at,
+                    "raw_payload": {**production_record_raw_payload(row), "updated_at": saved_at},
+                    "queue_dedupe_key": desktop_file.digest(['desktop-event', production_record_client_uid(row)])}
+                   for row in pending]
+        for attempt in range(4):
+            queued = assign_production_record_ids(pending, refresh=attempt > 0)
+            status, body = supabase_request('POST', 'production_records', queued, prefer='return=representation')
+            if status >= 400 and has_durian_columns(queued) and not is_unique_constraint_error(body, 'production_records_pkey'):
+                status, body = supabase_request('POST', 'production_records', strip_durian_columns(queued), prefer='return=representation')
+            if not (status >= 400 and is_unique_constraint_error(body, 'production_records_pkey')):
+                break
+        if status >= 400:
+            return status, body
+    # Read the persisted rows, rather than trusting response length or echoed payloads.
+    status, persisted = desktop_lookup_records(rows)
+    if status >= 400:
+        return status, persisted
+    error = desktop_result_error(rows, persisted)
+    if error:
+        return 409, {"error": error, "duplicate_guard": "desktop_incomplete"}
+    by_uid = {production_record_client_uid(row): row for row in persisted}
+    return 200, [by_uid[production_record_client_uid(row)] for row in rows]
+
+
+def insert_production_records_compatible(
+    insert_rows: list[dict],
+    *,
+    allow_near_duplicate: bool = False,
+) -> tuple[int, dict | list | str | None]:
+    if any(desktop_file.is_desktop(row) for row in insert_rows):
+        if not all(desktop_file.is_desktop(row) for row in insert_rows):
+            return 400, {"error": "ห้ามผสมข้อมูล Import กับรายการกรอกเองในคิวเดียวกัน"}
+        return insert_desktop_records(insert_rows)
+
     def post(rows: list[dict]) -> tuple[int, dict | list | str | None]:
         return supabase_request(
             "POST",
@@ -854,13 +1645,15 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
         uid = production_record_client_uid(row)
         signature = production_record_duplicate_signature(row)
         existing = existing_by_uid.get(uid) if uid else None
-        existing = existing or existing_by_signature.get(signature)
         if existing:
+            if production_record_duplicate_signature(existing) != signature:
+                return 409, {"error": "รหัสรายการเดิมมีข้อมูลน้ำหนักหรือกองเปลี่ยนไป กรุณาตรวจสอบ", "duplicate_guard": "identity_conflict"}
             result_rows[index] = production_duplicate_response_row(existing, row)
             continue
         pending_ref = pending_by_uid.get(uid) if uid else None
-        pending_ref = pending_ref if pending_ref is not None else pending_by_signature.get(signature)
         if pending_ref is not None:
+            if production_record_duplicate_signature(insert_rows[pending_ref]) != signature:
+                return 409, {"error": "รหัสรายการซ้ำแต่ข้อมูลต่างกัน", "duplicate_guard": "identity_conflict"}
             duplicate_refs[index] = pending_ref
             continue
         pending_by_uid[uid] = index
@@ -868,7 +1661,7 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
         pending_indexes.append(index)
         pending_rows.append(row)
 
-    incoming_batch_uids = {production_record_batch_uid(row) for row in insert_rows if production_record_batch_uid(row)}
+    incoming_batch_uids = set()  # A batch ID or equal weight is not an event identity.
     for batch_uid in incoming_batch_uids:
         existing_batch_rows = existing_by_batch_uid.get(batch_uid, [])
         if existing_batch_rows and len(existing_batch_rows) >= len(insert_rows):
@@ -878,7 +1671,7 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
                 for existing, incoming in zip(sorted_existing, insert_rows)
             ]
 
-    near_error = near_duplicate_batch_error(insert_rows, existing_rows)
+    near_error = None if allow_near_duplicate else near_duplicate_batch_error(insert_rows, existing_rows)
     if near_error:
         return 409, near_error
 
@@ -910,14 +1703,117 @@ def insert_production_records_compatible(insert_rows: list[dict]) -> tuple[int, 
     return status, body
 
 
+def desktop_review_token(file_hash, matches, actor, issued=None):
+    issued = int(time.time()) if issued is None else issued
+    message = desktop_file.canonical([file_hash, matches, actor, issued])
+    signature = hmac.new(SESSION_SIGNING_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return f'{issued}.{signature}'
+
+
+def desktop_review_confirmed(token, file_hash, matches, actor):
+    try:
+        issued = int(str(token).split('.', 1)[0])
+        return (0 <= time.time() - issued <= 600
+                and hmac.compare_digest(str(token), desktop_review_token(file_hash, matches, actor, issued)))
+    except (ValueError, TypeError):
+        return False
+
+
+def accept_desktop_file(payload, actor):
+    actor_name = str(actor.get('username') or 'unknown')
+    records = payload.get('records')
+    try:
+        desktop_file.validate_records(records)
+    except (ValueError, TypeError, ArithmeticError) as error:
+        return 400, {'error': str(error)}
+    if isinstance(records, list) and all(isinstance(record, dict) for record in records):
+        error = validate_production_central_facts([live_state_row('production_records', record) for record in records])
+        if error:
+            return 409, {'error': error}
+    try:
+        manifest, jobs = desktop_file.prepare_file(
+            payload.get('records'), payload.get('file_name'), actor_name,
+            live_state_row, validate_production_queue_rows, production_queue_payload_hash,
+            production_record_weight_total)
+    except (ValueError, TypeError, ArithmeticError) as error:
+        return 400, {'error': str(error)}
+    with desktop_file_import_lock:
+        try:
+            previous = desktop_file.load_history(manifest, supabase_get_all)
+        except RuntimeError as error:
+            return 503, {'error': str(error)}
+        matches = desktop_file.compare_files(manifest, previous)
+        if any(item['exact'] for item in matches):
+            return 409, {'error': 'ข้อมูลทั้งไฟล์ตรงกับชุดที่เคยรับเข้าแล้ว 100% จึงไม่รับไฟล์ซ้ำ กรุณาดูคิวเดิม',
+                         'code': 'desktop_file_duplicate', 'matches': matches}
+        if matches and not desktop_review_confirmed(payload.get('review_token'), manifest['hash'], matches, actor_name):
+            return 409, {'error': 'ไฟล์มีข้อมูลตรงกับไฟล์เดิมตั้งแต่ 90% ต้องตรวจสอบก่อนยืนยันรับทั้งไฟล์',
+                         'code': 'desktop_file_review', 'matches': matches,
+                         'review_token': desktop_review_token(manifest['hash'], matches, actor_name)}
+        if matches:
+            jobs[0]['payload'][0]['raw_payload']['desktop_import']['overlap_review'] = {
+                'actor': actor_name, 'matches': matches, 'confirmed_at': datetime.now(timezone.utc).isoformat()}
+            jobs[0]['payload_hash'] = production_queue_payload_hash(jobs[0]['payload'])
+        conflict = desktop_capture_conflict([row for job in jobs for row in job['payload']])
+        if conflict:
+            return 409, {'error': conflict}
+        # One PostgREST INSERT is one DB transaction: all file queues or none.
+        # Deterministic queue_uid values also protect concurrent/retried requests.
+        status, body = supabase_request('POST', 'production_save_queue', jobs,
+                                        prefer='return=representation', timeout_seconds=30)
+        if status >= 400 or not isinstance(body, list) or len(body) != len(jobs):
+            return status if status >= 400 else 502, {
+                'error': 'ยังยืนยันการรับไฟล์ไม่ได้ กรุณาตรวจคิวเดิมหรือลองส่งไฟล์เดิมอีกครั้ง ระบบจะตรวจทั้งไฟล์ก่อนรับซ้ำ',
+                'code': 'desktop_file_acceptance_uncertain'}
+        production_save_queue_wakeup.set()
+        return 202, {'accepted': True, 'file_hash': manifest['hash'], 'record_count': manifest['count'],
+                     'queues': [production_queue_to_client(row) for row in body]}
+
+
 def production_queue_payload_hash(rows: list[dict]) -> str:
     canonical = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def production_manual_confirmation_rows(queue_id: int, rows: list[dict]) -> list[dict]:
+    """Give a reviewed queue stable queue-owned idempotency keys."""
+    if rows and all(desktop_file.is_desktop(row) for row in rows):
+        return rows
+    batch_uid = f"manual-confirm-queue-{queue_id}"
+    confirmed_rows = []
+    for index, row in enumerate(rows, start=1):
+        raw = production_record_raw_payload(row)
+        confirmed_raw = {
+            **raw,
+            "client_uid": f"{batch_uid}-row-{index}",
+            "batch_uid": batch_uid,
+            "manually_reviewed": True,
+            "source_queue_id": queue_id,
+        }
+        confirmed_rows.append({**row, "raw_payload": confirmed_raw})
+    return confirmed_rows
+
+
 def production_queue_dedupe_key(row: dict) -> str:
-    signature = production_record_duplicate_signature(row)
-    return hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    if desktop_file.is_desktop(row):
+        return desktop_file.digest(['desktop-event', production_record_client_uid(row)])
+    uid = production_record_client_uid(row)
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,200}", uid):
+        raise ValueError("Production event identity is missing or invalid.")
+    return hashlib.sha256(f"manual-event:{uid}".encode("utf-8")).hexdigest()
+
+
+def production_queue_weight_details(row: dict) -> dict:
+    payload = row.get("payload") if isinstance(row.get("payload"), list) else []
+    fruit_type = str(row.get("fruit_type") or "mangosteen")
+    if fruit_type in SINGLE_WEIGHT_FRUITS:
+        return {
+            "weight": round(sum(production_record_weight_total(item) for item in payload if isinstance(item, dict)), 3)
+        }
+    return {
+        "water": round(sum(safe_float(item.get("water_weight")) for item in payload if isinstance(item, dict)), 3),
+        "flower": round(sum(safe_float(item.get("flower_weight")) for item in payload if isinstance(item, dict)), 3),
+    }
 
 
 def production_queue_to_client(row: dict, include_payload: bool = False) -> dict:
@@ -927,6 +1823,9 @@ def production_queue_to_client(row: dict, include_payload: bool = False) -> dict
         if key not in {"payload", "payload_hash", "locked_by"}
     }
     result["queue_no"] = f"Q-{int(row.get('id') or 0):06d}"
+    result["weight_details"] = production_queue_weight_details(row)
+    source_rows = row.get("payload") or []
+    result["desktop_import"] = bool(source_rows) and all(desktop_file.is_desktop(item) for item in source_rows)
     if include_payload:
         result["payload"] = row.get("payload") if isinstance(row.get("payload"), list) else []
     return result
@@ -940,8 +1839,7 @@ def production_queue_event(
     actor: str = "system",
     metadata: dict | None = None,
 ) -> None:
-    supabase_request(
-        "POST",
+    insert_identity_row_compatible(
         "production_save_queue_events",
         {
             "queue_id": queue_id,
@@ -951,6 +1849,7 @@ def production_queue_event(
             "actor": actor or "system",
             "metadata": metadata or {},
         },
+        "production_save_queue_events_pkey",
         prefer="return=minimal",
         timeout_seconds=5,
     )
@@ -979,6 +1878,10 @@ def update_production_queue(
 
 
 def production_queue_success_values(rows: list[dict]) -> dict:
+    if any(desktop_file.is_desktop(row) for row in rows):
+        error = desktop_result_error(rows, rows)
+        if error:
+            raise ValueError(error)
     client_rows = [live_state_to_client("production_records", row) for row in rows if isinstance(row, dict)]
     record_ids = [int(row.get("id")) for row in rows if str(row.get("id") or "").isdigit()]
     return {
@@ -995,6 +1898,14 @@ def production_queue_success_values(rows: list[dict]) -> dict:
 
 
 def inspect_production_queue_rows(rows: list[dict]) -> tuple[str, list[dict], dict]:
+    if rows and all(desktop_file.is_desktop(row) for row in rows):
+        status, found = desktop_lookup_records(rows)
+        if status >= 400:
+            return "error", [], {"status": status, "error": found}
+        error = desktop_result_error(rows, found)
+        if error:
+            return "not_found", found, {"match_count": len(found), "expected_count": len(rows), "error": error}
+        return "exact", found, {"match_count": len(found)}
     lookup_status, existing_rows = production_duplicate_lookup_rows(rows)
     if lookup_status >= 400:
         return "error", [], {"status": lookup_status, "error": existing_rows}
@@ -1011,8 +1922,9 @@ def inspect_production_queue_rows(rows: list[dict]) -> tuple[str, list[dict], di
     for incoming in rows:
         uid = production_record_client_uid(incoming)
         existing = existing_by_uid.get(uid) if uid else None
-        existing = existing or existing_by_signature.get(production_record_duplicate_signature(incoming))
         if existing:
+            if production_record_duplicate_signature(existing) != production_record_duplicate_signature(incoming):
+                return "error", [], {"status": 409, "error": "รหัสรายการเดิมมีข้อมูลต่างจากคิว"}
             matched.append(production_duplicate_response_row(existing, incoming))
     if len(matched) == len(rows):
         return "exact", matched, {"match_count": len(matched)}
@@ -1053,22 +1965,58 @@ def validate_production_queue_rows(rows: list[dict]) -> str | None:
     today = datetime.now(timezone(timedelta(hours=7))).date().isoformat()
     for index, row in enumerate(rows, start=1):
         raw = production_record_raw_payload(row)
+        numeric_fields = ("water_weight", "flower_weight", "total_weight", "durian_weight", "amount", "total_amount", "grand_total", "durian_rate", "water_rate", "flower_rate")
+        for source in (row, raw):
+            for key in numeric_fields:
+                if key in source:
+                    try:
+                        value = float(source[key])
+                        if isinstance(source[key], bool) or not math.isfinite(value) or value < 0 or value > 1_000_000_000:
+                            return f"Queue row {index} has invalid {key}."
+                    except (TypeError, ValueError, OverflowError):
+                        return f"Queue row {index} has invalid {key}."
+            for key in ('grade_weights', 'grade_rates', 'grade_amounts'):
+                if key in source:
+                    values = source[key]
+                    if not isinstance(values, dict):
+                        return f'Queue row {index} has invalid {key}.'
+                    try:
+                        if any(isinstance(v, bool) or not math.isfinite(float(v)) or float(v) < 0 for v in values.values()):
+                            return f'Queue row {index} has invalid {key}.'
+                    except (ValueError, TypeError, OverflowError):
+                        return f'Queue row {index} has invalid {key}.'
+        expected_weight = production_record_weight_total(row)
+        if not math.isfinite(expected_weight) or expected_weight <= 0:
+            return f'Queue row {index} has non-positive weight.'
+        expected_amount = safe_float(row.get('amount', raw.get('total_amount', 0)))
+        for source in (row, raw):
+            for key in ('total_weight', 'durian_weight') if production_record_is_single_weight(row) else ('total_weight',):
+                if key in source and abs(float(source[key]) - expected_weight) > 0.001:
+                    return f'Queue row {index} has inconsistent weight totals.'
+            for key in ('amount', 'total_amount', 'grand_total'):
+                if key in source and abs(float(source[key]) - expected_amount) > 0.05:
+                    return f'Queue row {index} has inconsistent amounts.'
         record_date = str(row.get("record_date") or raw.get("record_date") or raw.get("date") or "")
         emp_code = str(row.get("emp_code") or raw.get("emp_code") or "").strip()
         fruit_type = str(row.get("fruit_type") or raw.get("fruit_type") or "mangosteen")
         pile = production_pile_number(raw) or production_pile_number(row)
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", record_date) or record_date > today:
             return f"Queue row {index} has an invalid or future production date."
+        try:
+            datetime.strptime(record_date, "%Y-%m-%d")
+        except ValueError:
+            return f"Queue row {index} has an invalid production date."
         if not emp_code or pile is None or pile < 1:
             return f"Queue row {index} has an invalid employee code or pile."
-        if fruit_type == "durian":
+        if production_record_is_single_weight(row):
             weight = production_record_weight_total(row)
             rate = safe_float(raw.get("durian_rate", raw.get("grade_rates", {}).get("A", 0)))
             amount = safe_float(row.get("amount", raw.get("total_amount", raw.get("grand_total", 0))))
             if weight <= 0 or abs(weight * 10 - round(weight * 10)) > 0.001:
                 return f"Queue row {index} has an invalid durian weight."
-            if rate <= 0 or abs(amount - weight * rate) > 0.05:
-                return f"Queue row {index} has an invalid durian rate or amount."
+            rate_may_be_pending = fruit_type in {"pomelo", "coconut"}
+            if (rate <= 0 and not rate_may_be_pending) or abs(amount - weight * max(rate, 0)) > 0.05:
+                return f"Queue row {index} has an invalid single-weight rate or amount."
             continue
         water = safe_float(row.get("water_weight", raw.get("water_weight", raw.get("water", 0))))
         flower = safe_float(row.get("flower_weight", raw.get("flower_weight", raw.get("flower", 0))))
@@ -1081,6 +2029,88 @@ def validate_production_queue_rows(rows: list[dict]) -> str | None:
             return f"Queue row {index} has more than one weight decimal place."
         if water_rate <= 0 or flower_rate <= 0 or abs(amount - (water * water_rate + flower * flower_rate)) > 0.05:
             return f"Queue row {index} has an invalid rate or amount."
+    return None
+
+
+def validate_production_central_facts(rows: list[dict]) -> str | None:
+    """Validate submitted wages against dated central rates, never client rates alone."""
+    error = validate_production_queue_rows(rows)
+    if error:
+        return error
+    rate_cache = {}
+    employee_cache = {}
+    pile_status, piles = read_shared_fruit_piles()
+    if pile_status >= 400 or not isinstance(piles, dict):
+        return "ยังตรวจรายการกองจากฐานกลางไม่ได้ กรุณาลองใหม่"
+    configured = {str(p['number']) for p in piles.get('piles', [])}
+    for row in rows:
+        raw = production_record_raw_payload(row)
+        if str(production_pile_number(row)) not in configured:
+            return "ไม่พบกองผลไม้ในฐานกลาง"
+        code = str(row.get('emp_code') or '').strip()
+        if code not in employee_cache:
+            status, employees = supabase_request('GET', f'employees?emp_code=eq.{quote(code, safe="")}&status=eq.Active&select=id,emp_code,fullname,pay_group&limit=2')
+            if status >= 400 or not isinstance(employees, list) or len(employees) != 1:
+                return "ไม่พบพนักงานที่ใช้งานหรือรหัสซ้ำในฐานกลาง"
+            employee_cache[code] = employees[0]
+        employee = employee_cache[code]
+        if raw.get('employee_id') and str(raw['employee_id']) != str(employee['id']):
+            return "รหัสอ้างอิงพนักงานไม่ตรงกับฐานกลาง"
+        if str(row.get('employee_name') or '') != str(employee.get('fullname') or '') or str(row.get('pay_group') or '') != str(employee.get('pay_group') or ''):
+            return "ชื่อหรือกลุ่มพนักงานเปลี่ยนแล้ว กรุณาโหลดข้อมูลล่าสุด"
+        fruit = str(row.get('fruit_type') or 'mangosteen')
+        day = str(row['record_date'])
+        single = production_record_is_single_weight(row)
+        central_rates = {}
+        for field in (['weight'] if single else ['water', 'flower']):
+            item = field if fruit == 'mangosteen' else f'{fruit}:{field}'
+            key = (item, day)
+            if key not in rate_cache:
+                status, rates = supabase_request('GET', f'wage_rates?item_type=eq.{quote(item, safe="")}&effective_date=lte.{day}&select=rate&order=effective_date.desc,id.desc&limit=1')
+                if status >= 400 or not isinstance(rates, list):
+                    return "ยังตรวจอัตราค่าจ้างจากฐานกลางไม่ได้"
+                if not rates and single:
+                    legacy = f'{fruit}:grade_A'
+                    status, rates = supabase_request('GET', f'wage_rates?item_type=eq.{quote(legacy, safe="")}&effective_date=lte.{day}&select=rate&order=effective_date.desc,id.desc&limit=1')
+                    if status >= 400 or not isinstance(rates, list):
+                        return "ยังตรวจอัตราค่าจ้างจากฐานกลางไม่ได้"
+                rate_cache[key] = rates[0].get('rate') if rates else 0
+            try:
+                central = Decimal(str(rate_cache[key]))
+                supplied = Decimal(str(raw.get('durian_rate' if single else f'{field}_rate', 0)))
+                if not central.is_finite() or not supplied.is_finite() or central != supplied:
+                    return "อัตราค่าจ้างไม่ตรงกับฐานกลางตามวันที่ทำงาน กรุณาโหลดอัตราล่าสุดและตรวจรายการ"
+                if central <= 0 and not (single and fruit in {'pomelo', 'coconut'}):
+                    return "ยังไม่ได้ตั้งอัตราค่าจ้างในฐานกลาง"
+                central_rates[field] = central
+            except (InvalidOperation, ValueError, TypeError):
+                return "อัตราค่าจ้างไม่ถูกต้อง"
+        def currency(value):
+            return float(value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+        # The accepted queue stores server-derived amounts, not client approximations.
+        if single:
+            total = currency(Decimal(str(production_record_weight_total(row))) * central_rates['weight'])
+            raw['durian_rate'] = float(central_rates['weight'])
+            raw['durian_amount'] = total
+            weights = production_grade_weights(raw)
+            raw['grade_rates'] = {grade: float(central_rates['weight']) if weights[grade] else 0 for grade in DURIAN_GRADES}
+            raw['grade_amounts'] = {grade: currency(Decimal(str(weights[grade])) * central_rates['weight']) for grade in DURIAN_GRADES}
+            row['grade_rates'] = raw['grade_rates']
+            row['grade_amounts'] = raw['grade_amounts']
+        else:
+            amounts = {}
+            for field in ('water', 'flower'):
+                amounts[field] = currency(Decimal(str(row.get(f'{field}_weight') or 0)) * central_rates[field])
+                raw[f'{field}_rate'] = float(central_rates[field])
+                raw[f'{field}_amount'] = amounts[field]
+                raw[f'{field}_total'] = amounts[field]
+            total = currency(Decimal(str(amounts['water'])) + Decimal(str(amounts['flower'])))
+        row['amount'] = total
+        raw['total_amount'] = total
+        raw['grand_total'] = total
+        if 'amount' in raw:
+            raw['amount'] = total
+        row['raw_payload'] = raw
     return None
 
 
@@ -1139,7 +2169,7 @@ def process_production_save_queue_job(job: dict) -> None:
         production_queue_event(queue_id, "integrity_failed", "needs_review", "Queue payload hash mismatch.", production_save_queue_worker_id)
         return
 
-    validation_error = validate_production_queue_rows(rows)
+    validation_error = validate_production_central_facts(rows)
     emp_code = str(rows[0].get("emp_code") or "").strip()
     employee_status, employees = supabase_request(
         "GET",
@@ -1170,7 +2200,8 @@ def process_production_save_queue_job(job: dict) -> None:
     with production_record_insert_lock:
         status, body = insert_production_records_compatible(rows)
     if status < 400 and isinstance(body, list) and len(body) == len(rows):
-        uid_error = production_uid_uniqueness_error(rows)
+        # Desktop insert already rereads every persisted UID and checks the full set.
+        uid_error = None if all(desktop_file.is_desktop(row) for row in rows) else production_uid_uniqueness_error(rows)
         if uid_error:
             update_production_queue(
                 queue_id,
@@ -1298,11 +2329,11 @@ def time_queue_to_client(row: dict, include_payload: bool = False) -> dict:
 
 
 def time_queue_event(queue_id: int, event_type: str, status: str, message: str, actor: str, metadata: dict | None = None) -> None:
-    supabase_request(
-        "POST",
+    insert_identity_row_compatible(
         "time_save_queue_events",
         {"queue_id": queue_id, "event_type": event_type, "status": status, "message": message,
          "actor": actor, "metadata": metadata or {}},
+        "time_save_queue_events_pkey",
         prefer="return=minimal",
         timeout_seconds=5,
     )
@@ -1348,14 +2379,17 @@ def time_queue_existing_rows(rows: list[dict]) -> tuple[int, list[dict] | dict]:
         if dedupe_key and dedupe_key in matched_keys:
             continue
         work_date, emp_code = time_record_identity(row)
+        employee_key = time_record_employee_key(row)
         check_in = str(row.get("check_in") or row.get("clock_in") or "").strip()
         check_out = str(row.get("check_out") or row.get("clock_out") or "").strip()
         if not work_date or not emp_code or not check_in or not check_out:
             continue
+        identity_filter = (f"{quote('raw_payload->>employee_id', safe='')}=eq.{quote(employee_key[3:])}"
+                           if employee_key.startswith("id:") else f"emp_code=eq.{quote(emp_code)}")
         exact_status, exact_body = supabase_request(
             "GET",
             "time_records?"
-            f"work_date=eq.{quote(work_date)}&emp_code=eq.{quote(emp_code)}&"
+            f"work_date=eq.{quote(work_date)}&{identity_filter}&"
             f"check_in=eq.{quote(check_in)}&check_out=eq.{quote(check_out)}&"
             "select=*&order=id.asc&limit=2",
             timeout_seconds=6,
@@ -1476,9 +2510,14 @@ def process_time_save_queue_job(job: dict) -> None:
         recovered_rows = list(recovered_by_key.values())
         pending_rows = [row for row in rows if str(row.get("queue_dedupe_key") or "") not in recovered_by_key]
 
+    employee_key = time_record_employee_key(rows[0])
     employee_code = str(rows[0].get("emp_code") or "").strip()
+    employee_filter = (
+        f"id=eq.{quote(employee_key[3:])}"
+        if employee_key.startswith("id:") else f"emp_code=eq.{quote(employee_code)}"
+    )
     employee_status, employees = supabase_request(
-        "GET", f"time_employees?emp_code=eq.{quote(employee_code)}&status=eq.Active&select=id&limit=1",
+        "GET", f"time_employees?{employee_filter}&status=eq.Active&select=id,emp_code&limit=1",
         timeout_seconds=5,
     )
     if employee_status >= 500:
@@ -1791,8 +2830,16 @@ def time_record_identity(row: dict) -> tuple[str, str]:
     return str(work_date or "").strip(), str(emp_code or "").strip()
 
 
+def time_record_employee_key(row: dict) -> str:
+    raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+    employee_id = row.get("employee_id") or raw.get("employee_id")
+    if str(employee_id or "").isdigit() and int(employee_id) > 0:
+        return f"id:{int(employee_id)}"
+    return f"code:{time_record_identity(row)[1]}"
+
+
 def validate_time_record_conflicts(rows: list[dict]) -> tuple[int, dict | None]:
-    prepared: list[tuple[dict, str, str, tuple[int, int]]] = []
+    prepared: list[tuple[dict, str, str, str, tuple[int, int]]] = []
     for index, row in enumerate(rows):
         work_date, emp_code = time_record_identity(row)
         interval = time_record_interval(
@@ -1801,10 +2848,11 @@ def validate_time_record_conflicts(rows: list[dict]) -> tuple[int, dict | None]:
         )
         if not work_date or not emp_code or interval is None:
             return 400, {"error": "ข้อมูลวันที่ รหัสพนักงาน หรือเวลาเข้าออกไม่ถูกต้อง"}
-        prepared.append((row, work_date, emp_code, interval))
+        employee_key = time_record_employee_key(row)
+        prepared.append((row, work_date, emp_code, employee_key, interval))
 
         for other in rows[:index]:
-            if time_record_identity(other) != (work_date, emp_code):
+            if time_record_identity(other)[0] != work_date or time_record_employee_key(other) != employee_key:
                 continue
             if row.get("id") in (None, "") and other.get("id") in (None, "") and time_record_intervals_overlap(row, other):
                 return 409, {
@@ -1812,27 +2860,29 @@ def validate_time_record_conflicts(rows: list[dict]) -> tuple[int, dict | None]:
                 }
 
     dates_by_employee: dict[str, set[str]] = {}
-    for _row, work_date, emp_code, _interval in prepared:
-        dates_by_employee.setdefault(emp_code, set()).add(work_date)
+    for _row, work_date, _emp_code, employee_key, _interval in prepared:
+        dates_by_employee.setdefault(employee_key, set()).add(work_date)
 
     existing_by_identity: dict[tuple[str, str], list[dict]] = {}
-    for emp_code, work_dates in dates_by_employee.items():
+    for employee_key, work_dates in dates_by_employee.items():
         date_list = ",".join(sorted(work_dates))
+        identity_filter = (f"{quote('raw_payload->>employee_id', safe='')}=eq.{quote(employee_key[3:])}"
+                           if employee_key.startswith("id:") else f"emp_code=eq.{quote(employee_key[5:])}")
         status, existing_rows = supabase_request(
             "GET",
             "time_records?"
-            f"work_date=in.({date_list})&emp_code=eq.{quote(emp_code)}&"
+            f"work_date=in.({date_list})&{identity_filter}&"
             "select=id,work_date,emp_code,check_in,check_out,raw_payload",
         )
         if status >= 400:
             return status, {"error": existing_rows}
         for existing in existing_rows if isinstance(existing_rows, list) else []:
-            existing_identity = time_record_identity(existing)
+            existing_identity = (time_record_identity(existing)[0], time_record_employee_key(existing))
             existing_by_identity.setdefault(existing_identity, []).append(existing)
 
-    for row, work_date, emp_code, interval in prepared:
+    for row, work_date, emp_code, employee_key, interval in prepared:
         incoming_id = row.get("id")
-        existing_list = existing_by_identity.get((work_date, emp_code), [])
+        existing_list = existing_by_identity.get((work_date, employee_key), [])
         existing_self = next(
             (
                 existing
@@ -1871,6 +2921,7 @@ def insert_time_records_compatible(rows: list[dict]) -> tuple[int, list | dict |
         insert_rows = []
         for row in rows:
             insert_row = dict(row)
+            insert_row["updated_at"] = datetime.now(timezone.utc).isoformat()
             insert_row["id"] = reserve_time_record_id(refresh=(attempt == 1 and not insert_rows))
             insert_rows.append(insert_row)
 
@@ -1896,8 +2947,9 @@ def update_time_records_compatible(rows: list[dict]) -> tuple[int, list | dict |
             return 400, {"error": "time record id is required for update"}
         update_row = {
             key: value for key, value in row.items()
-            if key != "id" and not (key == "queue_dedupe_key" and value in (None, ""))
+            if key not in {"id", "created_by", "created_at"} and not (key == "queue_dedupe_key" and value in (None, ""))
         }
+        update_row["updated_at"] = datetime.now(timezone.utc).isoformat()
         status, body = supabase_request(
             "PATCH",
             f"time_records?id=eq.{quote(str(row_id))}",
@@ -1949,7 +3001,7 @@ def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
             clean_row["id"] = next_id
             next_id += 1
         row_id = clean_row.get("id")
-        select_fields = "id,raw_payload" if table in {"production_records", "time_records"} else "id"
+        select_fields = "*" if table in {"audit_logs", "deduction_records"} else "id,raw_payload" if table in {"production_records", "time_records"} else "id"
         status, existing = supabase_request(
             "GET",
             f"{table}?id=eq.{quote(str(row_id))}&select={select_fields}&limit=1",
@@ -1957,6 +3009,12 @@ def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
         if status >= 400:
             return status, {"error": existing, "table": table}
         has_existing = isinstance(existing, list) and bool(existing)
+        if has_existing and table in {"audit_logs", "deduction_records"}:
+            # Browser log sync is append-only; it must never rewrite a saved
+            # event. Deduction migration must use the normal validated editor
+            # to change existing records, preserving approved-payment history.
+            synced.append(existing[0])
+            continue
         incoming_uid = ""
         existing_uid = ""
         if table == "production_records":
@@ -2007,6 +3065,8 @@ def sync_rows_by_id(table: str, rows: list[dict]) -> tuple[int, dict]:
                 clean_row["id"] = next_table_id(table)
                 row_id = clean_row["id"]
                 has_existing = False
+        if has_existing:
+            clean_row.pop("created_by", None)
         method = "PATCH" if has_existing else "POST"
         path = f"{table}?id=eq.{quote(str(row_id))}" if method == "PATCH" else table
         status, body = supabase_request(
@@ -2057,7 +3117,7 @@ def live_state_row(table: str, payload: dict) -> dict:
         flower = safe_float(payload.get("flower_weight", payload.get("flower", 0)))
         pile_number = production_pile_number(payload)
         fruit_type = payload.get("fruit_type") or "mangosteen"
-        total_weight = production_total_weight(payload) if fruit_type == "durian" else water + flower
+        total_weight = production_total_weight(payload) if production_record_is_single_weight(payload) else water + flower
         row = {
             "record_date": payload.get("record_date") or payload.get("date"),
             # Legacy browser ids belong to a different local database. Keep
@@ -2083,7 +3143,7 @@ def live_state_row(table: str, payload: dict) -> dict:
             "updated_at": payload.get("updated_at") or payload.get("created_at") or datetime.utcnow().isoformat() + "Z",
             "raw_payload": payload,
         }
-        if row["fruit_type"] == "durian":
+        if production_record_is_single_weight(payload):
             row.update({
                 "grade_weights": payload.get("grade_weights") or {},
                 "grade_rates": payload.get("grade_rates") or {},
@@ -2137,8 +3197,144 @@ def live_state_to_client(table: str, row: dict) -> dict:
                 "user_fullname": row.get("user_fullname") or raw.get("user_fullname"),
                 "created_at": row.get("created_at") or raw.get("created_at"),
             }
-        return {**raw, "id": row.get("id", raw.get("id"))}
+        result = {**raw, "id": row.get("id", raw.get("id"))}
+        for field in ("created_by", "created_at", "updated_by"):
+            if row.get(field) is not None:
+                result[field] = row[field]
+        if table == "time_records":
+            # Confirmed server timestamp, never raw browser metadata.
+            result["server_updated_at"] = row.get("updated_at") or row.get("created_at")
+            result["clock_in"] = str(row.get("check_in") or raw.get("clock_in") or "")[:5]
+            result["clock_out"] = str(row.get("check_out") or raw.get("clock_out") or "")[:5]
+        return result
     return row
+
+
+def production_sync_cursor(rows: list[dict], fallback: str = "") -> str:
+    values = [
+        str(row.get("updated_at") or row.get("created_at") or "")
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    return max([fallback, *values])
+
+
+def production_delta_payload(cursor: str) -> tuple[int, dict]:
+    cache_key = cursor or "__initial__"
+    now = time.time()
+    with production_delta_cache_lock:
+        cached = production_delta_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return 200, cached[1]
+    # Use one read window across records, deletions and recovery events.
+    read_until = datetime.now(timezone.utc).isoformat()
+    filters = f"select=*&order=updated_at.asc,id.asc&updated_at=lte.{quote(read_until)}"
+    if cursor:
+        filters += f"&updated_at=gt.{quote(cursor)}"
+    status, rows = supabase_get_all(f"production_records?{filters}")
+    if status >= 400:
+        return status, {"error": rows}
+    delete_filters = "action=eq.DELETE_PRODUCTION&select=id,created_at,metadata&order=created_at.asc,id.asc"
+    delete_filters += f"&created_at=lte.{quote(read_until)}"
+    if cursor:
+        delete_filters += f"&created_at=gt.{quote(cursor)}"
+    delete_status, delete_rows = supabase_get_all(f"audit_logs?{delete_filters}")
+    if delete_status >= 400:
+        return delete_status, {"error": delete_rows}
+    # Historical recoveries retained source updated_at. Read their durable
+    # confirmation events to deliver those records to existing browser caches.
+    recovery_filters = ("event_type=eq.manual_confirmed_save&select=id,created_at,metadata"
+                        f"&order=created_at.asc,id.asc&created_at=lte.{quote(read_until)}")
+    if cursor:
+        recovery_filters += f"&created_at=gt.{quote(cursor)}"
+    recovery_status, recovery_events = supabase_get_all(f"production_save_queue_events?{recovery_filters}")
+    if recovery_status >= 400:
+        return recovery_status, {"error": recovery_events}
+    recovery_ids = sorted({
+        int(record_id)
+        for event in recovery_events
+        if isinstance(event, dict) and isinstance(event.get("metadata"), dict)
+        for record_id in (event["metadata"].get("record_ids") or [])
+        if str(record_id).isdigit() and int(record_id) > 0
+    })
+    by_id = {row["id"]: row for row in rows}
+    for offset in range(0, len(recovery_ids), 100):
+        ids = ','.join(str(value) for value in recovery_ids[offset:offset + 100])
+        recovery_status, recovered = supabase_get_all(f"production_records?select=*&id=in.({ids})&order=id.asc")
+        if recovery_status >= 400:
+            return recovery_status, {"error": recovered}
+        by_id.update({row["id"]: row for row in recovered})
+    # The point lookup may see a concurrent edit after read_until. Return its
+    # current value, but only advance the cursor within the bounded read window.
+    record_cursor = production_sync_cursor(rows, cursor)
+    rows = list(by_id.values())
+    deleted_ids = sorted({
+        int(item.get("metadata", {}).get("record_id"))
+        for item in delete_rows
+        if isinstance(item, dict)
+        and isinstance(item.get("metadata"), dict)
+        and not item["metadata"].get("client_event")
+        and str(item["metadata"].get("record_id") or "").isdigit()
+    })
+    next_cursor = max(
+        record_cursor,
+        production_sync_cursor(delete_rows, cursor),
+        production_sync_cursor(recovery_events, cursor),
+    )
+    payload = {
+        "records": [live_state_to_client("production_records", row) for row in rows],
+        "deleted_ids": deleted_ids,
+        "cursor": next_cursor,
+    }
+    with production_delta_cache_lock:
+        production_delta_cache[cache_key] = (now + 10, payload)
+        if len(production_delta_cache) > 100:
+            for key, value in list(production_delta_cache.items()):
+                if value[0] <= now:
+                    production_delta_cache.pop(key, None)
+    return 200, payload
+
+
+def time_delta_payload(cursor: str) -> tuple[int, dict]:
+    cache_key = f"{time_change_revision}:{cursor or '__initial__'}"
+    now = time.time()
+    with time_delta_cache_lock:
+        cached = time_delta_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return 200, cached[1]
+    filters = "select=*&order=updated_at.asc,id.asc"
+    if cursor:
+        filters += f"&updated_at=gt.{quote(cursor)}"
+    status, rows = supabase_get_all(f"time_records?{filters}")
+    if status >= 400:
+        return status, {"error": rows}
+    delete_filters = "action=eq.DELETE_TIME_RECORD_SYNC&select=id,created_at,metadata&order=created_at.asc,id.asc"
+    if cursor:
+        delete_filters += f"&created_at=gt.{quote(cursor)}"
+    delete_status, delete_rows = supabase_get_all(f"audit_logs?{delete_filters}")
+    if delete_status >= 400:
+        return delete_status, {"error": delete_rows}
+    deleted_ids = sorted({
+        int(item.get("metadata", {}).get("record_id"))
+        for item in delete_rows
+        if isinstance(item, dict)
+        and isinstance(item.get("metadata"), dict)
+        and not item["metadata"].get("client_event")
+        and str(item["metadata"].get("record_id") or "").isdigit()
+    })
+    next_cursor = max(production_sync_cursor(rows, cursor), production_sync_cursor(delete_rows, cursor))
+    payload = {
+        "records": [live_state_to_client("time_records", row) for row in rows],
+        "deleted_ids": deleted_ids,
+        "cursor": next_cursor,
+    }
+    with time_delta_cache_lock:
+        time_delta_cache[cache_key] = (now + 10, payload)
+        if len(time_delta_cache) > 100:
+            for key, value in list(time_delta_cache.items()):
+                if value[0] <= now:
+                    time_delta_cache.pop(key, None)
+    return 200, payload
 
 
 def supabase_configured() -> bool:
@@ -2224,6 +3420,10 @@ def supabase_request(
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
+            table = path.lstrip('/').split('?')[0]
+            time_delete_audit = table == "audit_logs" and isinstance(payload, dict) and payload.get("action") == "DELETE_TIME_RECORD_SYNC"
+            if method in {"POST", "PATCH", "DELETE"} and (table == "time_records" or time_delete_audit):
+                notify_time_change()
             if not raw:
                 return response.status, None
             try:
@@ -2357,6 +3557,11 @@ def backup_authorized(handler: BaseHTTPRequestHandler) -> bool:
     return bool(BACKUP_ACCESS_CODE and hmac.compare_digest(provided, BACKUP_ACCESS_CODE))
 
 
+def database_migration_authorized(handler: BaseHTTPRequestHandler) -> bool:
+    provided = handler.headers.get("X-Migration-Code", "")
+    return hmac.compare_digest(provided, DATABASE_MIGRATION_CODE)
+
+
 def read_supabase_backup(tables: list[str] | None = None) -> tuple[int, dict]:
     backup_data = {}
     for table in tables or BACKUP_TABLES:
@@ -2365,6 +3570,37 @@ def read_supabase_backup(tables: list[str] | None = None) -> tuple[int, dict]:
             return status, {"error": body, "table": table}
         backup_data[table] = body if isinstance(body, list) else []
     return 200, backup_data
+
+
+def read_bandwidth_usage_summary() -> dict:
+    used_bytes_configured = bool(str(os.environ.get("SUPABASE_BANDWIDTH_USED_BYTES", "")).strip())
+    used_gb_configured = bool(str(os.environ.get("SUPABASE_BANDWIDTH_USED_GB", "")).strip())
+    limit_bytes_configured = bool(str(os.environ.get("SUPABASE_BANDWIDTH_LIMIT_BYTES", "")).strip())
+    limit_gb_configured = bool(str(os.environ.get("SUPABASE_BANDWIDTH_LIMIT_GB", "")).strip())
+
+    used_bytes = env_int("SUPABASE_BANDWIDTH_USED_BYTES", 0)
+    if not used_bytes_configured and used_gb_configured:
+        used_bytes = int(max(0.0, env_float("SUPABASE_BANDWIDTH_USED_GB", 0.0)) * 1024 * 1024 * 1024)
+
+    limit_bytes = env_int("SUPABASE_BANDWIDTH_LIMIT_BYTES", 0)
+    if not limit_bytes_configured and limit_gb_configured:
+        limit_bytes = int(max(0.0, env_float("SUPABASE_BANDWIDTH_LIMIT_GB", 0.0)) * 1024 * 1024 * 1024)
+    if limit_bytes <= 0:
+        limit_bytes = SUPABASE_BANDWIDTH_INCLUDED_BYTES
+
+    used_bytes = max(0, used_bytes)
+    percent = min(100, (used_bytes / max(1, limit_bytes)) * 100)
+    return {
+        "used_bytes": used_bytes,
+        "limit_bytes": limit_bytes,
+        "remaining_bytes": max(0, limit_bytes - used_bytes),
+        "percent": round(percent, 2),
+        "warning_percent": SUPABASE_BANDWIDTH_WARNING_PERCENT,
+        "warning": percent >= SUPABASE_BANDWIDTH_WARNING_PERCENT,
+        "configured": used_bytes_configured or used_gb_configured,
+        "source": "render_env",
+        "note": "Set SUPABASE_BANDWIDTH_USED_GB from the Supabase Usage Dashboard to show current bandwidth.",
+    }
 
 
 def read_database_storage_usage(force: bool = False) -> tuple[int, dict]:
@@ -2381,7 +3617,9 @@ def read_database_storage_usage(force: bool = False) -> tuple[int, dict]:
     if not isinstance(raw, dict):
         return 502, {"error": "Storage usage response is invalid."}
     used_bytes = max(0, int(raw.get("used_bytes") or 0))
-    limit_bytes = max(1, int(raw.get("limit_bytes") or SUPABASE_FREE_DATABASE_BYTES))
+    # The legacy RPC returned the Free-plan 500 MB limit. The live usage is
+    # still authoritative, but the allowance must reflect the current Pro plan.
+    limit_bytes = max(SUPABASE_DATABASE_INCLUDED_BYTES, int(raw.get("limit_bytes") or 0))
     percent = min(100, (used_bytes / limit_bytes) * 100)
     data = {
         **raw,
@@ -2391,6 +3629,8 @@ def read_database_storage_usage(force: bool = False) -> tuple[int, dict]:
         "percent": round(percent, 2),
         "warning_percent": DATABASE_STORAGE_WARNING_PERCENT,
         "warning": percent >= DATABASE_STORAGE_WARNING_PERCENT,
+        "plan": "Pro",
+        "bandwidth_usage": read_bandwidth_usage_summary(),
     }
     with storage_usage_lock:
         storage_usage_cache["data"] = data
@@ -2451,6 +3691,7 @@ def secret_chat_storage_request(
     content: bytes | None = None,
     content_type: str = "application/json",
     timeout_seconds: float = 30,
+    upsert: bool = False,
 ) -> tuple[int, bytes | dict | str | None]:
     if not supabase_configured():
         return 503, {"error": "Supabase environment variables are not configured."}
@@ -2461,7 +3702,7 @@ def secret_chat_storage_request(
         "Content-Type": content_type,
     }
     if method in {"POST", "PUT"} and endpoint.startswith("object/"):
-        headers["x-upsert"] = "false"
+        headers["x-upsert"] = "true" if upsert else "false"
     request = urllib.request.Request(url, data=content, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
@@ -2563,15 +3804,16 @@ def backup_snapshot_payload(scope: str, actor: str, data: dict) -> dict:
         "data": data,
     }
     logical_bytes = len(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-    percent = min(100, (logical_bytes / SUPABASE_FREE_DATABASE_BYTES) * 100)
+    percent = min(100, (logical_bytes / SUPABASE_DATABASE_INCLUDED_BYTES) * 100)
     snapshot["storage_usage"] = {
         "used_bytes": logical_bytes,
-        "limit_bytes": SUPABASE_FREE_DATABASE_BYTES,
-        "remaining_bytes": max(0, SUPABASE_FREE_DATABASE_BYTES - logical_bytes),
+        "limit_bytes": SUPABASE_DATABASE_INCLUDED_BYTES,
+        "remaining_bytes": max(0, SUPABASE_DATABASE_INCLUDED_BYTES - logical_bytes),
         "percent": round(percent, 2),
         "warning_percent": DATABASE_STORAGE_WARNING_PERCENT,
         "warning": percent >= DATABASE_STORAGE_WARNING_PERCENT,
         "measurement": "logical_backup_size",
+        "plan": "Pro",
     }
     return snapshot
 
@@ -2766,6 +4008,7 @@ def pile_summary_rows(records: list[dict]) -> list[dict]:
                 "balance": 0.0,
                 "grades": {grade: 0.0 for grade in DURIAN_GRADES},
                 "total_weight": 0.0,
+                "single_weight": 0.0,
                 "amount": 0.0,
             },
         )
@@ -2776,6 +4019,8 @@ def pile_summary_rows(records: list[dict]) -> list[dict]:
         for grade in DURIAN_GRADES:
             summary["grades"][grade] += grade_weights[grade]
         summary["total_weight"] += production_total_weight(record)
+        if production_record_is_single_weight(record):
+            summary["single_weight"] += production_total_weight(record)
         summary["amount"] += amount
 
     def sort_key(item: dict) -> tuple[int, str]:
@@ -2792,6 +4037,7 @@ def summary_totals(rows: list[dict]) -> dict:
         "balance": sum(row["balance"] for row in rows),
         "grades": {grade: sum(row.get("grades", {}).get(grade, 0) for row in rows) for grade in DURIAN_GRADES},
         "total_weight": sum(row.get("total_weight", row["incoming"] + row["outgoing"]) for row in rows),
+        "single_weight": sum(row.get("single_weight", 0) for row in rows),
         "amount": sum(row["amount"] for row in rows),
     }
 
@@ -3308,9 +4554,9 @@ def build_employee_range_pdf(
     deduction_amount = deduction_total(deduction_rows)
     bonus_amount = deduction_total(bonus_rows)
     net_amount = max(0, gross_amount + bonus_amount - deduction_amount)
-    fruit_label = selected_production_fruit_label({"fruit_type": fruit_type})
-    water_label, flower_label = production_report_weight_labels({"fruit_type": fruit_type})
-    is_durian = str(fruit_type or "all").lower() == "durian"
+    fruit_label = selected_production_fruit_label({**data, "fruit_type": fruit_type})
+    water_label, flower_label = production_report_weight_labels({**data, "fruit_type": fruit_type})
+    is_durian = production_report_is_single({**data, "fruit_type": fruit_type})
     printed_by = str(data.get("printed_by") or "ระบบรายงาน").strip()
     printed_by_position = str(data.get("printed_by_position") or "ฝ่ายทรัพยากรบุคคล").strip()
     printed_by_text = " ".join(value for value in [printed_by, printed_by_position] if value)
@@ -3404,7 +4650,7 @@ def build_employee_range_pdf(
 
         table_y = employee_y - 13 * mm
         if is_durian:
-            headers = ["วันที่", "รายการ", "น้ำหนักทุเรียน", "รวมเงิน"]
+            headers = ["วันที่", "รายการ", production_report_single_label({**data, "fruit_type": fruit_type}), "รวมเงิน"]
             col_widths = [29, 21, 39, 34]
         else:
             headers = ["วันที่", "รายการ", water_label, flower_label, "รวม", "รวมเงิน"]
@@ -3793,8 +5039,8 @@ def build_employee_range_excel(
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "สรุปรายบุคคล"
-    is_durian = str(fruit_type or "all").lower() == "durian"
-    water_label, flower_label = production_report_weight_labels({"fruit_type": fruit_type})
+    is_durian = production_report_is_single({**data, "fruit_type": fruit_type})
+    water_label, flower_label = production_report_weight_labels({**data, "fruit_type": fruit_type})
     total_water = sum(summary["water_weight"] for summary in daily_summaries)
     total_flower = sum(summary["flower_weight"] for summary in daily_summaries)
     total_weight = sum(
@@ -3841,7 +5087,7 @@ def build_employee_range_excel(
         ("D6", "ชื่อ-นามสกุล", "E6:G6", employee.get("fullname") or "-"),
         ("H6", "กลุ่ม", "I6:J6", employee.get("group_name") or employee.get("department") or "-"),
         ("A7", "ช่วงวันที่", "B7:C7", f"{start_date} ถึง {end_date}"),
-        ("D7", "ประเภทผลไม้", "E7:G7", selected_production_fruit_label({"fruit_type": fruit_type})),
+        ("D7", "ประเภทผลไม้", "E7:G7", selected_production_fruit_label({**data, "fruit_type": fruit_type})),
         ("H7", "จำนวนวันมีรายการ", "I7:J7", len(daily_summaries)),
     ]
     for label_cell, label, value_range, value in info_rows:
@@ -3891,7 +5137,7 @@ def build_employee_range_excel(
 
     header_row = 14
     if is_durian:
-        table_ranges = [("A14:B14", "วันที่"), ("C14:F14", "น้ำหนักทุเรียน"), ("G14:J14", "รวมเป็นเงิน")]
+        table_ranges = [("A14:B14", "วันที่"), ("C14:F14", production_report_single_label({**data, "fruit_type": fruit_type})), ("G14:J14", "รวมเป็นเงิน")]
     else:
         table_ranges = [
             ("A14:B14", "วันที่"),
@@ -4406,7 +5652,7 @@ def deduction_records_for(payload: dict, employee_kind: str, employee_id: object
     emp_code_text = str(emp_code or "")
     rows = []
     for record in payload.get("deduction_records", []) or []:
-        if str(record.get("deduction_type") or "") == "attendance_bonus":
+        if str(record.get("deduction_type") or "") in ("attendance_bonus", "daily_ot_override"):
             continue
         if str(record.get("status") or "Active") != "Active":
             continue
@@ -4453,6 +5699,33 @@ def bonus_records_for(payload: dict, employee_kind: str, employee_id: object, em
 
 def deduction_total(records: list[dict]) -> float:
     return sum(safe_float(record.get("amount")) for record in records)
+
+
+def time_employee_for(payload: dict, employee_id: object, emp_code: object) -> dict:
+    employee_id_text = str(employee_id or "")
+    emp_code_text = str(emp_code or "")
+    for employee in payload.get("time_employees", []) or []:
+        if (employee_id_text and str(employee.get("id") or "") == employee_id_text) or (
+            not employee_id_text and emp_code_text and str(employee.get("emp_code") or "") == emp_code_text
+        ):
+            return employee
+    return {}
+
+
+def daily_ot_rate_for(payload: dict, employee_id: object, emp_code: object, record_date: str) -> float:
+    matches = []
+    for record in payload.get("deduction_records", []) or []:
+        if str(record.get("deduction_type") or "") != "daily_ot_override" or str(record.get("status") or "Active") != "Active":
+            continue
+        if str(record.get("employee_kind") or "") != "time":
+            continue
+        same_employee = (employee_id and str(record.get("employee_id") or "") == str(employee_id)) or (
+            emp_code and str(record.get("emp_code") or "") == str(emp_code)
+        )
+        if same_employee and str(record.get("start_date") or "") <= record_date <= str(record.get("end_date") or record.get("start_date") or ""):
+            matches.append(record)
+    matches.sort(key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""), reverse=True)
+    return safe_float(matches[0].get("amount")) if matches else 0.0
 
 
 def full_export_records(payload: dict) -> tuple[list[dict], list[dict]]:
@@ -4649,7 +5922,7 @@ def build_time_full_export_excel(payload: dict) -> bytes:
     ]
     for record in sorted(deduction_rows, key=lambda item: (item.get("employee_kind", ""), item.get("start_date", ""), item.get("emp_code", ""))):
         deduction_sheet.append([
-            "เบี้ยขยัน" if record.get("deduction_type") == "attendance_bonus" else "รายการหัก",
+            "เบี้ยขยัน" if record.get("deduction_type") == "attendance_bonus" else ("ปรับ OT รายวัน" if record.get("deduction_type") == "daily_ot_override" else "รายการหัก"),
             "พนักงานเหมาเวลา" if record.get("employee_kind") == "time" else "พนักงานเหมาน้ำหนัก",
             record.get("start_date", ""),
             record.get("end_date", ""),
@@ -4729,9 +6002,15 @@ def time_receipt_groups(payload: dict) -> list[dict]:
         ot_minutes = max(0, net_minutes - normal_minutes)
         normal_hours = normal_minutes / 60
         ot_hours = ot_minutes / 60
-        record_daily_wage = float(record.get("daily_wage") or daily_wage)
-        record_normal_rate = float(record.get("normal_hourly_rate") or (record_daily_wage / standard_hours))
-        record_ot_rate = float(record.get("ot_hourly_rate") or ot_rate)
+        current_employee = time_employee_for(payload, record.get("employee_id"), record.get("emp_code"))
+        record_daily_wage = float(current_employee.get("daily_wage") or record.get("daily_wage") or daily_wage)
+        record_normal_rate = float((record_daily_wage / standard_hours) if current_employee else (record.get("normal_hourly_rate") or (record_daily_wage / standard_hours)))
+        record_ot_rate = float(
+            daily_ot_rate_for(payload, record.get("employee_id"), record.get("emp_code"), str(record.get("record_date") or ""))
+            or current_employee.get("ot_hourly_rate")
+            or record.get("ot_hourly_rate")
+            or ot_rate
+        )
         # The factory wage table rounds each day's proportional normal wage
         # to the nearest whole baht (0.50 rounds up) before employee totals.
         rounded_half_hour = round(normal_hours * 2) / 2
@@ -4742,6 +6021,10 @@ def time_receipt_groups(payload: dict) -> list[dict]:
         else:
             normal_amount = math.floor((normal_hours * record_normal_rate) + 0.5)
         ot_amount = ot_hours * record_ot_rate
+        if (current_employee.get("employee_type") or record.get("employee_type")) == "office_347":
+            normal_amount = 0
+            ot_amount = 0
+            group["time_only"] = True
         group["normal_hours"] += normal_hours
         group["ot_hours"] += ot_hours
         group["normal_amount"] += normal_amount
@@ -4755,6 +6038,7 @@ def time_receipt_groups(payload: dict) -> list[dict]:
                 "ot_hours": ot_hours,
                 "normal_amount": normal_amount,
                 "ot_amount": ot_amount,
+                "ot_hourly_rate": record_ot_rate,
                 "total_amount": normal_amount + ot_amount,
             }
         )
@@ -4780,6 +6064,12 @@ def time_receipt_groups(payload: dict) -> list[dict]:
         group["bonus_amount"] = deduction_total(group["bonuses"])
         group["gross_amount"] = group["normal_amount"] + group["ot_amount"]
         group["total_amount"] = max(0, group["gross_amount"] + group["bonus_amount"] - group["deduction_amount"])
+        if group.get("time_only"):
+            group["deductions"] = []
+            group["bonuses"] = []
+            group["deduction_amount"] = 0
+            group["bonus_amount"] = 0
+            group["total_amount"] = 0
     return sorted(groups.values(), key=lambda item: (str(item["emp_code"]), str(item["fullname"])))
 
 
@@ -4811,6 +6101,16 @@ def build_time_receipts_pdf(payload: dict) -> bytes:
         c.drawRightString(x, y, str(value))
 
     def draw_panel(x, y, group, is_copy=False):
+        if group.get("time_only"):
+            text(x + 8 * mm, y + panel_height - 15 * mm, "รายงานเวลาทำงาน Office", 12, True)
+            text(x + 8 * mm, y + panel_height - 23 * mm, f"{group['emp_code']} · {group['fullname']}", 9)
+            text(x + 8 * mm, y + panel_height - 30 * mm, f"{start_date} - {end_date}", 8)
+            cursor = y + panel_height - 42 * mm
+            for row in group["rows"][:20]:
+                text(x + 8 * mm, cursor, f"{row['date']}  {row['clock_in']} - {row['clock_out']}  ปกติ {report_number(row['normal_hours'])} ชม.  OT {report_number(row['ot_hours'])} ชม.", 7)
+                cursor -= 6 * mm
+            text(x + 8 * mm, y + 18 * mm, f"รวมปกติ {report_number(group['normal_hours'])} ชม. · OT {report_number(group['ot_hours'])} ชม.", 10, True)
+            return
         c.setStrokeColor(colors.HexColor("#0F7A3D"))
         c.setLineWidth(1)
         c.roundRect(x, y, panel_width, panel_height, 6, stroke=1, fill=0)
@@ -4847,8 +6147,8 @@ def build_time_receipts_pdf(payload: dict) -> bytes:
         text(x + 5 * mm, employee_y - 5 * mm, f"แผนก: {group['department']}", 8)
 
         table_y = employee_y - 13 * mm
-        col_widths = [20, 13, 13, 16, 13, 19, 17, 18]
-        headers = ["วันที่", "เข้า", "ออก", "ปกติ", "OT", "เงินปกติ", "เงิน OT", "รวม"]
+        col_widths = [18, 11, 11, 12, 10, 13, 16, 15, 16]
+        headers = ["วันที่", "เข้า", "ออก", "ปกติ", "OT", "OT/ชม.", "เงินปกติ", "เงิน OT", "รวม"]
         c.setFillColor(colors.HexColor("#0F7A3D"))
         c.rect(x + 5 * mm, table_y, panel_width - 10 * mm, 7 * mm, stroke=0, fill=1)
         c.setFillColor(colors.white)
@@ -4870,6 +6170,7 @@ def build_time_receipts_pdf(payload: dict) -> bytes:
                 row["clock_out"],
                 report_number(row["normal_hours"]),
                 report_number(row["ot_hours"]),
+                report_number(row["ot_hourly_rate"], 0),
                 report_number(row["normal_amount"], 0),
                 report_number(row["ot_amount"], 0),
                 report_number(row["total_amount"], 0),
@@ -4948,26 +6249,43 @@ def production_pile_number(record: dict) -> int | None:
 
 
 def selected_production_fruit(payload: dict) -> str:
-    fruit_id = str(payload.get("fruit_type") or "all").strip().lower()
-    return fruit_id if fruit_id in {"all", "mangosteen", "durian", "mango"} else "all"
+    # Custom fruit IDs must remain exact filters, never broaden to all fruits.
+    return str(payload.get("fruit_type") or "all").strip() or "all"
 
 
 def selected_production_fruit_label(payload: dict) -> str:
-    return {
-        "all": "ทุกผลไม้",
-        "mangosteen": "มังคุด",
-        "durian": "ทุเรียน",
-        "mango": "มะม่วง",
-    }[selected_production_fruit(payload)]
+    fruit_id = selected_production_fruit(payload)
+    return "ทุกผลไม้" if fruit_id == "all" else production_fruit_label(payload, fruit_id)
+
+
+def production_report_is_single(payload: dict) -> bool:
+    fruit_id = selected_production_fruit(payload)
+    if fruit_id == "all":
+        return False
+    fields = (payload.get("fruit_fields") or {}).get(fruit_id) or {}
+    return fruit_id in SINGLE_WEIGHT_FRUITS or fields.get("mode") == "single" or any(
+        production_fruit_id(row) == fruit_id and production_record_is_single_weight(row)
+        for row in payload.get("production_records", [])
+    )
+
+
+def production_report_single_label(payload: dict) -> str:
+    fruit_id = selected_production_fruit(payload)
+    fields = (payload.get("fruit_fields") or {}).get(fruit_id) or {}
+    return str(fields.get("weight") or ("น้ำหนักประเภทเดี่ยว" if fruit_id == "all" else "น้ำหนัก" + production_fruit_label(payload, fruit_id)))
 
 
 def production_report_field_visibility(payload: dict) -> tuple[bool, bool]:
     fruit_id = selected_production_fruit(payload)
-    return fruit_id != "durian", fruit_id in {"all", "durian"}
+    single = production_report_is_single(payload)
+    return not single, fruit_id == "all" or single
 
 
 def production_report_weight_labels(payload: dict) -> tuple[str, str]:
     fruit_id = selected_production_fruit(payload)
+    fields = (payload.get("fruit_fields") or {}).get(fruit_id) or {}
+    if fields.get("water") and fields.get("flower"):
+        return str(fields["water"]), str(fields["flower"])
     if fruit_id == "mango":
         return "มะม่วงฝา", "มะม่วงหั่นเต๋า"
     if fruit_id == "all":
@@ -4985,7 +6303,7 @@ def production_grade_total(record: dict) -> float:
 
 
 def production_total_weight(record: dict) -> float:
-    if (record.get("fruit_type") or "mangosteen") == "durian":
+    if production_record_is_single_weight(record):
         direct_weight = safe_float(record.get("durian_weight"))
         if direct_weight > 0:
             return direct_weight
@@ -5439,7 +6757,7 @@ def build_production_summary_excel(payload: dict) -> bytes:
             ("totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", totals["total_weight"]),
             ("water", f"{water_label} (กก.)", totals["incoming"]),
             ("flower", f"{flower_label} (กก.)", totals["outgoing"]),
-            ("grades", "น้ำหนักทุเรียน", grade_totals_text(totals.get("grades"))),
+            ("grades", production_report_single_label(payload), totals.get("single_weight", 0)),
             ("amount", "ยอดเงินรวม", totals["amount"]),
             ("employees", "พนักงานที่มีรายการ", employee_count),
             ("records", "จำนวนรายการ", len(records)),
@@ -5485,7 +6803,7 @@ def build_production_summary_excel(payload: dict) -> bytes:
                 ("pile", "กอง", lambda row: row["pile"]),
                 ("water", f"{water_label} (กก.)", lambda row: row["incoming"]),
                 ("flower", f"{flower_label} (กก.)", lambda row: row["outgoing"]),
-                ("grades", "น้ำหนักทุเรียน", lambda row: grade_totals_text(row.get("grades"))),
+                ("grades", production_report_single_label(payload), lambda row: row.get("single_weight", 0)),
                 ("total", "รวม (กก.)", lambda row: row.get("total_weight", row["incoming"] + row["outgoing"])),
                 ("amount", "รวมเงิน", lambda row: row["amount"]),
             ],
@@ -5502,6 +6820,7 @@ def build_production_summary_excel(payload: dict) -> bytes:
                 "outgoing": totals["outgoing"],
                 "grades": totals.get("grades", {}),
                 "total_weight": totals["total_weight"],
+                "single_weight": totals.get("single_weight", 0),
                 "amount": totals["amount"],
             }
             overview.append([getter(total_row) for _, _, getter in pile_defs])
@@ -5536,7 +6855,7 @@ def build_production_summary_excel(payload: dict) -> bytes:
                 ("pile", "กอง", lambda record: production_pile_number(record) or "-"),
                 ("water", f"{water_label} (กก.)", lambda record: safe_float(record.get("water_weight", record.get("water", 0)))),
                 ("flower", f"{flower_label} (กก.)", lambda record: safe_float(record.get("flower_weight", record.get("flower", 0)))),
-                ("grades", "น้ำหนักทุเรียน", lambda record: production_grade_text(record) if (record.get("fruit_type") or "mangosteen") == "durian" else "-"),
+                ("grades", production_report_single_label(payload), lambda record: production_total_weight(record) if production_record_is_single_weight(record) else "-"),
                 ("total", "น้ำหนักรวม (กก.)", lambda record: production_total_weight(record)),
                 ("amount", "รวมเงิน", lambda record: safe_float(record.get("total_amount", record.get("grand_total", 0)))),
                 ("createdBy", "ผู้บันทึก", lambda record: record.get("created_by", "")),
@@ -5627,7 +6946,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
             ("totalWeight", "น้ำหนักรวมทั้งหมด (กก.)", report_number(totals["total_weight"])),
             ("water", f"{water_label} (กก.)", report_number(totals["incoming"])),
             ("flower", f"{flower_label} (กก.)", report_number(totals["outgoing"])),
-            ("grades", "น้ำหนักทุเรียน", grade_totals_text(totals.get("grades"))),
+            ("grades", production_report_single_label(payload), totals.get("single_weight", 0)),
             ("amount", "ยอดเงินรวม", money(totals["amount"])),
             ("employees", "พนักงานที่มีรายการ", report_number(employee_count, 0)),
             ("records", "จำนวนรายการ", report_number(len(records), 0)),
@@ -5685,7 +7004,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
                 ("pile", "กอง", lambda row: row["pile"]),
                 ("water", f"{water_label} (กก.)", lambda row: report_number(row["incoming"])),
                 ("flower", f"{flower_label} (กก.)", lambda row: report_number(row["outgoing"])),
-                ("grades", "น้ำหนักทุเรียน", lambda row: grade_totals_text(row.get("grades"))),
+                ("grades", production_report_single_label(payload), lambda row: row.get("single_weight", 0)),
                 ("total", "รวม (กก.)", lambda row: report_number(row.get("total_weight", row["incoming"] + row["outgoing"]))),
                 ("amount", "รวมเงิน", lambda row: money(row["amount"])),
             ],
@@ -5694,7 +7013,8 @@ def build_production_summary_pdf(payload: dict) -> bytes:
             pile_table_rows = [[label for _, label, _ in pile_defs]]
             for row in pile_rows:
                 pile_table_rows.append([getter(row) for _, _, getter in pile_defs])
-            total_row = {"pile": "รวม", "incoming": totals["incoming"], "outgoing": totals["outgoing"], "grades": totals.get("grades", {}), "total_weight": totals["total_weight"], "amount": totals["amount"]}
+            total_row = {"pile": "รวม", "incoming": totals["incoming"], "outgoing": totals["outgoing"], "grades": totals.get("grades", {}), "total_weight": totals["total_weight"],
+                "single_weight": totals.get("single_weight", 0), "amount": totals["amount"]}
             pile_table_rows.append([getter(total_row) for _, _, getter in pile_defs])
             col_width = (267 / len(pile_defs)) * mm
             pile_table = Table(pile_table_rows, repeatRows=1, colWidths=[col_width] * len(pile_defs))
@@ -5722,7 +7042,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
                 ("pile", "กอง", lambda record: production_pile_number(record) or "-"),
                 ("water", f"{water_label} (กก.)", lambda record: report_number(record.get("water_weight", record.get("water", 0)))),
                 ("flower", f"{flower_label} (กก.)", lambda record: report_number(record.get("flower_weight", record.get("flower", 0)))),
-                ("grades", "น้ำหนักทุเรียน", lambda record: production_grade_text(record) if (record.get("fruit_type") or "mangosteen") == "durian" else "-"),
+                ("grades", production_report_single_label(payload), lambda record: production_total_weight(record) if production_record_is_single_weight(record) else "-"),
                 ("total", "น้ำหนักรวม (กก.)", lambda record: report_number(production_total_weight(record))),
                 ("amount", "รวมเงิน", lambda record: money(record.get("total_amount", record.get("grand_total", 0)))),
                 ("createdBy", "ผู้บันทึก", lambda record: record.get("created_by", "")),
@@ -5880,6 +7200,8 @@ def production_fruit_label(payload: dict, fruit_id: str) -> str:
         "mangosteen": "มังคุด",
         "durian": "ทุเรียน",
         "mango": "มะม่วง",
+        "pomelo": "ส้มโอ",
+        "coconut": "มะพร้าว",
     }
     return (payload.get("fruit_labels") or {}).get(fruit_id) or labels.get(fruit_id, fruit_id)
 
@@ -5960,6 +7282,7 @@ def summarize_group_report(records: list[dict], mode: str = "group", withholding
                 "flower": 0.0,
                 "grades": {grade: 0.0 for grade in DURIAN_GRADES},
                 "total": 0.0,
+                "single_weight": 0.0,
                 "amount": 0.0,
                 "deduction_amount": 0.0,
                 "withholding_tax_amount": 0.0,
@@ -5977,6 +7300,8 @@ def summarize_group_report(records: list[dict], mode: str = "group", withholding
         for grade in DURIAN_GRADES:
             row["grades"][grade] += grade_weights[grade]
         row["total"] += production_total_weight(record)
+        if production_record_is_single_weight(record):
+            row["single_weight"] += production_total_weight(record)
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
         row["bonus_amount"] += safe_float(record.get("bonus_amount"))
@@ -6003,6 +7328,7 @@ def group_report_employee_rows(records: list[dict], withholding_groups: set[str]
                 "flower": 0.0,
                 "grades": {grade: 0.0 for grade in DURIAN_GRADES},
                 "total": 0.0,
+                "single_weight": 0.0,
                 "amount": 0.0,
                 "deduction_amount": 0.0,
                 "withholding_tax_amount": 0.0,
@@ -6019,6 +7345,8 @@ def group_report_employee_rows(records: list[dict], withholding_groups: set[str]
         for grade in DURIAN_GRADES:
             row["grades"][grade] += grade_weights[grade]
         row["total"] += production_total_weight(record)
+        if production_record_is_single_weight(record):
+            row["single_weight"] += production_total_weight(record)
         row["amount"] += safe_float(record.get("total_amount", record.get("grand_total", 0)))
         row["deduction_amount"] += safe_float(record.get("deduction_amount"))
         row["bonus_amount"] += safe_float(record.get("bonus_amount"))
@@ -6054,17 +7382,17 @@ def build_group_report_excel(payload: dict) -> bytes:
     def weight_headers() -> list[str]:
         return (
             ([water_label, flower_label] if show_standard_weights else [])
-            + (["น้ำหนักทุเรียน"] if show_durian_weight else [])
+            + ([production_report_single_label(payload)] if show_durian_weight else [])
         )
 
     def summary_weight_values(row: dict) -> list:
         return (
             ([row["water"], row["flower"]] if show_standard_weights else [])
-            + ([sum(safe_float((row.get("grades") or {}).get(grade)) for grade in DURIAN_GRADES)] if show_durian_weight else [])
+            + ([row.get("single_weight", 0)] if show_durian_weight else [])
         )
 
     def detail_weight_values(record: dict) -> list:
-        is_durian = production_fruit_id(record) == "durian"
+        is_durian = production_record_is_single_weight(record)
         return (
             ([
                 "-" if is_durian else safe_float(record.get("water_weight", record.get("water", 0))),
@@ -6148,6 +7476,110 @@ def build_group_report_excel(payload: dict) -> bytes:
     return output.getvalue()
 
 
+def production_raw_weight_rows(payload: dict) -> list[dict]:
+    rows = []
+    for record in group_report_records(payload):
+        raw = record.get("raw_payload") if isinstance(record.get("raw_payload"), dict) else {}
+        entries = record.get("raw_weight_entries") or raw.get("raw_weight_entries") or []
+        if not isinstance(entries, list):
+            continue
+        fruit_id = production_fruit_id(record)
+        type_labels = {
+            "water": "น้ำ" if fruit_id != "mango" else "ฝา",
+            "flower": "ดอก" if fruit_id != "mango" else "หั่นเต๋า",
+            "durian": "น้ำหนักทุเรียน",
+            "pomelo": "น้ำหนักส้มโอ",
+            "coconut": "น้ำหนักมะพร้าว",
+        }
+        created_at = record.get("created_at") or raw.get("created_at") or ""
+        saved_at = None
+        if created_at:
+            try:
+                parsed = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                saved_at = parsed.astimezone(timezone(timedelta(hours=7))).replace(tzinfo=None)
+            except ValueError:
+                saved_at = str(created_at)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            weight_type = str(entry.get("weight_type") or "")
+            rows.append({
+                "record_date": record.get("record_date") or record.get("date") or "",
+                "saved_at": saved_at,
+                "pay_group": record.get("pay_group") or "-",
+                "fruit_label": record.get("fruit_label") or production_fruit_label(payload, fruit_id),
+                "emp_code": str(record.get("emp_code") or ""),
+                "employee_name": record.get("employee_name") or "",
+                "pile_no": record.get("pile_no") or record.get("pile") or "",
+                "weight_type": type_labels.get(weight_type, weight_type or "น้ำหนัก"),
+                "weight_type_order": {"water": 1, "flower": 2, "durian": 1}.get(weight_type, 9),
+                "input_no": entry.get("input_no") or "",
+                "value": safe_float(entry.get("value")),
+                "batch_uid": record.get("batch_uid") or raw.get("batch_uid") or "",
+                "created_by": record.get("created_by") or raw.get("created_by") or "",
+            })
+    return sorted(rows, key=lambda row: (
+        str(row["record_date"]), str(row["saved_at"]), row["emp_code"], str(row["pile_no"]),
+        row["weight_type_order"], int(row["input_no"] or 0),
+    ))
+
+
+def build_group_report_raw_excel(payload: dict) -> bytes:
+    start_date, end_date = normalized_range(payload)
+    rows = production_raw_weight_rows(payload)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "ข้อมูลดิบกรอกแบบชุด"
+    sheet.sheet_view.showGridLines = False
+    headers = [
+        "วันที่ลงผลงาน", "วันเวลาที่บันทึกจริง", "กลุ่ม", "ผลไม้", "รหัสพนักงาน",
+        "ชื่อพนักงาน", "กอง", "ประเภท", "ช่องที่กรอก", "ตัวเลขดิบ (กก.)",
+        "รหัสชุด", "ผู้บันทึก",
+    ]
+    last_column = get_column_letter(len(headers))
+    sheet.merge_cells(f"A1:{last_column}1")
+    sheet["A1"] = COMPANY_NAME
+    sheet["A1"].fill = PatternFill("solid", fgColor="075B44")
+    sheet["A1"].font = Font(name="Sarabun", bold=True, size=18, color="FFFFFF")
+    sheet["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    sheet.merge_cells(f"A2:{last_column}2")
+    sheet["A2"] = "ข้อมูลดิบจากการกรอกผลผลิตแบบชุด • Raw Batch Entries"
+    sheet["A2"].fill = PatternFill("solid", fgColor="0F8A55")
+    sheet["A2"].font = Font(name="Sarabun", bold=True, size=13, color="FFFFFF")
+    sheet.merge_cells(f"A3:{last_column}3")
+    sheet["A3"] = (
+        f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)}"
+        f" | กลุ่ม {payload.get('group_label', 'ทุกกลุ่ม')} | ผลไม้ {payload.get('fruit_label', 'ทั้งหมด')}"
+        f" | {export_meta_text(payload)}"
+    )
+    sheet["A3"].fill = PatternFill("solid", fgColor="D1FAE5")
+    sheet["A3"].font = Font(name="Sarabun", size=10, color="075B44")
+    sheet.append([])
+    sheet.append(headers)
+    for row in rows:
+        sheet.append([
+            row["record_date"], row["saved_at"], row["pay_group"], row["fruit_label"],
+            row["emp_code"], row["employee_name"], row["pile_no"], row["weight_type"],
+            row["input_no"], row["value"], row["batch_uid"], row["created_by"],
+        ])
+    style_excel_report_sheet(sheet, [5], [15, 23, 20, 16, 16, 30, 10, 18, 13, 18, 40, 25])
+    sheet.freeze_panes = "A6"
+    sheet.auto_filter.ref = f"A5:{last_column}{max(sheet.max_row, 5)}"
+    sheet.print_title_rows = "1:5"
+    for row_index in range(6, sheet.max_row + 1):
+        sheet.cell(row_index, 2).number_format = "dd/mm/yyyy hh:mm:ss"
+        sheet.cell(row_index, 5).number_format = "@"
+        sheet.cell(row_index, 10).number_format = "#,##0.0"
+    sheet.oddFooter.left.text = SYSTEM_NAME
+    sheet.oddFooter.center.text = "ข้อมูลดิบกรอกแบบชุด"
+    sheet.oddFooter.right.text = "หน้า &P จาก &N"
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
 def build_group_report_pdf(payload: dict) -> bytes:
     start_date, end_date = normalized_range(payload)
     records = group_report_records(payload)
@@ -6187,17 +7619,17 @@ def build_group_report_pdf(payload: dict) -> bytes:
         }.get(fruit_id, ["น้ำ", "ดอก"])
         return (
             (short_standard_headers if show_standard_weights else [])
-            + (["ทุเรียน"] if show_durian_weight else [])
+            + ([production_report_single_label(payload)] if show_durian_weight else [])
         )
 
     def summary_weight_values(row: dict) -> list:
         return (
             ([report_number(row["water"]), report_number(row["flower"])] if show_standard_weights else [])
-            + ([grade_cell(row.get("grades"))] if show_durian_weight else [])
+            + ([report_number(row.get("single_weight", 0))] if show_durian_weight else [])
         )
 
     def detail_weight_values(record: dict) -> list:
-        is_durian = production_fruit_id(record) == "durian"
+        is_durian = production_record_is_single_weight(record)
         return (
             ([
                 "-" if is_durian else report_number(record.get("water_weight", record.get("water", 0))),
@@ -7184,14 +8616,17 @@ def build_time_summary_pdf(payload: dict) -> bytes:
 
 def accounting_payment_rows(payload: dict) -> list[dict]:
     method = str(payload.get("payment_method") or "cash")
-    if method not in {"cash", "transfer"}:
+    if method not in {"cash", "transfer", "all"}:
         method = "cash"
     rows = []
     for index, raw in enumerate(payload.get("rows") or [], start=1):
-        if not isinstance(raw, dict) or str(raw.get("payment_method") or method) != method:
+        if not isinstance(raw, dict):
+            continue
+        row_method = str(raw.get("payment_method") or (method if method != "all" else "cash"))
+        if row_method not in {"cash", "transfer"} or (method != "all" and row_method != method):
             continue
         rows.append({
-            "sequence": index,
+            "sequence": len(rows) + 1,
             "emp_code": str(raw.get("emp_code") or "-"),
             "fullname": str(raw.get("fullname") or "-"),
             "group_label": str(raw.get("group_label") or "-"),
@@ -7200,51 +8635,52 @@ def accounting_payment_rows(payload: dict) -> list[dict]:
             "deduction_amount": max(0, safe_float(raw.get("deduction_amount"))),
             "withholding_tax_amount": max(0, safe_float(raw.get("withholding_tax_amount"))),
             "net_amount": max(0, safe_float(raw.get("net_amount"))),
-            "payment_method": method,
+            "payment_method": row_method,
         })
     return rows
 
 
 def accounting_payment_label(method: str) -> str:
-    return "เงินโอน" if method == "transfer" else "เงินสด"
+    return "เงินสดและเงินโอน" if method == "all" else ("เงินโอน" if method == "transfer" else "เงินสด")
 
 
 def build_accounting_payments_excel(payload: dict) -> bytes:
     start_date, end_date = normalized_range(payload)
-    method = "transfer" if payload.get("payment_method") == "transfer" else "cash"
+    method = str(payload.get("payment_method") or "cash")
     label = accounting_payment_label(method)
     scope_label = str(payload.get("scope_label") or "พนักงานทั้งหมด")
     rows = accounting_payment_rows(payload)
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = f"Payment {method.title()}"
-    sheet.merge_cells("A1:J1")
+    sheet.merge_cells("A1:K1")
     sheet["A1"] = COMPANY_NAME
     sheet["A1"].font = Font(name="Sarabun", bold=True, size=18, color="0F7A3D")
-    sheet.merge_cells("A2:J2")
+    sheet.merge_cells("A2:K2")
     sheet["A2"] = f"รายการจ่ายค่าแรง - {label}"
     sheet["A2"].font = Font(name="Sarabun", bold=True, size=16, color="111827")
-    sheet.merge_cells("A3:J3")
+    sheet.merge_cells("A3:K3")
     sheet["A3"] = f"ช่วงวันที่ {format_report_date(start_date)} - {format_report_date(end_date)} | ขอบเขต {scope_label}"
-    sheet.merge_cells("A4:J4")
+    sheet.merge_cells("A4:K4")
     sheet["A4"] = export_meta_text(payload)
     add_excel_logo(sheet, "K1")
-    sheet.append([])
-    sheet.append(["ลำดับ", "รหัส", "ชื่อพนักงาน", "กลุ่ม", "ค่าแรง", "เงินเพิ่ม", "เงินหัก", "หัก ณ ที่จ่าย", "ยอดสุทธิ", "ลงชื่อรับเงิน/หมายเหตุ"])
+    sheet["A5"] = " | ".join(f"{accounting_payment_label(kind)} {report_number(sum(row['net_amount'] for row in rows if row['payment_method'] == kind))} บาท" for kind in ("cash", "transfer"))
+    sheet.merge_cells("A5:K5")
+    sheet.append(["ลำดับ", "รหัส", "ชื่อพนักงาน", "กลุ่ม", "ค่าแรง", "เงินเพิ่ม", "เงินหัก", "หัก ณ ที่จ่าย", "ยอดสุทธิ", "วิธีจ่าย", "ลงชื่อรับเงิน/หมายเหตุ"])
     for row in rows:
-        sheet.append([row["sequence"], row["emp_code"], row["fullname"], row["group_label"], row["gross_amount"], row["bonus_amount"], row["deduction_amount"], row["withholding_tax_amount"], row["net_amount"], ""])
+        sheet.append([row["sequence"], row["emp_code"], row["fullname"], row["group_label"], row["gross_amount"], row["bonus_amount"], row["deduction_amount"], row["withholding_tax_amount"], row["net_amount"], accounting_payment_label(row["payment_method"]), ""])
     total_row = sheet.max_row + 1
     sheet.cell(total_row, 1, "รวม")
     sheet.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=4)
     for column in range(5, 10):
         letter = get_column_letter(column)
         sheet.cell(total_row, column, f"=SUM({letter}7:{letter}{total_row - 1})" if rows else 0)
-    style_excel_report_sheet(sheet, [6], [9, 14, 28, 24, 15, 14, 14, 17, 16, 28])
+    style_excel_report_sheet(sheet, [6], [9, 14, 28, 24, 15, 14, 14, 17, 16, 14, 28])
     for cell in sheet[total_row]:
         cell.font = Font(name="Sarabun", bold=True, color="0F7A3D", size=10)
         cell.fill = PatternFill("solid", fgColor="E8F5EE")
     sheet.print_title_rows = "1:6"
-    sheet.print_area = f"A1:J{total_row}"
+    sheet.print_area = f"A1:K{total_row}"
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -7252,7 +8688,7 @@ def build_accounting_payments_excel(payload: dict) -> bytes:
 
 def build_accounting_payments_pdf(payload: dict) -> bytes:
     start_date, end_date = normalized_range(payload)
-    method = "transfer" if payload.get("payment_method") == "transfer" else "cash"
+    method = str(payload.get("payment_method") or "cash")
     label = accounting_payment_label(method)
     scope_label = str(payload.get("scope_label") or "พนักงานทั้งหมด")
     rows = accounting_payment_rows(payload)
@@ -7268,14 +8704,15 @@ def build_accounting_payments_pdf(payload: dict) -> bytes:
         payload,
     )
     story += [Spacer(1, 5 * mm), Paragraph(f"จำนวน {len(rows)} คน | ยอดสุทธิรวม {report_number(sum(row['net_amount'] for row in rows))} บาท", section), Spacer(1, 3 * mm)]
-    table_rows = [["ลำดับ", "รหัส", "ชื่อพนักงาน", "กลุ่ม", "ค่าแรง", "เงินเพิ่ม", "เงินหัก", "หัก ณ ที่จ่าย", "ยอดสุทธิ", "ลงชื่อ/หมายเหตุ"]]
+    story += [Paragraph(" | ".join(f"{accounting_payment_label(kind)} {report_number(sum(row['net_amount'] for row in rows if row['payment_method'] == kind))} บาท" for kind in ("cash", "transfer")), section), Spacer(1, 3 * mm)]
+    table_rows = [["ลำดับ", "รหัส", "ชื่อพนักงาน", "กลุ่ม", "ค่าแรง", "เงินเพิ่ม", "เงินหัก", "หัก ณ ที่จ่าย", "ยอดสุทธิ", "วิธีจ่าย", "ลงชื่อ/หมายเหตุ"]]
     for row in rows:
         table_rows.append([
             row["sequence"], row["emp_code"], Paragraph(xml_escape(row["fullname"]), small), Paragraph(xml_escape(row["group_label"]), small),
-            report_number(row["gross_amount"]), report_number(row["bonus_amount"]), report_number(row["deduction_amount"]), report_number(row["withholding_tax_amount"]), report_number(row["net_amount"]), "",
+            report_number(row["gross_amount"]), report_number(row["bonus_amount"]), report_number(row["deduction_amount"]), report_number(row["withholding_tax_amount"]), report_number(row["net_amount"]), accounting_payment_label(row["payment_method"]), "",
         ])
-    table_rows.append(["รวม", "", "", "", report_number(sum(row["gross_amount"] for row in rows)), report_number(sum(row["bonus_amount"] for row in rows)), report_number(sum(row["deduction_amount"] for row in rows)), report_number(sum(row["withholding_tax_amount"] for row in rows)), report_number(sum(row["net_amount"] for row in rows)), ""])
-    table = Table(table_rows, repeatRows=1, colWidths=[12 * mm, 20 * mm, 44 * mm, 37 * mm, 25 * mm, 22 * mm, 22 * mm, 25 * mm, 27 * mm, 35 * mm])
+    table_rows.append(["รวม", "", "", "", report_number(sum(row["gross_amount"] for row in rows)), report_number(sum(row["bonus_amount"] for row in rows)), report_number(sum(row["deduction_amount"] for row in rows)), report_number(sum(row["withholding_tax_amount"] for row in rows)), report_number(sum(row["net_amount"] for row in rows)), "", ""])
+    table = Table(table_rows, repeatRows=1, colWidths=[10 * mm, 17 * mm, 39 * mm, 29 * mm, 24 * mm, 20 * mm, 20 * mm, 24 * mm, 26 * mm, 18 * mm, 26 * mm])
     set_pdf_table_style(table, 3)
     table.setStyle(TableStyle([
         ("ALIGN", (0, 1), (1, -1), "CENTER"), ("ALIGN", (4, 1), (8, -1), "RIGHT"),
@@ -7371,6 +8808,9 @@ def build_inbound_selected_excel(payload: dict) -> bytes:
     sheet.page_setup.fitToWidth = 1
     sheet.sheet_properties.pageSetUpPr.fitToPage = True
     buffer = BytesIO()
+    if payload.get("quantities_only"):
+        sheet.delete_cols(7, 2)
+        sheet.auto_filter.ref = f"A{header_row}:H{max(header_row, total_row - 1)}"
     workbook.save(buffer)
     return buffer.getvalue()
 
@@ -7393,7 +8833,11 @@ def build_inbound_selected_pdf(payload: dict) -> bytes:
             Paragraph(xml_escape(str(row.get("note") or "-")), styles["Normal"]), str(row.get("created_by") or "-"),
         ])
     table_rows.append(["รวม", "", "", "", f"{len(rows)} รายการ", f"{sum(safe_float(row.get('weight_kg')) for row in rows):,.2f}", "", f"{sum(safe_float(row.get('total_amount')) for row in rows):,.2f}", "", ""])
-    table = Table(table_rows, colWidths=[12*mm, 27*mm, 20*mm, 35*mm, 20*mm, 22*mm, 19*mm, 24*mm, 43*mm, 24*mm], repeatRows=1)
+    widths = [12*mm, 27*mm, 20*mm, 35*mm, 20*mm, 22*mm, 19*mm, 24*mm, 43*mm, 24*mm]
+    if payload.get("quantities_only"):
+        table_rows = [row[:6] + row[8:] for row in table_rows]
+        widths = widths[:6] + widths[8:]
+    table = Table(table_rows, colWidths=widths, repeatRows=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F766E")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), THAI_FONT_BOLD), ("FONTNAME", (0, 1), (-1, -1), THAI_FONT),
@@ -7408,8 +8852,26 @@ def build_inbound_selected_pdf(payload: dict) -> bytes:
 
 
 class ReportHandler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(30)
+
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        # The cold-room workspace is embedded by our own Stock page only.
+        cold_workspace = urlparse(self.path).path == "/stock-cold-room.html"
+        self.send_header("X-Frame-Options", "SAMEORIGIN" if cold_workspace else "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'self'" if cold_workspace else "frame-ancestors 'none'")
+        self.send_header("Referrer-Policy", "same-origin")
+        origin = self.headers.get('Origin', '')
+        approved = {value.strip() for value in os.environ.get('APP_ALLOWED_ORIGINS', '').split(',') if value.strip()}
+        approved.update({'https://pf-systempro-factory.onrender.com', 'https://pismai-factory-test.onrender.com'})
+        parsed_origin = urlparse(origin)
+        if origin in approved or (parsed_origin.scheme in {'http', 'https'} and parsed_origin.netloc == self.headers.get('Host')) or (parsed_origin.hostname in {'localhost', '127.0.0.1'}):
+            self.send_header("Access-Control-Allow-Origin", origin)
+        elif origin == 'null' and os.environ.get('ALLOW_FILE_ORIGIN') == '1':
+            self.send_header("Access-Control-Allow-Origin", 'null')
+        self.send_header('Vary', 'Origin')
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Backup-Code, X-Session-Token")
         super().end_headers()
@@ -7419,13 +8881,63 @@ class ReportHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
+        try:
+            ReportHandler._post_request(self)
+        except request_security.RequestError as error:
+            self.close_connection = True
+            self.send_json({"error": str(error)}, error.status)
+
+    def _post_request(self) -> None:
         parsed = urlparse(self.path)
         payload = self.read_json()
+        if not authorize_legacy_request(self, "POST", parsed.path, payload):
+            return
+        if parsed.path in {'/reports/sync', '/api/accounts/sync', '/api/cleanup-test-data', '/api/production-records/delete-by-date'}:
+            self.send_json({'error': 'เส้นทางเก่านี้ถูกปิดเพื่อป้องกันการทับหรือลบข้อมูล ใช้เมนูแก้ไขที่ตรวจสิทธิ์และรายการก่อนบันทึก'}, 410)
+            return
+        if parsed.path == '/api/state' and payload.get('table') in {'production_records', 'time_records'}:
+            self.send_json({'error': 'ห้ามเขียนประวัติงานจากสำเนา cache กรุณาใช้คิวบันทึกหรือเมนูแก้ไข'}, 409)
+            return
+        if parsed.path == '/api/production-records/bulk-sync' and payload.get('mode', 'upsert') != 'insert':
+            self.send_json({'error': 'กรุณาใช้เมนูแก้ไขรายรายการที่ตรวจเวอร์ชันข้อมูลก่อนบันทึก'}, 409)
+            return
+
+        if parsed.path == "/api/fruit-piles":
+            actor = verify_session_token(self.headers.get("X-Session-Token", ""))
+            if not actor:
+                self.send_json({"error": "เซสชันหมดอายุหรือเป็นการเข้าสู่ระบบเฉพาะเครื่อง กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่เพื่อบันทึกกองขึ้นส่วนกลาง ข้อมูลกองเดิมยังอยู่", "code": "SESSION_REQUIRED"}, 401)
+                return
+            if account_level_number(actor.get("level")) < 4:
+                self.send_json({"error": "จัดการกองได้เฉพาะ C4, C5, C6 และ C7 หากเพิ่งเปลี่ยนสิทธิ์ กรุณาเข้าสู่ระบบใหม่", "code": "INSUFFICIENT_LEVEL"}, 403)
+                return
+            status, body = update_shared_fruit_piles(payload)
+            self.send_json({"data": body} if status < 400 else {"error": body}, status)
+            return
+
+        if parsed.path in {"/api/stock/items", "/api/stock/movements"}:
+            actor = inbound_authorized_actor(self)
+            if not actor:
+                self.send_json({"error": "C4 ขึ้นไปจึงจะบันทึกรายการสต็อกได้"}, 403)
+                return
+            try:
+                rpc_payload = stock_item_payload(payload, actor) if parsed.path.endswith("/items") else stock_movement_payload(payload, actor)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, 400)
+                return
+            rpc = "stock_create_item" if parsed.path.endswith("/items") else "stock_record_movement"
+            status, body = supabase_request("POST", f"rpc/{rpc}", rpc_payload)
+            if status >= 400:
+                error_status, error_body = stock_api_error(status, body)
+                self.send_json(error_body, error_status)
+                return
+            saved = body[0] if isinstance(body, list) and body else body
+            self.send_json({"data": stock_operational_data(saved, actor)}, 201)
+            return
 
         if parsed.path == "/api/inbound/fruits":
             actor = inbound_authorized_actor(self)
             if not actor:
-                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
+                self.send_json({"error": "C4 or higher is required for inbound receiving."}, 403)
                 return
             name = inbound_clean_text(payload.get("name"), 100)
             if not name:
@@ -7438,13 +8950,13 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             saved = body[0] if isinstance(body, list) and body else body
             inbound_audit(self, actor, "CREATE_INBOUND_FRUIT", f"เพิ่มผลไม้รับเข้า: {name}", {"fruit_id": saved.get("id") if isinstance(saved, dict) else None})
-            self.send_json({"data": saved}, 201)
+            self.send_json({"data": stock_operational_data(saved, actor)}, 201)
             return
 
         if parsed.path == "/api/inbound/prices":
             actor = inbound_authorized_actor(self)
             if not actor:
-                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
+                self.send_json({"error": "C4 or higher is required for inbound receiving."}, 403)
                 return
             try:
                 fruit_id = int(payload.get("fruit_id") or 0)
@@ -7468,19 +8980,76 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             saved = body[0] if isinstance(body, list) and body else body
             inbound_audit(self, actor, "SET_INBOUND_PRICE", f"ตั้งราคาแนะนำ {fruits[0]['name']} {price:.2f} บาท/กก.", {"fruit_id": fruit_id, "price_per_kg": price, "effective_date": effective_date})
-            self.send_json({"data": saved}, 201)
+            self.send_json({"data": stock_operational_data(saved, actor)}, 201)
+            return
+
+        if parsed.path in {"/api/cold-sales/orders", "/api/cold-sales/confirm"}:
+            actor = secret_room_actor(self)
+            confirming = parsed.path.endswith("/confirm")
+            if not actor or actor.get("level") not in ({"C5", "C6", "C7"} if confirming else {"C4", "C5", "C6", "C7"}):
+                self.send_json({"error": "ยืนยันตัดขายได้เฉพาะ C5–C7" if confirming else "ต้องใช้สิทธิ์ C4–C7"}, 403)
+                return
+            allowed = {"client_uid", "order_id", "version", "allocations", "reason"} if confirming else {"client_uid", "customer", "company", "bill_date", "lines"}
+            if not isinstance(payload, dict) or not set(payload).issubset(allowed) or len(json.dumps(payload)) > 100000:
+                self.send_json({"error": "ข้อมูลออเดอร์ไม่ถูกต้อง"}, 400)
+                return
+            status, body = supabase_request("POST", "rpc/cold_sale_confirm" if confirming else "rpc/cold_sale_create", {"p_request": payload, "p_actor": inbound_actor_name(actor)})
+            if status >= 400:
+                response_status, response = cold_sale_error(status, body)
+                self.send_json(response, response_status)
+                return
+            self.send_json({"data": body})
+            return
+
+        if parsed.path == "/api/cold-stock/movements":
+            actor = inbound_authorized_actor(self)
+            if not actor:
+                self.send_json({"error": "C4 or higher is required for cold stock."}, 403)
+                return
+            allowed = {"action", "client_uid", "product", "lot", "owner", "customer", "boxes", "kg_per_box", "room", "slot", "pallet_id", "version", "recipient", "reference"}
+            if not isinstance(payload, dict) or not set(payload).issubset(allowed):
+                self.send_json({"error": "ข้อมูลห้องเย็นไม่ถูกต้อง"}, 400)
+                return
+            status, body = supabase_request("POST", "rpc/cold_stock_record_v2" if "kg_per_box" in payload else "rpc/cold_stock_record", {"p_request": payload, "p_actor": inbound_actor_name(actor)})
+            if status >= 400:
+                response_status, response = cold_sale_error(status, body) if "kg_per_box" in payload and isinstance(body, dict) and body.get("code") == "PGRST202" else cold_stock_error(status, body)
+                self.send_json(response, response_status)
+                return
+            self.send_json({"data": stock_operational_data(body, actor)})
+            return
+
+        if parsed.path == "/api/inbound/issues":
+            actor = inbound_authorized_actor(self)
+            if not actor:
+                self.send_json({"error": "C4 or higher is required for fruit stock."}, 403)
+                return
+            try:
+                parameters = fruit_issue_payload(payload, actor)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, 400)
+                return
+            status, body = supabase_request("POST", "rpc/fruit_stock_issue", parameters)
+            if status >= 400:
+                response_status, response = fruit_issue_error(status, body)
+                self.send_json(response, response_status)
+                return
+            self.send_json({"data": stock_operational_data(body, actor)}, 200)
             return
 
         if parsed.path == "/api/inbound/receipts":
             actor = inbound_authorized_actor(self)
             if not actor:
-                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
+                self.send_json({"error": "C4 or higher is required for inbound receiving."}, 403)
                 return
             try:
                 fruit_id = int(payload.get("fruit_id") or 0)
                 weight = round(float(payload.get("weight_kg") or 0), 2)
                 price = round(float(payload.get("price_per_kg") or 0), 2)
                 received_at = datetime.fromisoformat(str(payload.get("received_at") or "").replace("Z", "+00:00"))
+                if received_at.tzinfo is None:
+                    received_at = received_at.replace(tzinfo=timezone(timedelta(hours=7)))
+                if received_at.tzinfo is None:
+                    received_at = received_at.replace(tzinfo=timezone(timedelta(hours=7)))
             except (TypeError, ValueError):
                 self.send_json({"error": "ข้อมูลวันที่ ผลไม้ น้ำหนัก หรือราคาไม่ถูกต้อง"}, 400)
                 return
@@ -7507,7 +9076,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             if status >= 400:
                 existing_status, existing = supabase_request("GET", f"inbound_receipts?client_uid=eq.{quote(client_uid)}&select=*&limit=1")
                 if existing_status < 400 and isinstance(existing, list) and existing:
-                    self.send_json({"data": existing[0], "idempotent": True})
+                    self.send_json({"data": stock_operational_data(existing[0], actor), "idempotent": True})
                     return
                 self.send_json({"error": body, "migration": "supabase_inbound_receiving_migration.sql"}, status)
                 return
@@ -7517,7 +9086,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 supabase_request("DELETE", f"inbound_receipts?id=eq.{saved['id']}", prefer="return=minimal")
                 self.send_json({"error": "บันทึก Audit Log ไม่สำเร็จ รายการจึงถูกย้อนกลับ", "audit_error": audit_body}, 500)
                 return
-            self.send_json({"data": saved}, 201)
+            self.send_json({"data": stock_operational_data(saved, actor)}, 201)
             return
 
         if parsed.path == "/api/online-users":
@@ -7894,6 +9463,18 @@ class ReportHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/desktop-import/enqueue-file":
+            actor = secret_room_actor(self)
+            if not actor:
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            if account_level_number(actor.get("level")) < 6:
+                self.send_json({"error": "C6 or higher is required for PF DesktopApp import."}, 403)
+                return
+            status, body = accept_desktop_file(payload, actor)
+            self.send_json(body, status)
+            return
+
         if parsed.path == "/api/production-save-queue/enqueue":
             actor = secret_room_actor(self)
             if not actor:
@@ -7901,6 +9482,17 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             records = payload.get("records", [])
             queue_uid = str(payload.get("queue_uid") or "").strip()
+            source = str(payload.get("source") or "manual").strip()
+            desktop_import = source == "pf-desktop-app"
+            if source not in {"manual", "pf-desktop-app"}:
+                self.send_json({"error": "Unknown production queue source."}, 400)
+                return
+            if desktop_import and account_level_number(actor.get("level")) < 6:
+                self.send_json({"error": "C6 or higher is required for PF DesktopApp import."}, 403)
+                return
+            if desktop_import:
+                self.send_json({"error": "กรุณารีเฟรชหน้าเว็บแล้วนำเข้าทั้งไฟล์ เพื่อใช้การตรวจไฟล์ซ้ำรุ่นใหม่"}, 409)
+                return
             if not isinstance(records, list) or not (1 <= len(records) <= 100):
                 self.send_json({"error": "records must contain 1-100 items."}, 400)
                 return
@@ -7915,17 +9507,33 @@ class ReportHandler(BaseHTTPRequestHandler):
                     return
                 row = live_state_row("production_records", record)
                 row.pop("id", None)
+                if not re.fullmatch(r'[A-Za-z0-9._:-]{8,200}', production_record_client_uid(row)):
+                    self.send_json({'error': 'รหัสอ้างอิงรายการไม่ถูกต้อง'}, 400)
+                    return
                 row["queue_dedupe_key"] = production_queue_dedupe_key(row)
-                row["created_by"] = actor_username
-                row["updated_by"] = actor_username
+                record_actor = "Import" if desktop_import else actor_username
+                row["created_by"] = record_actor
+                row["updated_by"] = record_actor
                 raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
-                raw["created_by"] = actor_username
-                raw["updated_by"] = actor_username
+                raw["import_source"] = "manual"
+                raw["created_by"] = record_actor
+                raw["updated_by"] = record_actor
+                if desktop_import:
+                    desktop_meta = raw.get("desktop_import")
+                    if not isinstance(desktop_meta, dict) or not desktop_meta.get("record_id") or not desktop_meta.get("capture_id"):
+                        self.send_json({"error": "Desktop import identity metadata is incomplete."}, 400)
+                        return
+                    raw["imported_by"] = actor_username
+                    raw["import_source"] = "pf-desktop-app"
                 row["raw_payload"] = raw
                 converted.append(row)
             client_uids = [production_record_client_uid(row) for row in converted]
             if any(not uid for uid in client_uids) or len(set(client_uids)) != len(client_uids):
                 self.send_json({"error": "Every queued record requires a unique client_uid."}, 400)
+                return
+            facts_error = validate_production_central_facts(converted)
+            if facts_error:
+                self.send_json({'error': facts_error}, 409)
                 return
             identity_keys = {
                 (
@@ -7962,10 +9570,10 @@ class ReportHandler(BaseHTTPRequestHandler):
                 "status": "queued",
                 "created_by": actor_username,
             }
-            status, body = supabase_request(
-                "POST",
+            status, body = insert_identity_row_compatible(
                 "production_save_queue",
                 queue_row,
+                "production_save_queue_pkey",
                 prefer="return=representation",
                 timeout_seconds=5,
             )
@@ -7993,7 +9601,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"data": production_queue_to_client(saved), "accepted": True}, 202)
             return
 
-        queue_action_match = re.fullmatch(r"/api/production-save-queue/(\d+)/(verify|retry|cancel|link-existing)", parsed.path)
+        queue_action_match = re.fullmatch(r"/api/production-save-queue/(\d+)/(verify|retry|confirm-save|cancel|link-existing)", parsed.path)
         if queue_action_match:
             actor = secret_room_actor(self)
             if not actor:
@@ -8016,11 +9624,24 @@ class ReportHandler(BaseHTTPRequestHandler):
             actor_username = str(actor.get("username") or "unknown").strip()
             is_owner = str(job.get("created_by") or "").casefold() == actor_username.casefold()
             is_supervisor = account_level_number(actor.get("level")) >= 4
+            if account_level_number(actor.get('level')) < 2 and not is_owner:
+                self.send_json({'error': 'ไม่มีสิทธิ์อ่านหรือจัดการคิวของผู้อื่น'}, 403)
+                return
 
             if action == "verify":
-                if job.get("status") == "succeeded":
+                payload_rows = job.get("payload") if isinstance(job.get("payload"), list) else []
+                desktop_recheck = bool(payload_rows) and all(desktop_file.is_desktop(row) for row in payload_rows)
+                if job.get("status") == "succeeded" and not desktop_recheck:
                     self.send_json({"data": production_queue_to_client(job, include_payload=True)})
                     return
+                if desktop_recheck:
+                    if not is_supervisor:
+                        self.send_json({"error": "C4 or higher is required to recheck Desktop queues."}, 403)
+                        return
+                    if (len(payload_rows) != int(job.get("record_count") or 0)
+                            or not hmac.compare_digest(str(job.get("payload_hash") or ""), production_queue_payload_hash(payload_rows))):
+                        self.send_json({"error": "Queue payload integrity check failed. Recovery is blocked."}, 409)
+                        return
                 if job.get("status") in {"queued", "processing"}:
                     self.send_json({"data": production_queue_to_client(job), "processing": True}, 202)
                     return
@@ -8047,6 +9668,10 @@ class ReportHandler(BaseHTTPRequestHandler):
                     if match_type == "near"
                     else "ไม่พบข้อมูลชุดนี้ในฐานข้อมูล"
                 )
+                if desktop_recheck:
+                    error_message = f"ตรวจพบจริง {len(matched_rows)} จาก {len(payload_rows)} รายการ ต้องตรวจสอบก่อนกู้รายการที่ขาด"
+                    details["previous_result_record_ids"] = job.get("result_record_ids") or []
+                    details["previous_result_payload"] = job.get("result_payload") or []
                 update_status, updated = update_production_queue(
                     queue_id,
                     {
@@ -8069,6 +9694,62 @@ class ReportHandler(BaseHTTPRequestHandler):
 
             if not (is_owner or is_supervisor):
                 self.send_json({"error": "Only the queue owner or C4 and higher may perform this action."}, 403)
+                return
+            if action == "confirm-save":
+                if not is_supervisor:
+                    self.send_json({"error": "C4 or higher is required to confirm a reviewed queue."}, 403)
+                    return
+                if job.get("status") not in {"needs_review", "failed"}:
+                    self.send_json({"error": "Only failed or review queues can be manually confirmed."}, 409)
+                    return
+                payload_rows = job.get("payload") if isinstance(job.get("payload"), list) else []
+                if not payload_rows or len(payload_rows) != int(job.get("record_count") or 0):
+                    self.send_json({"error": "Queue payload is missing or incomplete."}, 409)
+                    return
+                if not hmac.compare_digest(str(job.get("payload_hash") or ""), production_queue_payload_hash(payload_rows)):
+                    self.send_json({"error": "Queue payload integrity check failed. Manual confirmation is not allowed."}, 409)
+                    return
+                validation_error = validate_production_queue_rows(payload_rows)
+                if validation_error:
+                    self.send_json({"error": validation_error}, 409)
+                    return
+                emp_code = str(payload_rows[0].get("emp_code") or "").strip()
+                employee_status, employees = supabase_request(
+                    "GET",
+                    f"employees?emp_code=eq.{quote(emp_code)}&status=eq.Active&select=id,emp_code,fullname&limit=1",
+                    timeout_seconds=5,
+                )
+                if employee_status >= 400:
+                    self.send_json({"error": employees}, employee_status)
+                    return
+                if not isinstance(employees, list) or not employees:
+                    self.send_json({"error": "The employee is missing or inactive in the central database."}, 409)
+                    return
+                confirmed_rows = production_manual_confirmation_rows(queue_id, payload_rows)
+                with production_record_insert_lock:
+                    save_status, saved_rows = insert_production_records_compatible(confirmed_rows, allow_near_duplicate=True)
+                if save_status >= 400 or not isinstance(saved_rows, list) or len(saved_rows) != len(payload_rows):
+                    self.send_json({"error": saved_rows or "Manual production save failed."}, save_status if save_status >= 400 else 500)
+                    return
+                update_status, updated = update_production_queue(
+                    queue_id,
+                    production_queue_success_values(saved_rows),
+                    expected_status=str(job.get("status") or "needs_review"),
+                )
+                if update_status >= 400 or not updated:
+                    self.send_json({"error": "Production records were saved but the queue could not be completed. Verify the queue again."}, update_status if update_status >= 400 else 500)
+                    return
+                production_queue_event(
+                    queue_id,
+                    "manual_confirmed_save",
+                    "succeeded",
+                    "C4 manually reviewed and confirmed the production records for saving.",
+                    actor_username,
+                    {"record_ids": updated.get("result_record_ids", []), "previous_error_code": job.get("error_code"),
+                     "previous_result_record_ids": job.get("result_record_ids") or [],
+                     "previous_result_payload": job.get("result_payload") or []},
+                )
+                self.send_json({"data": production_queue_to_client(updated, include_payload=True)})
                 return
             if action == "retry":
                 if job.get("status") not in {"needs_review", "failed"}:
@@ -8147,6 +9828,11 @@ class ReportHandler(BaseHTTPRequestHandler):
             if record_status >= 400 or not isinstance(existing_records, list) or len(existing_records) != len(requested_ids):
                 self.send_json({"error": existing_records if record_status >= 400 else "Existing records are incomplete."}, record_status if record_status >= 400 else 409)
                 return
+            if any(desktop_file.is_desktop(row) for row in (job.get("payload") or [])):
+                error = desktop_result_error(job["payload"], existing_records)
+                if error:
+                    self.send_json({"error": error}, 409)
+                    return
             update_status, updated = update_production_queue(
                 queue_id,
                 production_queue_success_values(existing_records),
@@ -8178,8 +9864,16 @@ class ReportHandler(BaseHTTPRequestHandler):
                 for row in converted:
                     insert_row = dict(row)
                     insert_row.pop("id", None)
+                    record_actor = str(self.authorized_legacy_actor.get("username") or "").strip()
+                    insert_row["created_by"] = record_actor
+                    insert_row["updated_by"] = record_actor
+                    insert_row["raw_payload"] = {**insert_row.get("raw_payload", {}), "created_by": record_actor, "updated_by": record_actor}
                     insert_rows.append(insert_row)
                 with production_record_insert_lock:
+                    error = validate_production_central_facts(insert_rows)
+                    if error:
+                        self.send_json({'error': error}, 409)
+                        return
                     status, body = insert_production_records_compatible(insert_rows)
                 if status >= 400:
                     self.send_json({"data": None, "error": body}, status)
@@ -8234,6 +9928,24 @@ class ReportHandler(BaseHTTPRequestHandler):
                 if status >= 400:
                     self.send_json({"data": None, "error": body}, status)
                     return
+                deleted_at = datetime.utcnow().isoformat() + "Z"
+                for record_id in clean_ids:
+                    description = f"Deleted time record #{record_id}"
+                    insert_audit_log_compatible({
+                        "action": "DELETE_TIME_RECORD_SYNC",
+                        "module": "time",
+                        "description": description,
+                        "created_by": "system",
+                        "user_fullname": "System",
+                        "created_at": deleted_at,
+                        "metadata": {
+                            "action": "DELETE_TIME_RECORD_SYNC",
+                            "module": "time",
+                            "description": description,
+                            "record_id": record_id,
+                            "created_at": deleted_at,
+                        },
+                    })
                 self.send_json({"data": body if isinstance(body, list) else [], "error": None}, status)
                 return
 
@@ -8254,9 +9966,14 @@ class ReportHandler(BaseHTTPRequestHandler):
                 for row in converted:
                     insert_row = dict(row)
                     insert_row.pop("id", None)
+                    record_actor = str(self.authorized_legacy_actor.get("username") or "").strip()
+                    insert_row["created_by"] = record_actor
+                    insert_row["updated_by"] = record_actor
                     raw_payload = insert_row.get("raw_payload")
                     if isinstance(raw_payload, dict):
                         insert_row["raw_payload"] = {key: value for key, value in raw_payload.items() if key != "id"}
+                        insert_row["raw_payload"]["created_by"] = record_actor
+                        insert_row["raw_payload"]["updated_by"] = record_actor
                     insert_rows.append(insert_row)
                 with time_record_insert_lock:
                     status, conflict = validate_time_record_conflicts(insert_rows)
@@ -8318,14 +10035,19 @@ class ReportHandler(BaseHTTPRequestHandler):
             if operation == "insert":
                 for index, row in enumerate(converted):
                     row.pop("id", None)
+                    row["created_by"] = str(actor.get("username") or "").strip()
+                    row["updated_by"] = row["created_by"]
                     row["queue_dedupe_key"] = time_queue_row_key(queue_uid, index)
                     raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
                     row["raw_payload"] = {key: value for key, value in raw.items() if key != "id"}
+                    row["raw_payload"]["created_by"] = row["created_by"]
+                    row["raw_payload"]["updated_by"] = row["updated_by"]
 
             identities = [time_record_identity(row) for row in converted]
+            employee_keys = {time_record_employee_key(row) for row in converted}
             employee_codes = {emp_code for _date, emp_code in identities}
             work_dates = sorted({work_date for work_date, _emp_code in identities})
-            if len(employee_codes) != 1 or not work_dates or any(not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) for value in work_dates):
+            if len(employee_keys) != 1 or len(employee_codes) != 1 or not work_dates or any(not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) for value in work_dates):
                 self.send_json({"error": "one queue must contain one employee and valid work dates."}, 400)
                 return
             payload_hash = production_queue_payload_hash(converted)
@@ -8338,8 +10060,9 @@ class ReportHandler(BaseHTTPRequestHandler):
                 "first_work_date": work_dates[0], "last_work_date": work_dates[-1],
                 "status": "queued", "created_by": str(actor.get("username") or actor.get("fullname") or "unknown"),
             }
-            status, body = supabase_request(
-                "POST", "time_save_queue", queue_row, prefer="return=representation", timeout_seconds=5,
+            status, body = insert_identity_row_compatible(
+                "time_save_queue", queue_row, "time_save_queue_pkey",
+                prefer="return=representation", timeout_seconds=5,
             )
             if status >= 400:
                 lookup_status, existing = supabase_request(
@@ -8401,13 +10124,18 @@ class ReportHandler(BaseHTTPRequestHandler):
                 if operation == "insert":
                     for index, row in enumerate(converted):
                         row.pop("id", None)
+                        row["created_by"] = str(actor.get("username") or "").strip()
+                        row["updated_by"] = row["created_by"]
                         row["queue_dedupe_key"] = time_queue_row_key(str(job.get("queue_uid") or ""), index)
                         raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
                         row["raw_payload"] = {key: value for key, value in raw.items() if key != "id"}
+                        row["raw_payload"]["created_by"] = row["created_by"]
+                        row["raw_payload"]["updated_by"] = row["updated_by"]
                 identities = [time_record_identity(row) for row in converted]
+                employee_keys = {time_record_employee_key(row) for row in converted}
                 employee_codes = {emp_code for _date, emp_code in identities}
                 dates = sorted({work_date for work_date, _emp_code in identities})
-                if len(employee_codes) != 1 or not dates or any(not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) for value in dates):
+                if len(employee_keys) != 1 or len(employee_codes) != 1 or not dates or any(not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) for value in dates):
                     self.send_json({"error": "one queue must contain one employee and valid work dates."}, 400)
                     return
                 previous_payload = job.get("payload") if isinstance(job.get("payload"), list) else []
@@ -8573,7 +10301,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             expected_updated_at = str(payload.get("expected_updated_at") or "")
             current_updated_at = str(before.get("updated_at") or before.get("created_at") or "")
-            if expected_updated_at and expected_updated_at != current_updated_at:
+            if not expected_updated_at or expected_updated_at != current_updated_at:
                 self.send_json(
                     {"error": "ข้อมูลรายการนี้ถูกแก้ไขจากเครื่องอื่นแล้ว กรุณาโหลดข้อมูลใหม่ก่อนลบอีกครั้ง"},
                     409,
@@ -8773,9 +10501,10 @@ class ReportHandler(BaseHTTPRequestHandler):
                 for original in reversed(changed_originals):
                     original_id = int(original.get("id") or 0)
                     rollback = {key: value for key, value in original.items() if key != "id"}
+                    written = next((item for item in updated_rows if int(item.get('id') or 0) == original_id), {})
                     supabase_request(
                         "PATCH",
-                        f"production_records?id=eq.{original_id}",
+                        f"production_records?id=eq.{original_id}&updated_at=eq.{quote(str(written.get('updated_at') or ''), safe='')}",
                         rollback,
                         prefer="return=minimal",
                     )
@@ -8795,7 +10524,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 uid_filter_field = quote("raw_payload->>client_uid", safe="")
                 update_status, update_result = supabase_request(
                     "PATCH",
-                    f"production_records?id=eq.{record_id}&{uid_filter_field}=eq.{quote(client_uid)}",
+                    f"production_records?id=eq.{record_id}&{uid_filter_field}=eq.{quote(client_uid)}&updated_at=eq.{quote(str(original.get('updated_at') or ''), safe='')}",
                     {
                         "record_date": target_date,
                         "updated_by": actor_name,
@@ -8910,7 +10639,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             expected_updated_at = str(payload.get("expected_updated_at") or "")
             current_updated_at = str(before.get("updated_at") or before.get("created_at") or "")
-            if expected_updated_at and expected_updated_at != current_updated_at:
+            if not expected_updated_at or expected_updated_at != current_updated_at:
                 self.send_json(
                     {"error": "ข้อมูลรายการนี้ถูกแก้ไขจากเครื่องอื่นแล้ว กรุณาโหลดข้อมูลใหม่ก่อนแก้ไขอีกครั้ง"},
                     409,
@@ -8936,8 +10665,13 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
 
             protected_record = {
+                **before,
                 **incoming,
                 "id": record_id,
+                "client_uid": record_client_uid,
+                "batch_uid": before.get('batch_uid'),
+                "desktop_import": before.get('desktop_import'),
+                "import_source": before.get('import_source'),
                 "fruit_type": before.get("fruit_type") or "mangosteen",
                 "created_by": before.get("created_by"),
                 "created_at": before.get("created_at"),
@@ -8948,9 +10682,10 @@ class ReportHandler(BaseHTTPRequestHandler):
             pile_number = production_pile_number(protected_record)
             if (
                 not re.fullmatch(r"\d{4}-\d{2}-\d{2}", record_date)
-                or record_date > datetime.utcnow().date().isoformat()
+                or record_date > datetime.now(timezone(timedelta(hours=7))).date().isoformat()
                 or not str(protected_record.get("emp_code") or "").strip()
-                or pile_number not in [1, 2, 3, 4, 5]
+                or pile_number is None
+                or pile_number < 1
             ):
                 self.send_json({"error": "Invalid production date, employee, or pile."}, 400)
                 return
@@ -8959,7 +10694,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 numeric = safe_float(value)
                 return numeric >= 0 and abs(numeric * 10 - round(numeric * 10)) < 0.000001
 
-            if protected_record["fruit_type"] == "durian":
+            if protected_record["fruit_type"] in SINGLE_WEIGHT_FRUITS:
                 durian_weight = production_total_weight(protected_record)
                 if not valid_edit_weight(durian_weight) or durian_weight <= 0:
                     self.send_json({"error": "Durian weight must be positive with one decimal place."}, 400)
@@ -9016,7 +10751,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             converted.pop("id", None)
             status, updated_rows = supabase_request(
                 "PATCH",
-                f"production_records?id=eq.{record_id}&{uid_filter_field}=eq.{quote(record_client_uid)}",
+                f"production_records?id=eq.{record_id}&{uid_filter_field}=eq.{quote(record_client_uid)}&updated_at=eq.{quote(str(existing_row.get('updated_at') or ''), safe='')}",
                 converted,
                 prefer="return=representation",
             )
@@ -9025,11 +10760,11 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             updated_row = updated_rows[0] if isinstance(updated_rows, list) and updated_rows else None
             if not updated_row:
-                self.send_json({"error": "Production record update returned no row."}, 500)
+                self.send_json({"error": "ข้อมูลถูกแก้ไขจากเครื่องอื่นแล้ว กรุณาโหลดข้อมูลล่าสุด"}, 409)
                 return
             if int(updated_row.get("id") or 0) != record_id or production_record_client_uid(updated_row) != record_client_uid:
                 rollback = {key: value for key, value in existing_row.items() if key != "id"}
-                supabase_request("PATCH", f"production_records?id=eq.{record_id}", rollback, prefer="return=minimal")
+                supabase_request("PATCH", f"production_records?id=eq.{record_id}&updated_at=eq.{quote(str(updated_row.get('updated_at') or ''), safe='')}", rollback, prefer="return=minimal")
                 self.send_json({"error": "การแก้ไขเปลี่ยนตัวตนรายการ ระบบย้อนข้อมูลเดิมกลับแล้ว"}, 409)
                 return
             after = live_state_to_client("production_records", updated_row)
@@ -9042,7 +10777,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 rollback = {key: value for key, value in existing_row.items() if key != "id"}
                 supabase_request(
                     "PATCH",
-                    f"production_records?id=eq.{record_id}",
+                    f"production_records?id=eq.{record_id}&updated_at=eq.{quote(str(updated_row.get('updated_at') or ''), safe='')}",
                     rollback,
                     prefer="return=minimal",
                 )
@@ -9082,7 +10817,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 rollback = {key: value for key, value in existing_row.items() if key != "id"}
                 supabase_request(
                     "PATCH",
-                    f"production_records?id=eq.{record_id}",
+                    f"production_records?id=eq.{record_id}&updated_at=eq.{quote(str(updated_row.get('updated_at') or ''), safe='')}",
                     rollback,
                     prefer="return=minimal",
                 )
@@ -9104,9 +10839,17 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Invalid live-state table or rows."}, 400)
                 return
             converted = [live_state_row(table, row) for row in rows if isinstance(row, dict)]
+            actor = self.authorized_legacy_actor
+            for row in converted:
+                row["created_by"] = actor.get("username")
             with live_state_sync_lock:
-                status, body = sync_rows_by_id(table, converted)
+                status, body = sync_client_audit_rows(rows, actor) if table == "audit_logs" else sync_rows_by_id(table, converted)
             if status < 400:
+                if table == "audit_logs" and account_level_number(actor.get("level")) < 5:
+                    # Low levels may submit their events without downloading
+                    # other users' audit history as a side effect.
+                    self.send_json({"data": rows, "error": None}, status)
+                    return
                 # Never delete rows missing from one browser's local snapshot.
                 # Multiple stations submit concurrently and each may only know
                 # about its own most recent records.
@@ -9235,6 +10978,10 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/auth/login":
+            login_key = (self.client_address[0], str(payload.get('username') or '').strip().casefold()[:200])
+            if not request_security.login_limiter.allow(login_key) or not request_security.login_address_limiter.allow(self.client_address[0]):
+                self.send_json({'error': 'ลองเข้าสู่ระบบบ่อยเกินไป กรุณารอ 5 นาที'}, 429)
+                return
             ensure_system_accounts()
             username = str(payload.get("username", "")).strip()
             password = str(payload.get("password", ""))
@@ -9250,13 +10997,14 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             account = body[0] if isinstance(body, list) and body else None
             if not account:
-                self.send_json({"error": "ไม่พบบัญชีนี้ในฐานข้อมูลกลาง"}, 404)
+                verify_password(password, hash_password('invalid-login'))
+                self.send_json({"error": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"}, 401)
                 return
             if account.get("status") != "Active":
                 self.send_json({"error": "บัญชีนี้ถูกปิดใช้งาน กรุณาติดต่อผู้ดูแลระบบ"}, 403)
                 return
             if not verify_password(password, str(account.get("password_hash", ""))):
-                self.send_json({"error": "รหัสผ่านไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง"}, 401)
+                self.send_json({"error": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"}, 401)
                 return
             supabase_request(
                 "PATCH",
@@ -9268,6 +11016,9 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/accounts/sync":
+            if not account_management_actor(self):
+                self.send_json({"error": "HR C4+ or administrator session is required to sync accounts."}, 403)
+                return
             accounts = payload.get("accounts", [])
             if not isinstance(accounts, list):
                 self.send_json({"error": "accounts must be a list"}, 400)
@@ -9277,7 +11028,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 if not isinstance(account_payload, dict):
                     continue
                 account = account_from_payload(account_payload)
-                if account.get("user_level") == "C7" or account.get("role") == "developer":
+                if account.get("user_level") == "C7" or account.get("role") == "developer" or account["username"].lower() in SYSTEM_ACCOUNT_USERNAMES:
                     continue
                 if account["username"] and account["fullname"] and account.get("password_hash"):
                     cloud_accounts.append(account)
@@ -9294,11 +11045,14 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/accounts":
+            if not account_management_actor(self):
+                self.send_json({"error": "HR C4+ or administrator session is required to create accounts."}, 403)
+                return
             account = account_from_payload(payload)
             if not account["username"] or not account["fullname"] or not account.get("password_hash"):
                 self.send_json({"error": "Username, fullname, and password are required."}, 400)
                 return
-            if account.get("user_level") == "C7" or account.get("role") == "developer":
+            if account.get("user_level") == "C7" or account.get("role") == "developer" or account["username"].lower() in SYSTEM_ACCOUNT_USERNAMES:
                 self.send_json({"error": "C7/developer accounts can only be managed by the system."}, 403)
                 return
             status, body = supabase_account_write(
@@ -9321,6 +11075,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 if not isinstance(employee_payload, dict):
                     continue
                 employee = employee_from_payload(employee_payload)
+                employee["created_by"] = self.authorized_legacy_actor.get("username")
                 required = ["emp_code", "fullname", "department", "pay_group"]
                 if all(employee.get(key) not in [None, ""] for key in required):
                     employees.append(employee)
@@ -9342,6 +11097,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 if not isinstance(employee_payload, dict):
                     continue
                 employee = time_employee_from_payload(employee_payload)
+                employee["created_by"] = self.authorized_legacy_actor.get("username")
                 required = ["emp_code", "fullname", "employee_type", "daily_wage"]
                 if all(employee.get(key) not in [None, ""] for key in required):
                     employees.append(employee)
@@ -9412,12 +11168,49 @@ class ReportHandler(BaseHTTPRequestHandler):
                 "rpc/apply_deduction_batch",
                 {
                     "p_applied_date": applied_date,
-                    "p_created_by": str(payload.get("created_by", "")).strip(),
+                    "p_created_by": str(self.authorized_legacy_actor.get("username") or "").strip(),
                     "p_items": clean_items,
                 },
                 prefer="return=representation",
             )
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/wage-rates/sync":
+            rows = payload.get("rows", [])
+            if not isinstance(rows, list):
+                self.send_json({"error": "rows must be a list"}, 400)
+                return
+            rates = []
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                row = {
+                    "item_type": str(item.get("item_type", "")).strip(),
+                    "rate": item.get("rate", 0),
+                    "effective_date": item.get("effective_date"),
+                    "note": item.get("note") or None,
+                    "created_by": self.authorized_legacy_actor.get("username"),
+                }
+                if item.get("id") not in [None, ""]:
+                    row["id"] = item.get("id")
+                if row["item_type"] and row["effective_date"]:
+                    rates.append(row)
+            status, body = sync_rows_by_id("wage_rates", rates)
+            self.send_json({"data": body.get("synced", []) if status < 400 else None, "error": body if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/deductions/sync":
+            rows = payload.get("rows", [])
+            if not isinstance(rows, list):
+                self.send_json({"error": "rows must be a list"}, 400)
+                return
+            deductions = [deduction_from_payload(item) for item in rows if isinstance(item, dict)]
+            for deduction in deductions:
+                deduction["created_by"] = self.authorized_legacy_actor.get("username")
+                deduction["updated_by"] = self.authorized_legacy_actor.get("username")
+            status, body = sync_rows_by_id("deduction_records", deductions)
+            self.send_json({"data": body.get("synced", []) if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
         if parsed.path == "/api/wage-rates":
@@ -9430,16 +11223,15 @@ class ReportHandler(BaseHTTPRequestHandler):
                 "rate": payload.get("rate", 0),
                 "effective_date": str(payload.get("effective_date", "")).strip(),
                 "note": str(payload.get("note", "")).strip() or None,
-                "created_by": str(payload.get("created_by", "")).strip() or None,
+                "created_by": str(actor.get("username") or "").strip() or None,
             }
             if not wage_rate["item_type"] or not wage_rate["effective_date"]:
                 self.send_json({"error": "item_type and effective_date are required."}, 400)
                 return
-            status, body = supabase_request(
-                "POST",
+            status, body = insert_identity_row_compatible(
                 "wage_rates",
                 wage_rate,
-                prefer="return=representation",
+                "wage_rates_pkey",
             )
             self.send_json({"data": body if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
@@ -9451,7 +11243,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             payload["printed_by"] = payload.get("printed_by") or actor.get("fullname") or actor.get("username")
             start_date, end_date = normalized_range(payload)
-            method = "transfer" if payload.get("payment_method") == "transfer" else "cash"
+            method = str(payload.get("payment_method") or "cash")
             if parsed.path.endswith("-excel"):
                 content = build_accounting_payments_excel(payload)
                 content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -9464,9 +11256,9 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in {"/reports/inbound-selected-excel", "/reports/inbound-selected-pdf"}:
-            actor = inbound_authorized_actor(self)
+            actor = inbound_authorized_actor(self, write=False)
             if not actor:
-                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
+                self.send_json({"error": "C3 or higher is required to view stock."}, 403)
                 return
             try:
                 receipt_ids = list(dict.fromkeys(int(value) for value in payload.get("receipt_ids", []) if int(value) > 0))
@@ -9484,7 +11276,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             if len(rows) != len(receipt_ids):
                 self.send_json({"error": "Some selected inbound receipts no longer exist."}, 409)
                 return
-            export_payload = {"rows": rows, "printed_by": actor.get("username") or "-"}
+            export_payload = {"rows": rows, "printed_by": actor.get("username") or "-", "quantities_only": True}
             timestamp = datetime.now(timezone(timedelta(hours=7))).strftime("%Y%m%d-%H%M")
             if parsed.path.endswith("-excel"):
                 self.send_file(build_inbound_selected_excel(export_payload), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"Inbound_Selected_{timestamp}.xlsx")
@@ -9509,6 +11301,8 @@ class ReportHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/reports/employee-range-pdf":
             data = {
+                "fruit_labels": payload.get("fruit_labels", {}),
+                "fruit_fields": payload.get("fruit_fields", {}),
                 "employees": payload.get("employees", []),
                 "production_records": payload.get("production_records", []),
                 "deduction_records": payload.get("deduction_records", []),
@@ -9529,6 +11323,8 @@ class ReportHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/reports/employee-range-excel":
             data = {
+                "fruit_labels": payload.get("fruit_labels", {}),
+                "fruit_fields": payload.get("fruit_fields", {}),
                 "employees": payload.get("employees", []),
                 "production_records": payload.get("production_records", []),
                 "deduction_records": payload.get("deduction_records", []),
@@ -9635,6 +11431,16 @@ class ReportHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/reports/group-report-raw-excel":
+            start_date, end_date = normalized_range(payload)
+            content = build_group_report_raw_excel(payload)
+            self.send_file(
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                f"Group_Raw_Data_{clean_filename_date(start_date)}_to_{clean_filename_date(end_date)}.xlsx",
+            )
+            return
+
         if parsed.path == "/reports/time-group-report-pdf":
             start_date, end_date = normalized_range(payload)
             content = build_time_group_report_pdf(payload)
@@ -9678,8 +11484,26 @@ class ReportHandler(BaseHTTPRequestHandler):
         self.send_error(404, "Not found")
 
     def do_PUT(self) -> None:
+        try:
+            ReportHandler._put_request(self)
+        except request_security.RequestError as error:
+            self.close_connection = True
+            self.send_json({"error": str(error)}, error.status)
+
+    def _put_request(self) -> None:
         parsed = urlparse(self.path)
         payload = self.read_json()
+        if not authorize_legacy_request(self, "PUT", parsed.path, payload):
+            return
+
+        if parsed.path == "/api/accounting/stock-sale-price":
+            actor = accounting_actor(self, 4)
+            if not actor:
+                self.send_json({"error": "C4 or higher accounting session is required."}, 403)
+                return
+            status, body = save_stock_sale_price(payload, actor)
+            self.send_json({"data": body} if status < 400 else {"error": body}, status)
+            return
 
         if parsed.path == "/api/accounting/payment-allocations":
             actor = accounting_actor(self, 4)
@@ -9804,6 +11628,8 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "id is required."}, 400)
                 return
             employee = employee_from_payload(payload)
+            employee.pop("created_by", None)
+            employee["updated_by"] = self.authorized_legacy_actor.get("username")
             employee["updated_at"] = datetime.utcnow().isoformat() + "Z"
             status, body = supabase_request(
                 "PATCH",
@@ -9815,6 +11641,9 @@ class ReportHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/accounts":
+            if not account_management_actor(self):
+                self.send_json({"error": "HR C4+ or administrator session is required to edit accounts."}, 403)
+                return
             account_id = payload.get("id")
             if account_id in [None, ""]:
                 self.send_json({"error": "id is required."}, 400)
@@ -9833,6 +11662,10 @@ class ReportHandler(BaseHTTPRequestHandler):
             existing_username = str(existing.get("username", "")).lower()
             existing_level = str(existing.get("user_level", "")).upper()
             existing_role = str(existing.get("role", ""))
+            manager = account_management_actor(self)
+            if not manager or account_level_number(existing_level) > account_level_number(manager.get('level')):
+                self.send_json({'error': 'ไม่สามารถแก้ไขบัญชีที่มีสิทธิ์สูงกว่าได้'}, 403)
+                return
             if existing_username in SYSTEM_ACCOUNT_USERNAMES or existing_level == "C7" or existing_role == "developer":
                 self.send_json({"error": "C7/developer account cannot be edited."}, 403)
                 return
@@ -9840,7 +11673,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             if not str(account_payload.get("phone", "")).strip() and str(existing.get("phone", "")).strip():
                 account_payload["phone"] = existing.get("phone")
             account = account_from_payload(account_payload, include_password=bool(str(payload.get("password", ""))))
-            if account.get("user_level") == "C7" or account.get("role") == "developer":
+            if account.get("user_level") == "C7" or account.get("role") == "developer" or account["username"].lower() in SYSTEM_ACCOUNT_USERNAMES:
                 self.send_json({"error": "C7/developer accounts can only be managed by the system."}, 403)
                 return
             if not account["username"] or not account["fullname"]:
@@ -9863,6 +11696,8 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "id is required."}, 400)
                 return
             employee = time_employee_from_payload(payload)
+            employee.pop("created_by", None)
+            employee["updated_by"] = self.authorized_legacy_actor.get("username")
             employee["updated_at"] = datetime.utcnow().isoformat() + "Z"
             status, body = supabase_request(
                 "PATCH",
@@ -9908,6 +11743,8 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "A deduction with payment history cannot change its original details."}, 409)
                 return
             deduction = deduction_from_payload(payload)
+            deduction.pop("created_by", None)
+            deduction["updated_by"] = self.authorized_legacy_actor.get("username")
             if applied_total > 0 and deduction.get("status") not in ["Cancelled"]:
                 deduction["status"] = "Completed" if requested_amount <= applied_total + 0.00001 else "Pending"
             deduction["updated_at"] = datetime.utcnow().isoformat() + "Z"
@@ -10031,10 +11868,22 @@ class ReportHandler(BaseHTTPRequestHandler):
         self.send_error(404, "Not found")
 
     def do_DELETE(self) -> None:
+        try:
+            ReportHandler._delete_request(self)
+        except request_security.RequestError as error:
+            self.close_connection = True
+            self.send_json({"error": str(error)}, error.status)
+
+    def _delete_request(self) -> None:
         parsed = urlparse(self.path)
         payload = self.read_json()
+        if not authorize_legacy_request(self, "DELETE", parsed.path, payload):
+            return
 
         if parsed.path == "/api/accounts":
+            if not account_management_actor(self, delete=True):
+                self.send_json({"error": "An administrator session is required to delete accounts."}, 403)
+                return
             account_id = payload.get("id")
             username = str(payload.get("username", "")).strip()
             protected_username = username.lower()
@@ -10066,6 +11915,10 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             if protected_username in SYSTEM_ACCOUNT_USERNAMES or protected_level == "C7":
                 self.send_json({"error": "C7/developer account cannot be deleted."}, 403)
+                return
+            manager = account_management_actor(self)
+            if not manager or account_level_number(protected_level) > account_level_number(manager.get('level')):
+                self.send_json({'error': 'ไม่สามารถลบบัญชีที่มีสิทธิ์สูงกว่าได้'}, 403)
                 return
             status, body = supabase_request("DELETE", filter_path, prefer="return=minimal")
             self.send_json({"data": {"deleted": True} if status < 400 else None, "error": body if status >= 400 else None}, status)
@@ -10181,11 +12034,119 @@ class ReportHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+        if not authorize_legacy_request(self, "GET", parsed.path):
+            return
+        if parsed.path in {'/api/time-records/snapshot', '/api/time-records/delta'} and account_level_number(self.authorized_legacy_actor.get('level')) < 3:
+            self.send_json({'data': [] if parsed.path.endswith('/snapshot') else {'records': [], 'deleted_ids': [], 'cursor': ''}})
+            return
+
+        if parsed.path == "/api/time-records/changes":
+            if not secret_room_actor(self):
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            previous = query.get("revision", [""])[0]
+            with time_change_condition:
+                time_change_condition.wait_for(lambda: previous != time_change_revision, timeout=20)
+                revision = time_change_revision
+            self.send_json({"data": {"revision": revision}})
+            return
+
+        if parsed.path == "/api/fruit-piles":
+            if not accounting_actor(self, 1):
+                self.send_json({"error": "Session required."}, 403)
+                return
+            status, body = read_shared_fruit_piles()
+            self.send_json({"data": body} if status < 400 else {"error": body}, status)
+            return
+
+        if parsed.path == "/api/accounting/stock-costs":
+            if not accounting_actor(self, 6):
+                self.send_json({"error": "C6 or C7 required."}, 403)
+                return
+            self.send_json({"data": accounting_stock_costs()})
+            return
+
+        if parsed.path == "/api/accounting/stock-summary":
+            if not accounting_actor(self, 4):
+                self.send_json({"error": "C4 or higher accounting session is required."}, 403)
+                return
+            status, body = accounting_stock_summary()
+            self.send_json({"data": body} if status < 400 else {"error": body}, status)
+            return
+
+        if parsed.path == "/api/stock/bootstrap":
+            actor = inbound_authorized_actor(self, write=False)
+            if not actor:
+                self.send_json({"error": "C3 ขึ้นไปจึงจะดูสต็อกได้"}, 403)
+                return
+            try:
+                category = stock_category(query.get("category", [""])[0])
+            except ValueError as error:
+                self.send_json({"error": str(error)}, 400)
+                return
+            # One SQL statement snapshot keeps balances and movement history consistent.
+            status, body = supabase_request("POST", "rpc/stock_inventory_snapshot", {"p_category": category})
+            if status >= 400:
+                error_status, error_body = stock_api_error(status, body)
+                self.send_json(error_body, error_status)
+                return
+            if not isinstance(body, dict) or not isinstance(body.get("items"), list) or not isinstance(body.get("movements"), list):
+                self.send_json({"error": "รูปแบบข้อมูลสต็อกไม่ถูกต้อง กรุณาลองโหลดใหม่"}, 502)
+                return
+            self.send_json({"data": stock_operational_data(body, actor)})
+            return
+
+        if parsed.path == "/api/cold-sales/snapshot":
+            actor = secret_room_actor(self)
+            if not actor or actor.get("level") not in {"C4", "C5", "C6", "C7"}:
+                self.send_json({"error": "ต้องใช้สิทธิ์ C4–C7"}, 403)
+                return
+            status, body = supabase_request("POST", "rpc/cold_sale_snapshot", {})
+            if status >= 400:
+                response_status, response = cold_sale_error(status, body)
+                self.send_json(response, response_status)
+                return
+            if not isinstance(body, dict) or body.get("schema_version") != 1 or not all(isinstance(body.get(k), list) for k in ("pallets", "orders")):
+                self.send_json({"error": "ข้อมูลออเดอร์ไม่ครบ กรุณาโหลดใหม่"}, 502)
+                return
+            self.send_json({"data": body})
+            return
+
+        if parsed.path == "/api/cold-stock/snapshot":
+            if not inbound_authorized_actor(self, write=False):
+                self.send_json({"error": "C4 or higher is required for cold stock."}, 403)
+                return
+            status, body = supabase_request("POST", "rpc/cold_stock_snapshot", {})
+            if status >= 400:
+                response_status, response = cold_stock_error(status, body)
+                self.send_json(response, response_status)
+                return
+            if not isinstance(body, dict) or body.get("schema_version") != 1 or not all(isinstance(body.get(k), list) for k in ("locations", "pallets", "movements")):
+                self.send_json({"error": "ข้อมูลห้องเย็นไม่ครบ กรุณาโหลดใหม่"}, 502)
+                return
+            self.send_json({"data": body})
+            return
+
+        if parsed.path == "/api/inbound/inventory":
+            actor = inbound_authorized_actor(self, write=False)
+            if not actor:
+                self.send_json({"error": "C4 or higher is required for fruit stock."}, 403)
+                return
+            status, body = supabase_request("POST", "rpc/fruit_stock_snapshot", {})
+            if status >= 400:
+                response_status, response = fruit_issue_error(status, body)
+                self.send_json(response, response_status)
+                return
+            if not isinstance(body, dict) or not isinstance(body.get("balances"), list) or not isinstance(body.get("issues"), list):
+                self.send_json({"error": "รูปแบบข้อมูลคงเหลือผลไม้ไม่ถูกต้อง"}, 502)
+                return
+            self.send_json({"data": stock_operational_data(body, actor)})
+            return
 
         if parsed.path == "/api/inbound/bootstrap":
-            actor = inbound_authorized_actor(self)
+            actor = inbound_authorized_actor(self, write=False)
             if not actor:
-                self.send_json({"error": "C5 or higher is required for inbound receiving."}, 403)
+                self.send_json({"error": "C3 or higher is required to view stock."}, 403)
                 return
             results = {}
             for key, request_path in {
@@ -10198,7 +12159,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": body, "migration": "supabase_inbound_receiving_migration.sql"}, status)
                     return
                 results[key] = body if isinstance(body, list) else []
-            self.send_json({"data": results})
+            self.send_json({"data": stock_operational_data(results, actor)})
             return
 
         if parsed.path == "/api/online-users":
@@ -10222,7 +12183,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 return
             actor_username = str(actor.get("username") or "").strip()
             filters = ["select=*"]
-            if account_level_number(actor.get("level")) < 5:
+            if account_level_number(actor.get("level")) < 3:
                 filters.append(f"reporter_username=eq.{quote(actor_username)}")
             requested_status = query.get("status", [""])[0].strip()
             if requested_status in ISSUE_REPORT_STATUSES:
@@ -10512,6 +12473,9 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": body}, status)
                 return
             row = body[0] if isinstance(body, list) and body else None
+            if isinstance(row, dict) and not production_rows_visible_to_actor([row], actor):
+                self.send_json({'error': 'ไม่มีสิทธิ์อ่านคิวนี้'}, 403)
+                return
             self.send_json({"data": production_queue_to_client(row, include_payload=True) if isinstance(row, dict) else None})
             return
 
@@ -10583,7 +12547,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 limit = 80
             fields = (
-                "id,queue_uid,batch_uid,record_count,fruit_type,record_date,employee_id,emp_code,"
+                "id,queue_uid,batch_uid,payload,record_count,fruit_type,record_date,employee_id,emp_code,"
                 "employee_name,total_weight,total_amount,status,attempt_count,max_attempts,started_at,"
                 "finished_at,result_record_ids,duplicate_details,error_code,error_message,"
                 "created_by,cancelled_by,cancelled_at,created_at,updated_at"
@@ -10596,7 +12560,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             if status >= 400:
                 self.send_json({"error": body, "migration": "supabase_production_save_queue_migration.sql"}, status)
                 return
-            items = [production_queue_to_client(row) for row in body if isinstance(row, dict)] if isinstance(body, list) else []
+            items = [production_queue_to_client(row) for row in production_rows_visible_to_actor(body, actor) if isinstance(row, dict)] if isinstance(body, list) else []
             self.send_json({"data": items})
             return
 
@@ -10618,6 +12582,9 @@ class ReportHandler(BaseHTTPRequestHandler):
             if not isinstance(body, list) or not body:
                 self.send_json({"error": "Queue item was not found."}, 404)
                 return
+            if not production_rows_visible_to_actor(body, actor):
+                self.send_json({'error': 'ไม่มีสิทธิ์อ่านคิวนี้'}, 403)
+                return
             event_status, events = supabase_request(
                 "GET",
                 f"production_save_queue_events?queue_id=eq.{queue_id}&select=id,event_type,status,message,actor,metadata,created_at&order=created_at.asc,id.asc",
@@ -10629,14 +12596,94 @@ class ReportHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/api/production-records/snapshot":
+            status, rows = supabase_get_all("production_records?select=*&order=id.asc")
+            if status >= 400:
+                self.send_json({"error": rows}, status)
+                return
+            self.send_json({
+                "data": [live_state_to_client("production_records", row) for row in production_rows_visible_to_actor(rows, self.authorized_legacy_actor)],
+                "cursor": production_sync_cursor(rows),
+            })
+            return
+
+        if parsed.path == "/api/production-records/delta":
+            cursor = str(query.get("cursor", [""])[0] or "").strip()
+            status, delta = production_delta_payload(cursor)
+            if status < 400:
+                delta = {**delta, 'records': production_rows_visible_to_actor(delta.get('records', []), self.authorized_legacy_actor)}
+            self.send_json({"data": delta if status < 400 else None, "error": delta if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/time-records/snapshot":
+            status, rows = supabase_get_all("time_records?select=*&order=id.asc")
+            if status >= 400:
+                self.send_json({"error": rows}, status)
+                return
+            self.send_json({
+                "data": [live_state_to_client("time_records", row) for row in rows],
+                "cursor": production_sync_cursor(rows),
+            })
+            return
+
+        if parsed.path == "/api/time-records/delta":
+            cursor = str(query.get("cursor", [""])[0] or "").strip()
+            status, delta = time_delta_payload(cursor)
+            self.send_json({"data": delta if status < 400 else None, "error": delta if status >= 400 else None}, status)
+            return
+
+        if parsed.path == "/api/audit-logs/snapshot":
+            status, rows = supabase_get_all("audit_logs?select=*&order=id.desc&limit=250")
+            if status >= 400:
+                self.send_json({"error": rows}, status)
+                return
+            rows.reverse()
+            self.send_json({
+                "data": [live_state_to_client("audit_logs", row) for row in rows],
+                "cursor": max([int(row.get("id") or 0) for row in rows], default=0),
+            })
+            return
+
+        if parsed.path == "/api/audit-logs/delta":
+            try:
+                cursor = max(0, int(query.get("cursor", ["0"])[0] or 0))
+            except (TypeError, ValueError):
+                cursor = 0
+            status, rows = supabase_get_all(f"audit_logs?select=*&id=gt.{cursor}&order=id.asc")
+            if status >= 400:
+                self.send_json({"error": rows}, status)
+                return
+            self.send_json({
+                "data": {
+                    "records": [live_state_to_client("audit_logs", row) for row in rows],
+                    "cursor": max([cursor, *[int(row.get("id") or 0) for row in rows]]),
+                }
+            })
+            return
+
         if parsed.path == "/api/state":
             state = {}
+            excluded = {item.strip() for item in str(query.get("exclude", [""])[0]).split(",") if item.strip()}
             for table in LIVE_STATE_TABLES:
-                status, body = supabase_get_all(f"{table}?select=*&order=id.asc")
+                if table in excluded:
+                    continue
+                if account_level_number(self.authorized_legacy_actor.get('level')) < 3 and table in {'time_records', 'deduction_records', 'deduction_applications'}:
+                    state[table] = []
+                    continue
+                if table == "audit_logs" and account_level_number(self.authorized_legacy_actor.get("level")) < 5:
+                    continue
+                endpoint = f"{table}?select=*&order=id.asc"
+                if table == "audit_logs":
+                    endpoint = "audit_logs?select=*&order=id.desc&limit=250"
+                status, body = supabase_get_all(endpoint)
                 if status >= 400:
                     self.send_json({"error": body, "table": table}, status)
                     return
+                if table == "audit_logs":
+                    body.reverse()
                 state[table] = [live_state_to_client(table, row) for row in body]
+                if table == 'production_records':
+                    state[table] = production_rows_visible_to_actor(state[table], self.authorized_legacy_actor)
             self.send_json({"data": state})
             return
 
@@ -10656,40 +12703,6 @@ class ReportHandler(BaseHTTPRequestHandler):
                 )
             status, body = supabase_get_all(f"employees?{params}")
             self.send_json({"data": body if status < 400 else [], "error": body if status >= 400 else None}, status)
-            return
-
-        if parsed.path == "/api/wage-rates/sync":
-            rows = payload.get("rows", [])
-            if not isinstance(rows, list):
-                self.send_json({"error": "rows must be a list"}, 400)
-                return
-            rates = []
-            for item in rows:
-                if not isinstance(item, dict):
-                    continue
-                row = {
-                    "item_type": str(item.get("item_type", "")).strip(),
-                    "rate": item.get("rate", 0),
-                    "effective_date": item.get("effective_date"),
-                    "note": item.get("note") or None,
-                    "created_by": item.get("created_by") or None,
-                }
-                if item.get("id") not in [None, ""]:
-                    row["id"] = item.get("id")
-                if row["item_type"] and row["effective_date"]:
-                    rates.append(row)
-            status, body = sync_rows_by_id("wage_rates", rates)
-            self.send_json({"data": body.get("synced", []) if status < 400 else None, "error": body if status >= 400 else None}, status)
-            return
-
-        if parsed.path == "/api/deductions/sync":
-            rows = payload.get("rows", [])
-            if not isinstance(rows, list):
-                self.send_json({"error": "rows must be a list"}, 400)
-                return
-            deductions = [deduction_from_payload(item) for item in rows if isinstance(item, dict)]
-            status, body = sync_rows_by_id("deduction_records", deductions)
-            self.send_json({"data": body.get("synced", []) if status < 400 else None, "error": body if status >= 400 else None}, status)
             return
 
         if parsed.path == "/api/time-employees":
@@ -10773,6 +12786,23 @@ class ReportHandler(BaseHTTPRequestHandler):
             self.send_json({"authorized": True})
             return
 
+        if parsed.path == "/api/backup/migrate":
+            if not secret_room_actor(self):
+                self.send_json({"error": "A signed-in session is required."}, 401)
+                return
+            if not database_migration_authorized(self):
+                self.send_json({"error": "Migration code is required."}, 403)
+                return
+            status, body = read_supabase_backup(DATABASE_MIGRATION_TABLES)
+            actor = secret_room_actor(self) or {}
+            response = backup_snapshot_payload(
+                "migration",
+                str(actor.get("username") or "migration-user"),
+                body,
+            ) if status < 400 else {"data": None, "error": body}
+            self.send_json(response, status)
+            return
+
         if parsed.path in {"/api/backup", "/api/backup/queue"}:
             if not backup_authorized(self):
                 self.send_json({"error": "Backup code is required."}, 403)
@@ -10813,15 +12843,13 @@ class ReportHandler(BaseHTTPRequestHandler):
         self.send_error(404, "Not found")
 
     def read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0"))
-        if not length:
-            return {}
-        return json.loads(self.rfile.read(length).decode("utf-8"))
+        return request_security.read_object(self)
 
     def send_json(self, payload: dict, status: int = 200) -> None:
         content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
@@ -10835,11 +12863,17 @@ class ReportHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def send_static_file(self, request_path: str) -> bool:
-        safe_path = request_path.split("?", 1)[0].lstrip("/")
+        safe_path = unquote(request_path.split("?", 1)[0]).lstrip("/")
         if not safe_path:
             safe_path = "index.html"
         file_path = (BASE_DIR / safe_path).resolve()
-        if not str(file_path).startswith(str(BASE_DIR.resolve())):
+        if not file_path.is_relative_to(BASE_DIR.resolve()):
+            return False
+        parts = Path(safe_path).parts
+        allowed_suffixes = {".html", ".css", ".js", ".png", ".webp", ".jpg", ".jpeg", ".svg", ".ico", ".woff", ".woff2", ".ttf"}
+        if any(part.startswith('.') or part in {'tests', 'tools', 'docs', 'desktop-app', 'driver-recovery', 'scanner-setup', 'internship-story', 'node_modules'} for part in parts):
+            return False
+        if file_path.suffix.lower() not in allowed_suffixes or (len(parts) > 1 and parts[0] not in {'assets', 'fonts', 'js', 'css'}):
             return False
         if not file_path.is_file():
             return False

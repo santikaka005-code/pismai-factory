@@ -96,6 +96,10 @@ begin
   return journal_row;
 end $$;
 
+-- Actor identity and level are supplied only by the trusted web server.
+revoke execute on function public.ac_create_journal(text,date,text,text,text,text,jsonb,text,boolean) from public, anon, authenticated;
+revoke execute on function public.ac_approve_journal(uuid,text,text) from public, anon, authenticated;
+revoke execute on function public.ac_reject_journal(uuid,text,text,text) from public, anon, authenticated;
 grant execute on function public.ac_create_journal(text,date,text,text,text,text,jsonb,text,boolean) to service_role;
 grant execute on function public.ac_approve_journal(uuid,text,text) to service_role;
 grant execute on function public.ac_reject_journal(uuid,text,text,text) to service_role;

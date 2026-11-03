@@ -116,7 +116,7 @@ const SecretRoom = (() => {
   }
 
   async function refreshNotifications({ notify = true } = {}) {
-    if (!getSession()?.user) return;
+    if (!canOpen(getSession()?.user, "secret-room")) return stopNotifications();
     try {
       const response = await api(`/notifications?after_post_id=${state.lastReadPostId}`);
       publishUnreadCount(response?.data?.unread_count, {
@@ -135,6 +135,7 @@ const SecretRoom = (() => {
   }
 
   function startNotifications() {
+    if (!canOpen(getSession()?.user, "secret-room")) return stopNotifications();
     const username = String(getSession()?.user?.username || "").toLowerCase();
     if (!username) return stopNotifications();
     if (state.notificationUsername !== username) {

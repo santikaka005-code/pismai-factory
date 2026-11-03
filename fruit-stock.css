@@ -1,0 +1,16 @@
+.sl-fruit{--sl-accent:#16836b;--sl-dark:#155e50;--sl-tint:#eef9f4;--sl-line:#c4e5d8}
+.sl-fruit .panel{border:1px solid #dde7e9;border-radius:13px;box-shadow:none;padding:22px;background:#fff}
+.sl-fruit .inbound-entry-form{gap:17px}
+.sl-fruit .inbound-entry-form .field,.sl-fruit .inbound-master-panel .field,.sl-fruit .inbound-price-panel .field{font-size:12px;color:#47616a}
+.sl-fruit textarea{font:inherit;border:1px solid #d5e0e2;border-radius:8px;padding:10px 11px;width:100%;resize:vertical;box-sizing:border-box}
+.sl-fruit .inbound-price-hint,.sl-fruit .inbound-lock-note,.sl-fruit .inbound-info-strip{background:var(--sl-tint);color:var(--sl-dark);border-color:var(--sl-line)}
+.sl-fruit .inbound-total{background:var(--sl-tint);color:var(--sl-dark);border:1px solid var(--sl-line);border-radius:9px}
+.sl-fruit .btn-primary{background:var(--sl-accent);border-color:var(--sl-accent);color:#fff}
+.sl-fruit .btn-outline{border:1px solid #d6e1e3;background:#fff;color:#45636b}
+.sl-fruit .inbound-table input[type=checkbox]{width:18px;height:18px;padding:0;accent-color:var(--sl-accent)}
+.sl-fruit .inbound-confirm input{width:auto}
+.sl-fruit .inbound-metrics{margin-bottom:18px}
+.sl-fruit .inbound-metrics strong{color:var(--sl-dark)}
+.sl-fruit .inbound-management-grid{align-items:start}
+.sl-fruit .inbound-entry-actions,.sl-fruit .inbound-confirm-actions{flex-wrap:wrap}
+@media(max-width:650px){.sl-fruit .panel{padding:16px}.sl-fruit .inbound-entry-actions .btn{flex:1}.sl-fruit .sl-metrics article>strong{font-size:20px}.sl-fruit .inbound-management-grid{grid-template-columns:minmax(0,1fr)}}

@@ -64,6 +64,18 @@ create table if not exists public.time_save_queue_events (
 create index if not exists idx_time_save_queue_events_queue
   on public.time_save_queue_events(queue_id, created_at asc, id asc);
 
+-- Restores can insert explicit IDs without advancing identity sequences.
+select setval(
+  pg_get_serial_sequence('public.time_save_queue', 'id'),
+  greatest(coalesce((select max(id) from public.time_save_queue), 0) + 1, 1),
+  false
+);
+select setval(
+  pg_get_serial_sequence('public.time_save_queue_events', 'id'),
+  greatest(coalesce((select max(id) from public.time_save_queue_events), 0) + 1, 1),
+  false
+);
+
 create or replace function public.set_time_save_queue_updated_at()
 returns trigger language plpgsql as $$
 begin
