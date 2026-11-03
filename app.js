@@ -1,23 +1,23 @@
-const SESSION_KEY = "pismai_factory_session";
-const EMPLOYEES_KEY = "pismai_factory_employees";
-const TIME_EMPLOYEES_KEY = "pismai_factory_time_employees";
-const WAGE_RATES_KEY = "pismai_factory_wage_rates";
-const PRODUCTION_RECORDS_KEY = "pismai_factory_production_records";
-const PRODUCTION_INDEXED_DB_NAME = "pismai_factory_production_v1";
+const SESSION_KEY = "apws_contest_session";
+const EMPLOYEES_KEY = "apws_contest_employees";
+const TIME_EMPLOYEES_KEY = "apws_contest_time_employees";
+const WAGE_RATES_KEY = "apws_contest_wage_rates";
+const PRODUCTION_RECORDS_KEY = "apws_contest_production_records";
+const PRODUCTION_INDEXED_DB_NAME = "apws_contest_production_v1";
 const PRODUCTION_INDEXED_DB_VERSION = 1;
 const PRODUCTION_CACHE_REVISION = "recovery-sync-2026-09-18";
-const PRODUCTION_SESSIONS_KEY = "pismai_factory_production_sessions";
-const TIME_RECORDS_KEY = "pismai_factory_time_records";
-const TIME_SYNC_CURSOR_KEY = "pismai_factory_time_sync_cursor";
-const DEDUCTION_RECORDS_KEY = "pismai_factory_deduction_records";
-const AUDIT_LOG_KEY = "pismai_factory_audit_log";
-const AUDIT_SYNC_CURSOR_KEY = "pismai_factory_audit_sync_cursor";
-const CLOUD_MIGRATION_KEY = "pismai_factory_cloud_migration_v2";
-const ACCOUNT_USERS_KEY = "pismai_factory_account_users";
-const WITHHOLDING_TAX_GROUPS_KEY = "pismai_factory_withholding_tax_groups";
-const FRUIT_PILES_KEY = "pismai_factory_fruit_piles";
+const PRODUCTION_SESSIONS_KEY = "apws_contest_production_sessions";
+const TIME_RECORDS_KEY = "apws_contest_time_records";
+const TIME_SYNC_CURSOR_KEY = "apws_contest_time_sync_cursor";
+const DEDUCTION_RECORDS_KEY = "apws_contest_deduction_records";
+const AUDIT_LOG_KEY = "apws_contest_audit_log";
+const AUDIT_SYNC_CURSOR_KEY = "apws_contest_audit_sync_cursor";
+const CLOUD_MIGRATION_KEY = "apws_contest_cloud_migration_v2";
+const ACCOUNT_USERS_KEY = "apws_contest_account_users";
+const WITHHOLDING_TAX_GROUPS_KEY = "apws_contest_withholding_tax_groups";
+const FRUIT_PILES_KEY = "apws_contest_fruit_piles";
 const AUDIT_LOG_PASSWORD = "1150";
-const ONLINE_CLIENT_KEY = "pismai_online_client_id";
+const ONLINE_CLIENT_KEY = "apws_contest_online_client_id";
 const ONLINE_HEARTBEAT_INTERVAL_MS = 60000;
 const HOME_STORAGE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const LIVE_STATE_REFRESH_INTERVAL_MS = 60 * 1000;
@@ -34,7 +34,7 @@ const REPORT_API_BASE =
   // The desktop launcher opens index.html directly. It must use the same
   // cloud API as the hosted app, otherwise its browser-only data can never
   // reach iPad or other devices.
-  location.protocol === "file:" ? "https://pf-systempro-factory.onrender.com" : location.origin;
+  location.protocol === "file:" ? "http://127.0.0.1:8787" : location.origin;
 let onlineUserCount = 0;
 let onlineHeartbeatTimer = null;
 const TIME_DAILY_WAGE = 347;
@@ -483,7 +483,7 @@ modules.splice(
   },
   {
     id: "pf-desktop-app",
-    label: "PF DesktopApp",
+    label: "APWS Desktop",
     roles: ["admin"],
     description: "รับข้อมูลชั่งจาก Desktop app และส่งข้อมูลหลักกลับไปใช้งาน",
     hidden: true
@@ -1228,8 +1228,8 @@ function saveFruitPiles(piles) {
 
 let fruitPileRefreshAt = 0;
 let fruitPileSyncBusy = false;
-const FRUIT_PILES_MIGRATED_KEY = "pismai_fruit_piles_shared_v1";
-const FRUIT_PILES_LEGACY_KEY = "pismai_fruit_piles_before_shared_v1";
+const FRUIT_PILES_MIGRATED_KEY = "apws_contest_fruit_piles_shared_v1";
+const FRUIT_PILES_LEGACY_KEY = "apws_contest_fruit_piles_before_shared_v1";
 
 function applySharedFruitPiles(data) {
   if (!Array.isArray(data?.piles)) return;
@@ -6159,8 +6159,8 @@ function renderLogin(errorMessage = "") {
     <main class="fresh-login">
       <header class="fresh-login-header">
         <div class="fresh-login-brand">
-          <img src="assets/pitsamai-logo.png" alt="พิสมัยผลไม้แช่แข็ง" width="64" height="64" />
-          <div><strong>SystemPro</strong><small>PITSAMAI FROZEN FRUITS</small></div>
+          
+          <div><strong>APWS Web</strong><small>AUTOMATIC PRODUCTION WEIGHING SYSTEM</small></div>
         </div>
       </header>
       <div class="fresh-login-main">
@@ -6189,7 +6189,7 @@ function renderLogin(errorMessage = "") {
           <p class="fresh-login-feedback" id="loginHelpMessage" role="status" hidden>กรุณาติดต่อผู้ดูแลบัญชีของโรงงาน พร้อมแจ้งชื่อผู้ใช้งาน เพื่อขอตั้งรหัสผ่านใหม่</p>
         </form>
       </div>
-      <footer class="fresh-login-footer">© 2026 Pitsamai Frozen Fruits Co., Ltd.</footer>
+      <footer class="fresh-login-footer">© 2026 โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ</footer>
     </main>
   `;
   document.querySelector("#loginForm")?.addEventListener("submit", handleLogin);
@@ -6220,7 +6220,7 @@ async function handleLogin(event) {
   try {
     const cloudUser = await loginWithCloud(username, password);
     saveSession(cloudUser, rememberSession);
-    sessionStorage.setItem("pismai_welcome_user", cloudUser.username);
+    sessionStorage.setItem("apws_contest_welcome_user", cloudUser.username);
     hydrateAccountsFromCloud().catch(() => {});
     const nextRoute = getDefaultRouteForUser(cloudUser);
     if (location.hash === `#/${nextRoute}`) {
@@ -6269,7 +6269,7 @@ async function handleLogin(event) {
   }
 
   saveSession(user, rememberSession);
-  sessionStorage.setItem("pismai_welcome_user", user.username);
+  sessionStorage.setItem("apws_contest_welcome_user", user.username);
   const nextRoute = getDefaultRouteForUser(user);
   if (location.hash === `#/${nextRoute}`) {
     render();
@@ -6660,7 +6660,7 @@ function renderApp(user, route) {
   const visibleModules = visibleNavModulesForUser(user);
   const navOrder = ["dashboard", "production", "stock", "time-report", "compare-data", "summary-person", "summary-all", "reports", "accounting-control", "secret-room", "record-report", "settings"];
   visibleModules.sort((a, b) => navOrder.indexOf(a.id) - navOrder.indexOf(b.id));
-  const shouldShowWelcome = sessionStorage.getItem("pismai_welcome_user") === user.username;
+  const shouldShowWelcome = sessionStorage.getItem("apws_contest_welcome_user") === user.username;
   const secretUnreadCount = Number(window.SecretRoom?.getUnreadCount?.() || 0);
   const secretUnreadLabel = secretUnreadCount > 99 ? "99+" : String(secretUnreadCount);
   const issueUnreadCount = canReceiveIssueNotifications(user) ? issueNotificationUnreadCount : 0;
@@ -6682,7 +6682,7 @@ function renderApp(user, route) {
               <b class="mobile-notification-badge" data-secret-unread-badge ${secretUnreadCount ? "" : "hidden"}>${escapeHtml(secretUnreadLabel)}</b>
             </button>
             <div>
-              <p class="eyebrow">Pitsamai Frozen Fruits</p>
+              <p class="eyebrow">โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ</p>
               <h1 class="brand-title">${escapeHtml(moduleItem.label)}</h1>
               <span class="topbar-clock" data-live-clock>${formatLiveClock()}</span>
             </div>
@@ -6704,8 +6704,8 @@ function renderApp(user, route) {
       <section class="content">
         <aside class="sidebar">
           <button class="sidebar-brand" data-route="dashboard" type="button" aria-label="กลับหน้า Home">
-            <img src="assets/pitsamai-logo.png" alt="" aria-hidden="true" />
-            <span>Pitsamai Factory Wage</span>
+            
+            <span>ระบบชั่งน้ำหนักผลผลิตอัตโนมัติ</span>
           </button>
           <nav class="nav-stack">
             ${visibleModules
@@ -6739,7 +6739,7 @@ function renderApp(user, route) {
   `;
 
   if (shouldShowWelcome) {
-    sessionStorage.removeItem("pismai_welcome_user");
+    sessionStorage.removeItem("apws_contest_welcome_user");
     window.setTimeout(() => {
       const toast = document.querySelector(".welcome-toast");
       toast?.classList.add("welcome-toast-hide");
@@ -7040,7 +7040,7 @@ function renderLegacyDashboard(moduleItem) {
     <section class="factory-dashboard">
       <div class="factory-hero">
         <div class="factory-hero-copy">
-          <p class="eyebrow">Pitsamai Frozen Fruits</p>
+          <p class="eyebrow">โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ</p>
           <h2>ระบบบันทึกผลผลิตและค่าแรงประจำวัน</h2>
           <p>ศูนย์ควบคุมงานบันทึกผลผลิต ตรวจสอบข้อมูลพนักงาน และดูภาพรวมผลผลิตของโรงงาน</p>
           <div class="factory-hero-actions">
@@ -7049,7 +7049,7 @@ function renderLegacyDashboard(moduleItem) {
           </div>
         </div>
         <div class="factory-hero-brand">
-          <img src="assets/pitsamai-logo.png" alt="Pitsamai Frozen Fruits" />
+          
           <span>Factory Wage</span>
         </div>
       </div>
@@ -7141,7 +7141,7 @@ function renderDashboard(user, moduleItem) {
     <section class="factory-dashboard">
       <div class="factory-hero">
         <div class="factory-hero-copy">
-          <p class="eyebrow">Pitsamai Frozen Fruits Co., Ltd.</p>
+          <p class="eyebrow">โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ</p>
           <h2>ยินดีต้อนรับสู่ระบบโรงงาน</h2>
           <p>
             ศูนย์ควบคุมงานบันทึกผลผลิตและค่าแรงประจำวัน
@@ -7157,7 +7157,7 @@ function renderDashboard(user, moduleItem) {
           </div>
         </div>
         <div class="factory-hero-brand">
-          <img src="assets/pitsamai-logo.png" alt="Pitsamai" />
+          
           <span>Factory Wage System</span>
         </div>
       </div>
@@ -7344,7 +7344,7 @@ function renderSummaryExport(moduleItem) {
           </div>
           <div>
             <span>ระบบ</span>
-            <strong>SystemPro</strong>
+            <strong>APWS Web</strong>
           </div>
         </div>
 
@@ -9256,7 +9256,7 @@ function renderFullSettingsModule(user) {
     { route: "account-management", icon: "ID", tone: "purple", title: "บัญชีเข้าใช้งาน", description: "สร้างบัญชีและกำหนดสิทธิ์เข้าเว็บ" },
     { route: "audit-log", icon: "LG", tone: "slate", title: "Audit Log", description: "ตรวจสอบกิจกรรมและประวัติระบบ" },
     { route: "backup", icon: "BK", tone: "cyan", title: "สำรองข้อมูล", description: "ส่งออก นำเข้า และดูแลฐานข้อมูล" },
-    { route: "pf-desktop-app", icon: "PF", tone: "green", title: "PF DesktopApp", description: "รับข้อมูลชั่งและส่งข้อมูลหลักให้เครื่องชั่ง" }
+    { route: "pf-desktop-app", icon: "PF", tone: "green", title: "APWS Desktop", description: "รับข้อมูลชั่งและส่งข้อมูลหลักให้เครื่องชั่ง" }
   ].filter((item) => canOpen(user, item.route));
 
   return `
@@ -16341,7 +16341,7 @@ function renderDashboard(user, moduleItem) {
     <section class="factory-dashboard home-dashboard">
       <header class="home-welcome">
         <div>
-          <p class="eyebrow">Pitsamai Frozen Fruits Co., Ltd.</p>
+          <p class="eyebrow">โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ</p>
           <h2>ยินดีต้อนรับ คุณ ${escapeHtml(user.fullname)}</h2>
           <p>ภาพรวมการทำงานประจำวัน</p>
           <time datetime="${escapeHtml(today)}">${escapeHtml(dateLabel)}</time>
@@ -16751,9 +16751,9 @@ function renderTimeReceiptPanel(group, range, logoDataUrl, copy = false) {
     <section class="receipt-panel ${copy ? "copy" : ""}">
       ${copy ? `<div class="copy-watermark">สำเนา</div>` : ""}
       <header class="receipt-header">
-        <img src="${logoDataUrl}" alt="Pitsamai" />
+        
         <div>
-          <h1>Pitsamai Frozen Fruits</h1>
+          <h1>โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ</h1>
           <h2>ใบเสร็จเวลาและค่าแรง</h2>
         </div>
       </header>
@@ -16892,15 +16892,7 @@ function readBlobAsDataUrl(blob) {
   });
 }
 
-async function getReceiptLogoDataUrl() {
-  try {
-    const response = await fetch("assets/pitsamai-logo.png");
-    if (!response.ok) throw new Error("Logo unavailable");
-    return await readBlobAsDataUrl(await response.blob());
-  } catch {
-    return "assets/pitsamai-logo.png";
-  }
-}
+async function getReceiptLogoDataUrl() { return ""; }
 
 async function exportTimeFullDetailsData(user = getSession()?.user, options = {}) {
   const range = options.range || getTimeSummaryRange();
@@ -19829,7 +19821,7 @@ function printSelectedInboundReceipts() {
     render();
     return;
   }
-  popup.document.write(`<!doctype html><html lang="th"><head><meta charset="utf-8"><title>รายการรับเข้าที่เลือก</title><style>@page{size:A4 landscape;margin:12mm}body{font-family:"Sarabun","Noto Sans Thai",sans-serif;color:#1f2937}h1{margin:0;color:#0f766e;font-size:22px}p{margin:4px 0 14px;color:#667085}table{width:100%;border-collapse:collapse;font-size:10px}th,td{padding:7px;border:1px solid #cfd6df;vertical-align:top}th{color:#fff;background:#0f766e}td.num{text-align:right}tfoot td{font-weight:700;background:#ecfdf3}.meta{display:flex;justify-content:space-between}.no-print{margin-bottom:12px}@media print{.no-print{display:none}}</style></head><body><button class="no-print" onclick="window.print()">พิมพ์เอกสาร</button><div class="meta"><div><h1>ฟอร์มรวมรายการรับเข้าที่เลือก</h1><p>Pitsamai Frozen Fruits • ${rows.length.toLocaleString("th-TH")} รายการ</p></div><p>พิมพ์เมื่อ ${escapeHtml(new Date().toLocaleString("th-TH"))}</p></div><table><thead><tr><th>#</th><th>วันเวลา</th><th>เลขที่</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td>IN-${String(row.id).padStart(6, "0")}</td><td>${escapeHtml(row.supplier_name)}</td><td>${escapeHtml(row.fruit_name)}</td><td class="num">${inboundMoney(row.weight_kg)}</td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("")}</tbody><tfoot><tr><td colspan="5">รวม ${rows.length.toLocaleString("th-TH")} รายการ</td><td class="num">${inboundMoney(totalWeight)} กก.</td><td colspan="2"></td></tr></tfoot></table></body></html>`);
+  popup.document.write(`<!doctype html><html lang="th"><head><meta charset="utf-8"><title>รายการรับเข้าที่เลือก</title><style>@page{size:A4 landscape;margin:12mm}body{font-family:"Sarabun","Noto Sans Thai",sans-serif;color:#1f2937}h1{margin:0;color:#0f766e;font-size:22px}p{margin:4px 0 14px;color:#667085}table{width:100%;border-collapse:collapse;font-size:10px}th,td{padding:7px;border:1px solid #cfd6df;vertical-align:top}th{color:#fff;background:#0f766e}td.num{text-align:right}tfoot td{font-weight:700;background:#ecfdf3}.meta{display:flex;justify-content:space-between}.no-print{margin-bottom:12px}@media print{.no-print{display:none}}</style></head><body><button class="no-print" onclick="window.print()">พิมพ์เอกสาร</button><div class="meta"><div><h1>ฟอร์มรวมรายการรับเข้าที่เลือก</h1><p>โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ • ${rows.length.toLocaleString("th-TH")} รายการ</p></div><p>พิมพ์เมื่อ ${escapeHtml(new Date().toLocaleString("th-TH"))}</p></div><table><thead><tr><th>#</th><th>วันเวลา</th><th>เลขที่</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td>IN-${String(row.id).padStart(6, "0")}</td><td>${escapeHtml(row.supplier_name)}</td><td>${escapeHtml(row.fruit_name)}</td><td class="num">${inboundMoney(row.weight_kg)}</td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("")}</tbody><tfoot><tr><td colspan="5">รวม ${rows.length.toLocaleString("th-TH")} รายการ</td><td class="num">${inboundMoney(totalWeight)} กก.</td><td colspan="2"></td></tr></tfoot></table></body></html>`);
   popup.document.close();
   popup.focus();
   window.setTimeout(() => popup.print(), 250);

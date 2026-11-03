@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import hashlib
@@ -50,9 +50,9 @@ from reportlab.platypus import (
 HOST = os.environ.get("HOST") or ("0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8787"))
 BASE_DIR = Path(__file__).parent
-DATA_FILE = Path(__file__).with_name("report_data.json")
-COMPANY_NAME = "Pitsamai Frozen Fruits Co., Ltd."
-SYSTEM_NAME = "SystemPro by Pitsamai Frozen Fruits"
+DATA_FILE = Path(__file__).with_name("contest_report_data.json")
+COMPANY_NAME = "โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ"
+SYSTEM_NAME = "APWS Web by โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ"
 BRAND_GREEN = "#0F7A3D"
 THAI_FONT = "Helvetica"
 THAI_FONT_BOLD = "Helvetica-Bold"
@@ -75,6 +75,8 @@ TIME_SPECIAL_WAGE_TABLE = {
     8: 365,
 }
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+from contest_guard import verify_database_url
+verify_database_url(SUPABASE_URL)
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 BACKUP_ACCESS_CODE = os.environ.get("BACKUP_ACCESS_CODE", "1150")
 DATABASE_MIGRATION_CODE = "1001"
@@ -3794,7 +3796,7 @@ def backup_snapshot_payload(scope: str, actor: str, data: dict) -> dict:
     snapshot = {
         "exported_at": exported_at,
         "cutoff_at": exported_at,
-        "app": "Pismai Factory Wage",
+        "app": "ระบบชั่งน้ำหนักผลผลิตอัตโนมัติ",
         "version": 3,
         "source": "supabase",
         "scope": scope,
@@ -4565,7 +4567,7 @@ def build_employee_range_pdf(
     buffer = BytesIO()
     page_width, page_height = landscape(A4)
     pdf = canvas.Canvas(buffer, pagesize=landscape(A4))
-    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
     margin = 8 * mm
     gap = 7 * mm
     divider_x = page_width / 2
@@ -4876,7 +4878,7 @@ def build_daily_excel(data: dict, date: str) -> bytes:
     sheet["A3"] = f"ประจำวันที่ {format_report_date(date)} | สร้างรายงาน {datetime.now().strftime('%d/%m/%Y %H:%M')}"
     sheet["A3"].font = Font(name="Sarabun", size=10, color="667085")
 
-    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
     if logo_path.exists():
         try:
             logo = ExcelImage(str(logo_path))
@@ -5398,7 +5400,7 @@ def build_summary_by_pile_pdf(data: dict, payload: dict) -> bytes:
     section_style.textColor = colors.HexColor(BRAND_GREEN)
     section_style.spaceAfter = 6
 
-    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
     logo = Image(str(logo_path), width=22 * mm, height=22 * mm) if logo_path.exists() else Paragraph("SP", title_style)
     title_block = [
         Paragraph(COMPANY_NAME, subtitle_style),
@@ -5802,7 +5804,7 @@ def build_time_full_export_excel(payload: dict) -> bytes:
     for ref in ["A3", "A4"]:
         sheet[ref].font = Font(name=font_name, size=11, color="344054")
 
-    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
     if logo_path.exists():
         try:
             logo = ExcelImage(str(logo_path))
@@ -6083,7 +6085,7 @@ def build_time_receipts_pdf(payload: dict) -> bytes:
     buffer = BytesIO()
     page_width, page_height = landscape(A4)
     c = canvas.Canvas(buffer, pagesize=landscape(A4))
-    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
     margin = 8 * mm
     gap = 7 * mm
     divider_x = page_width / 2
@@ -6394,7 +6396,7 @@ def export_meta_text(payload: dict) -> str:
 
 
 def add_excel_logo(sheet, cell: str = "H1") -> None:
-    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+    logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
     if not logo_path.exists():
         return
     try:
@@ -6530,8 +6532,8 @@ def pdf_styles() -> tuple:
 
 def report_header_story(title_text: str, subtitle: str, payload: dict, page_width_mm: int = 267) -> list:
     _, title, normal, _ = pdf_styles()
-    logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
-    logo = Image(str(logo_path), width=20 * mm, height=20 * mm) if logo_path.exists() else Paragraph("SP", title)
+    logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
+    logo = Image(str(logo_path), width=20 * mm, height=20 * mm) if logo_path.exists() else Paragraph("APWS", title)
     title_block = [Paragraph(COMPANY_NAME, normal), Paragraph(title_text, title), Paragraph(subtitle, normal)]
     meta = Paragraph(export_meta_text(payload), normal)
     header = Table([[logo, title_block, meta]], colWidths=[24 * mm, (page_width_mm - 94) * mm, 70 * mm])
@@ -7051,7 +7053,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
         if detail_defs:
             if sections["overview"] or sections["piles"]:
                 story.append(PageBreak())
-                logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+                logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
                 logo_flowable = (
                     Image(str(logo_path), width=15 * mm, height=15 * mm)
                     if logo_path.exists()
@@ -7120,7 +7122,7 @@ def build_production_summary_pdf(payload: dict) -> bytes:
         canvas_obj.saveState()
         canvas_obj.setFillColor(dark_green)
         canvas_obj.rect(0, page_height - 22 * mm, page_width, 22 * mm, fill=1, stroke=0)
-        logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+        logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
         if logo_path.exists():
             try:
                 canvas_obj.drawImage(
@@ -7745,7 +7747,7 @@ def build_group_report_pdf(payload: dict) -> bytes:
         canvas.line(15 * mm, 11 * mm, 282 * mm, 11 * mm)
         canvas.setFont(THAI_FONT, 8)
         canvas.setFillColor(colors.HexColor("#667085"))
-        canvas.drawString(15 * mm, 6.5 * mm, "เอกสารสร้างจากระบบบริหารจัดการผลผลิต บริษัท พิศมัย ฟรุตส์ จำกัด")
+        canvas.drawString(15 * mm, 6.5 * mm, "เอกสารสร้างจากระบบบริหารจัดการผลผลิต โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ")
         canvas.drawRightString(282 * mm, 6.5 * mm, f"หน้า {document.page}")
         canvas.restoreState()
 
@@ -8229,7 +8231,7 @@ def build_time_group_report_pdf(payload: dict) -> bytes:
         canvas_obj.saveState()
         canvas_obj.setFillColor(dark_green)
         canvas_obj.rect(0, page_height - 22 * mm, page_width, 22 * mm, fill=1, stroke=0)
-        logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+        logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
         if logo_path.exists():
             try:
                 canvas_obj.drawImage(
@@ -8584,7 +8586,7 @@ def build_time_summary_pdf(payload: dict) -> bytes:
         canvas_obj.saveState()
         canvas_obj.setFillColor(dark_green)
         canvas_obj.rect(0, page_height - 22 * mm, page_width, 22 * mm, fill=1, stroke=0)
-        logo_path = Path(__file__).with_name("assets") / "pitsamai-logo.png"
+        logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
         if logo_path.exists():
             try:
                 canvas_obj.drawImage(
@@ -8865,7 +8867,7 @@ class ReportHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "same-origin")
         origin = self.headers.get('Origin', '')
         approved = {value.strip() for value in os.environ.get('APP_ALLOWED_ORIGINS', '').split(',') if value.strip()}
-        approved.update({'https://pf-systempro-factory.onrender.com', 'https://pismai-factory-test.onrender.com'})
+        approved.update({'http://127.0.0.1:8787'})
         parsed_origin = urlparse(origin)
         if origin in approved or (parsed_origin.scheme in {'http', 'https'} and parsed_origin.netloc == self.headers.get('Host')) or (parsed_origin.hostname in {'localhost', '127.0.0.1'}):
             self.send_header("Access-Control-Allow-Origin", origin)
@@ -9469,7 +9471,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "A signed-in session is required."}, 401)
                 return
             if account_level_number(actor.get("level")) < 6:
-                self.send_json({"error": "C6 or higher is required for PF DesktopApp import."}, 403)
+                self.send_json({"error": "C6 or higher is required for APWS Desktop import."}, 403)
                 return
             status, body = accept_desktop_file(payload, actor)
             self.send_json(body, status)
@@ -9488,7 +9490,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Unknown production queue source."}, 400)
                 return
             if desktop_import and account_level_number(actor.get("level")) < 6:
-                self.send_json({"error": "C6 or higher is required for PF DesktopApp import."}, 403)
+                self.send_json({"error": "C6 or higher is required for APWS Desktop import."}, 403)
                 return
             if desktop_import:
                 self.send_json({"error": "กรุณารีเฟรชหน้าเว็บแล้วนำเข้าทั้งไฟล์ เพื่อใช้การตรวจไฟล์ซ้ำรุ่นใหม่"}, 409)

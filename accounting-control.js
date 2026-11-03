@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const LOCAL_KEY = "pismai_pf_payment_allocations_v1";
+  const LOCAL_KEY = "apws_contest_pf_payment_allocations_v1";
   let deductionsExpanded = false;
   let stockExpanded = false;
   let financeExpanded = false;
@@ -122,8 +122,8 @@
   }
 
   function render(root, user, options = {}) {
-    localStorage.removeItem("pismai_accounting_password_hash_v1");
-    sessionStorage.removeItem("pismai_accounting_access_v1");
+    localStorage.removeItem("apws_contest_accounting_password_hash_v1");
+    sessionStorage.removeItem("apws_contest_accounting_access_v1");
     if (levelNumber(user) < 4 && user?.role !== "developer" && !user?.is_system) return options.onExit?.();
 
     const stockAllowed = canAccessStockSummary(user);

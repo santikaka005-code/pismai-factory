@@ -3,7 +3,7 @@
   'use strict';
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const num=v=>Number(v||0).toLocaleString('th-TH',{maximumFractionDigits:2});
-  const session=()=>{try{return JSON.parse(sessionStorage.getItem('pismai_factory_session')||'null');}catch{return null;}};
+  const session=()=>{try{return JSON.parse(sessionStorage.getItem('apws_contest_session')||'null');}catch{return null;}};
   const date=v=>v?new Date(v).toLocaleDateString('th-TH',{timeZone:'Asia/Bangkok'}):'—';
   const today=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Bangkok'}).format(new Date());
   const uid=()=>`sale-${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(4)),n=>n.toString(16)).join('')}`;
@@ -18,7 +18,7 @@
     const pendingKey=`pf-cold-sale-${stock?'confirm':'create'}:${actor}`;
     let stockSignature='';
     let root,data={pallets:[],orders:[]},loaded=false,busy=false,loading=false,message='',pending=null,editing='',plan={},reason='',cart=[],search='',doc=null;
-    let draft={name:'',address:'',taxId:'',phone:'',bill_date:today(),company:'บริษัท พิศมัยผลไม้แช่แข็ง',companyAddress:'',companyTaxId:''};
+    let draft={name:'',address:'',taxId:'',phone:'',bill_date:today(),company:'โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ',companyAddress:'',companyTaxId:''};
     try{pending=JSON.parse(sessionStorage.getItem(pendingKey)||'null');}catch{}
     const sameActor=()=>actor===String(session()?.user?.id||session()?.user?.username||'');
     const chief=()=>sameActor()&&/^C[5-7]$/.test(session()?.user?.level||'')&&new URLSearchParams(location.search).get('readonly')!=='1';

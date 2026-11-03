@@ -7,7 +7,7 @@ window.ProductionPull = (() => {
   async function api(path, body = {}) {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 45000);
     try {
-      const response = await fetch(`http://127.0.0.1:18766/v1/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal, credentials: 'omit', cache: 'no-store', targetAddressSpace: 'loopback' });
+      const response = await fetch(`http://127.0.0.1:19766/v1/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal, credentials: 'omit', cache: 'no-store', targetAddressSpace: 'loopback' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || `ตัวเชื่อมตอบกลับ HTTP ${response.status}`);
       return data;
@@ -22,13 +22,13 @@ window.ProductionPull = (() => {
     const device = state.devices.find(d => d.device_id === state.selected), busy = state.busy || importBusy;
     return `<section class="production-pull" aria-labelledby="productionPullTitle">
       <button type="button" class="production-pull-back" data-close-production-pull>← กลับไปบันทึกผลผลิต</button>
-      <header class="production-pull-heading"><span>PF DesktopApp · LAN</span><h2 id="productionPullTitle" tabindex="-1">ดึงข้อมูลจากเครื่องไลน์ผลิต</h2><p>ค้นหาเครื่องที่เปิดแชร์ในวง LAN · จับคู่ครั้งแรกครั้งเดียว แล้วเลือกใช้เครื่องเดิมได้</p></header>
+      <header class="production-pull-heading"><span>APWS Desktop · LAN</span><h2 id="productionPullTitle" tabindex="-1">ดึงข้อมูลจากเครื่องไลน์ผลิต</h2><p>ค้นหาเครื่องที่เปิดแชร์ในวง LAN · จับคู่ครั้งแรกครั้งเดียว แล้วเลือกใช้เครื่องเดิมได้</p></header>
       <div class="production-pull-toolbar"><button type="button" class="production-pull-primary" data-pull-search ${busy || !canImport ? 'disabled' : ''}>${icon()}${state.busy ? 'กำลังทำงาน…' : 'ค้นหาเครื่อง'}</button><span>เปิดตัวเชื่อมเว็บใน DesktopApp บนเครื่องที่ใช้เว็บนี้</span></div>
       ${!canImport ? '<p class="alert alert-error">การเชื่อมและนำเข้าข้อมูลใช้สิทธิ์ C6 ขึ้นไป</p>' : ''}
       <p role="status" aria-live="polite" class="production-pull-status">${e(state.message)}</p>
       <div class="production-pull-devices">${state.devices.map(d => `<button type="button" class="production-pull-device ${state.selected === d.device_id ? 'is-selected' : ''}" data-pull-device="${e(d.device_id)}" aria-pressed="${state.selected === d.device_id}" ${busy || !d.online || !canImport ? 'disabled' : ''}>${icon()}<strong>${e(d.name)}</strong><span>${e(d.host)} · ${d.online ? (d.paired ? 'พร้อมใช้งาน · จับคู่แล้ว' : 'เปิดแชร์ · จับคู่ครั้งแรก') : 'ติดต่อไม่ได้'}</span>${d.error ? `<small>${e(d.error)}</small>` : ''}</button>`).join('')}</div>
       ${!state.devices.length ? `<div class="production-pull-empty"><h3>${state.scanned ? 'ยังไม่พบเครื่องที่เปิดแชร์' : 'ค้นหาเพื่อแสดงเครื่องในโรงงาน'}</h3><p>ต้นทางต้องเปิดแอปและเปิดแชร์ รุ่นเก่าที่ไม่มีระบบค้นหาต้องอัปเดตแอปก่อน<br>หากไม่พบ ตรวจ LAN / Firewall หรือใช้การนำเข้าไฟล์เดิม</p></div>` : ''}
-      ${device && !device.paired ? `<section class="production-pull-options"><h3>จับคู่ ${e(device.name)} ครั้งแรก</h3><p>คัดลอกรหัสจับคู่จาก DesktopApp เครื่องต้นทางมาวางครั้งเดียว ตัวเชื่อมจะจดจำไว้บนเครื่องนี้</p><label>รหัสจับคู่<input type="password" data-pull-code autocomplete="off" placeholder="PWS1.…" ${busy ? 'disabled' : ''}></label><button type="button" class="production-pull-primary" data-pull-pair ${busy || !canImport ? 'disabled' : ''}>จับคู่และจำเครื่องนี้</button></section>` : ''}
+      ${device && !device.paired ? `<section class="production-pull-options"><h3>จับคู่ ${e(device.name)} ครั้งแรก</h3><p>คัดลอกรหัสจับคู่จาก DesktopApp เครื่องต้นทางมาวางครั้งเดียว ตัวเชื่อมจะจดจำไว้บนเครื่องนี้</p><label>รหัสจับคู่<input type="password" data-pull-code autocomplete="off" placeholder="APWS1.…" ${busy ? 'disabled' : ''}></label><button type="button" class="production-pull-primary" data-pull-pair ${busy || !canImport ? 'disabled' : ''}>จับคู่และจำเครื่องนี้</button></section>` : ''}
       <section class="production-pull-options"><div class="production-pull-options-head"><h3>ข้อมูลที่ต้องการ</h3><span>${device ? e(device.name) : 'ยังไม่ได้เลือกเครื่อง'}</span></div>
       <fieldset ${busy || !canImport ? 'disabled' : ''}><legend class="production-pull-sr">เลือกช่วงข้อมูล</legend>
         <label>ตั้งแต่<input type="date" data-pull-field="start" value="${e(state.start)}"></label><label>ถึง<input type="date" data-pull-field="end" value="${e(state.end)}"></label>
@@ -40,7 +40,7 @@ window.ProductionPull = (() => {
         ${preview.rejected.length ? `<details><summary>รายการที่ไม่นำเข้า</summary><ul>${preview.rejected.slice(0, 100).map(r => `<li>แถว ${r.row}: ${e(r.reason)}</li>`).join('')}</ul>${preview.rejected.length > 100 ? '<p>แสดง 100 รายการแรก กรุณาแบ่งช่วงเพื่อตรวจเพิ่มเติม</p>' : ''}</details>` : ''}
         ${preview.review ? `<p class="alert alert-error">พบข้อมูลทับกับไฟล์เดิม การยืนยันจะนำเข้าทั้งชุดและนับยอดเพิ่ม</p><ul>${(preview.review.matches || []).map(m => `<li>${e(m.file_name)}: ตรง ${m.matched}/${m.total} รายการ</li>`).join('')}</ul>` : ''}
         <div class="production-pull-toolbar"><button type="button" class="production-pull-primary" data-pull-confirm ${busy || !preview.accepted.length || preview.blocked ? 'disabled' : ''}>${preview.review ? 'ตรวจสอบแล้ว ยืนยันรับทั้งชุด' : 'ยืนยันส่งเข้าคิวบันทึก'}</button><button type="button" class="production-pull-file" data-pull-cancel ${busy ? 'disabled' : ''}>ยกเลิกชุดนี้</button></div></section>` : ''}
-      <details class="production-pull-options"><summary>เชื่อมด้วยมือ / นำเข้าจากไฟล์</summary><p>IP + พอร์ต + รหัสจับคู่เดิมยังอยู่ใน DesktopApp → ตั้งค่า → เชื่อมต่อเครื่อง / Office</p><button type="button" class="production-pull-file" data-route="pf-desktop-app">นำเข้าจากไฟล์ PWS</button></details>
+      <details class="production-pull-options"><summary>เชื่อมด้วยมือ / นำเข้าจากไฟล์</summary><p>IP + พอร์ต + รหัสจับคู่เดิมยังอยู่ใน DesktopApp → ตั้งค่า → เชื่อมต่อเครื่อง / Office</p><button type="button" class="production-pull-file" data-route="pf-desktop-app">นำเข้าจากไฟล์ APWS</button></details>
       <p class="production-pull-note">ค้นหาเฉพาะเครื่องใน LAN ไม่อัปโหลดน้ำหนักระหว่างค้นหา · ไม่มีการบันทึกเข้าฐานเว็บจนกว่าจะยืนยัน</p></section>`;
   }
   function bind({ canImport, refresh, clearPreview, preview, confirm, isImportBusy }) {

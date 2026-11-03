@@ -13,7 +13,7 @@
   const blankDraft=()=>({product:'',lot:'',boxes:36,kgPerBox:20,owner:'own',customer:'',slot:'',source:'',reference:''});
   function initial(){return {tab:'overview',room:'1',filter:'all',selected:null,move:null,pallets:[],pending:[],movements:[],locations:[],draft:blankDraft()};}
   let ready=false,busy=false,loading=false,error='';
-  const session=()=>{try{return JSON.parse(sessionStorage.getItem('pismai_factory_session')||'null');}catch{return null;}};
+  const session=()=>{try{return JSON.parse(sessionStorage.getItem('apws_contest_session')||'null');}catch{return null;}};
   const actorKey=String(session()?.user?.id||session()?.user?.username||'');
   const pendingKey='pismai-cold-stock-pending:'+actorKey;
   let pendingWrite=null;

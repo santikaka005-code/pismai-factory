@@ -206,7 +206,7 @@
   }
   function openRemote(selectedDate, adapter) {
     if (document.querySelector("#scannerRemoteDialog")) return;
-    const key="pismai_scanner_remote_draft_v1", tokenKey="pismai_scanner_bridge_token";
+    const key="apws_contest_scanner_remote_draft_v1", tokenKey="apws_contest_scanner_bridge_token";
     let saved={}, token="";
     try { saved=JSON.parse(localStorage.getItem(key)||"{}")||{}; token=sessionStorage.getItem(tokenKey)||""; } catch (_) {}
     const dialog=document.createElement("dialog"); dialog.id="scannerRemoteDialog";

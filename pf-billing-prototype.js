@@ -19,7 +19,7 @@
       {id:'P006',product:'pineapple',date:'2026-09-05',room:'2 / B-03',kg:600,owner:'own'}
     ];
     const customers = [], bills = [], receipts = [];
-    let company={name:'บริษัท พิศมัยผลไม้แช่แข็ง',address:'',taxId:'',branch:'',phone:'',vat:'unknown',logo:'../assets/pitsamai-logo.png'};
+    let company={name:'โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ',address:'',taxId:'',branch:'',phone:'',vat:'unknown',logo:''};
     let root, page='billing',tab='invoice',notice='', selectedCustomer='',editingCustomer='',search='',month=today().slice(0,7),doc=null;
     let customerDraft={name:'',address:'',taxId:'',branch:'',phone:'',email:''};
     let draft={customer:'',date:today(),product:'mango',kg:'1',price:'45',note:''}, cart=[];

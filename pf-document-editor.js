@@ -1,7 +1,7 @@
 /* Document layout editor. Templates stay in this browser; no accounting mutations. */
 (() => {
   'use strict';
-  const KEY='pf_document_templates_v1', MM=96/25.4;
+  const KEY='apws_contest_document_templates_v1', MM=96/25.4;
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const clone=v=>JSON.parse(JSON.stringify(v));
   const id=()=> 'el-'+Math.random().toString(36).slice(2,10);
@@ -11,12 +11,12 @@
   const labels={text:'ข้อความ',company:'ข้อมูลบริษัท',customer:'ข้อมูลลูกค้า',meta:'เลขเอกสาร / วันที่',items:'ตารางสินค้า',table:'ตารางเพิ่มเติม',total:'ยอดรวม',image:'รูปภาพ',line:'เส้น',page:'เลขหน้า'};
   const fields={name:'รายการ',weight:'น้ำหนัก (กก.)',price:'ราคา / กก.',amount:'จำนวนเงิน',sequence:'ลำดับ'};
   const color=v=>/^#[0-9a-f]{6}$/i.test(v)?v:'#243b32';
-  const safeImage=v=>typeof v==='string'&&(/^data:image\/(png|jpeg|webp);base64,[a-z0-9+/=\s]+$/i.test(v)||v==='assets/pitsamai-logo.png')?v:'';
-  const imageUrl=v=>v==='assets/pitsamai-logo.png'?new URL('assets/pitsamai-logo.png',new URL('.',document.querySelector('script[src*="pf-document-editor"]')?.src||location.href)).href:safeImage(v);
+  const safeImage=v=>typeof v==='string'&&(/^data:image\/(png|jpeg|webp);base64,[a-z0-9+/=\s]+$/i.test(v))?v:'';
+  const imageUrl=v=>safeImage(v);
   const base=(type,x,y,w,h,text='')=>({id:id(),type,x,y,w,h,text,font:'Sarabun',size:12,color:'#243b32',background:'#ffffff',border:'#cddcd4',borderWidth:0.3,align:'left',bold:false,opacity:1,show:'all',hidden:false,locked:false});
   function standard(kind='bill'){
     const title=base('text',15,12,55,12,kind==='receipt'?'ใบเสร็จรับเงิน':'ใบวางบิล');title.size=21;title.bold=true;
-    const logo=base('image',90,10,30,25);logo.asset='logo';logo.src='assets/pitsamai-logo.png';
+    const logo=base('image',90,10,30,25);logo.asset='logo';logo.src='';
     const company=base('company',15,39,180,22);company.align='center';company.size=11;
     const customer=base('customer',15,66,113,25);customer.show='first';customer.size=11;
     const meta=base('meta',130,66,65,25);meta.size=10;
@@ -25,10 +25,10 @@
     const note=base('text',15,252,175,10,'เอกสารตัวอย่าง — ไม่ใช่เอกสารจริง');note.show='last';note.size=10;
     const signature=base('text',15,269,175,10,'ผู้จัดทำ __________________     ผู้รับเอกสาร __________________');signature.show='last';signature.size=10;
     const page=base('page',15,284,180,6);page.align='right';page.size=9;
-    return {version:1,id:'standard-'+kind,name:kind==='bill'?'ใบวางบิลมาตรฐาน':'ใบเสร็จมาตรฐาน',kind,paper:'A4',landscape:false,margin:10,elements:[title,logo,company,customer,meta,items,total,note,signature,page]};
+    return {version:1,id:'standard-'+kind,name:kind==='bill'?'ใบวางบิลมาตรฐาน':'ใบเสร็จมาตรฐาน',kind,paper:'A4',landscape:false,margin:10,elements:[title,company,customer,meta,items,total,note,signature,page]};
   }
   const dimensions=t=>{const a=t.paper==='A5'?[148,210]:[210,297];return t.landscape?a.reverse():a;};
-  const sample=(kind='bill',count=28)=>({kind,number:kind==='receipt'?'DEMO-RC-0001':'DEMO-BL-0001',date:'25/10/2569',reference:'DEMO-BL-0001',company:{name:'บริษัท พิศมัยผลไม้แช่แข็ง',address:'ที่อยู่บริษัท (ตัวอย่าง)',taxId:'—',branch:'สำนักงานใหญ่',phone:'—',logo:'assets/pitsamai-logo.png'},customer:{name:'ลูกค้าตัวอย่าง',address:'ที่อยู่ลูกค้า (ตัวอย่าง)',taxId:'—',branch:'—'},lines:Array.from({length:count},(_,i)=>({name:['มะม่วงหั่นเต๋าแช่แข็ง','ทุเรียนแกะเนื้อแช่แข็ง','สับปะรดแช่แข็ง'][i%3],weight:25+i,price:45+i,amount:(25+i)*(45+i)})),received:1000,method:'เงินโอน'});
+  const sample=(kind='bill',count=28)=>({kind,number:kind==='receipt'?'DEMO-RC-0001':'DEMO-BL-0001',date:'25/10/2569',reference:'DEMO-BL-0001',company:{name:'โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ',address:'ที่อยู่บริษัท (ตัวอย่าง)',taxId:'—',branch:'สำนักงานใหญ่',phone:'—',logo:''},customer:{name:'ลูกค้าตัวอย่าง',address:'ที่อยู่ลูกค้า (ตัวอย่าง)',taxId:'—',branch:'—'},lines:Array.from({length:count},(_,i)=>({name:['มะม่วงหั่นเต๋าแช่แข็ง','ทุเรียนแกะเนื้อแช่แข็ง','สับปะรดแช่แข็ง'][i%3],weight:25+i,price:45+i,amount:(25+i)*(45+i)})),received:1000,method:'เงินโอน'});
   function validate(t){
     if(!t||!Number.isFinite(t.margin)||t.margin<0||t.margin>30||typeof t.landscape!=='boolean'||typeof t.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(t.id)||t.version!==1||!['bill','receipt'].includes(t.kind)||!['A4','A5'].includes(t.paper)||typeof t.name!=='string'||t.name.length>100||!Array.isArray(t.elements)||t.elements.length>80)throw Error('ไฟล์แม่แบบไม่ถูกต้อง');
     const ids=new Set();
@@ -62,7 +62,7 @@
     return String(e.text||'').replaceAll('{{เลขเอกสาร}}',d.number||'').replaceAll('{{วันที่}}',d.date||'').replaceAll('{{ชื่อลูกค้า}}',d.customer?.name||'');
   };
   function content(e,d,page,index,count){
-    if(e.type==='image'){const companyLogo=d.company?.logo;const src=imageUrl(e.asset==='logo'&&e.src==='assets/pitsamai-logo.png'&&safeImage(companyLogo)?companyLogo:e.src||(e.asset==='logo'?companyLogo:''));return src?`<img src="${esc(src)}" alt="${esc(e.asset||'รูปภาพ')}" draggable="false">`:'<span class="pde-image-empty">อัปโหลดรูปภาพ</span>';}
+    if(e.type==='image'){const companyLogo=d.company?.logo;const src=imageUrl(e.src||(e.asset==='logo'?companyLogo:''));return src?`<img src="${esc(src)}" alt="${esc(e.asset||'รูปภาพ')}" draggable="false">`:'<span class="pde-image-empty">อัปโหลดรูปภาพ</span>';}
     if(e.type==='line')return `<div style="border-top:${e.borderWidth}mm solid ${color(e.border)};width:100%"></div>`;
     if(e.type==='items'){
       const widths=e.columns.reduce((n,c)=>n+c.width,0);
@@ -99,7 +99,7 @@
     function action(b){const a=b.dataset.action,e=get();if(a==='print-preview'){const issues=[...preflight(t,sample(t.kind,rows)),...renderedIssues(root)];if(issues.length)throw Error(issues.join(' · '));const was=preview;preview=true;paint();const style=document.createElement('style');style.textContent=`@page { size: ${t.paper} ${t.landscape?'landscape':'portrait'}; margin: 0; }`;document.head.append(style);document.body.classList.add('pde-printing');try{window.print();}finally{document.body.classList.remove('pde-printing');style.remove();preview=was;paint();}return;}if(a==='select')return selectElement(b.dataset.id);if(a==='preview'){preview=!preview;notice='แสดงตัวอย่าง '+rows+' รายการ พร้อมเลขหน้าจริง';paint();return;}if(a==='undo'){if(undo.length){redo.push(clone(t));t=undo.pop();dirty=true;}paint();return;}if(a==='redo'){if(redo.length){undo.push(clone(t));t=redo.pop();dirty=true;}paint();return;}if(a==='save'||a==='activate'){save(a==='activate');paint();return;}if(a==='export'){validate(t);const url=URL.createObjectURL(new Blob([JSON.stringify(t,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='PF-'+t.kind+'-template.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);return;}
       checkpoint();
       if(a==='copy-template'){t.id='template-'+Date.now();t.name=t.name+' (สำเนา)';store.templates.push(clone(t));}
-      if(a==='add'){if(t.elements.length>=80)throw Error('เพิ่มได้สูงสุด 80 องค์ประกอบ');const type=b.dataset.type;const el=base(type,20,110,type==='image'?35:100,type==='table'?35:type==='image'?25:12,type==='text'?'ข้อความใหม่':'');if(type==='table'){el.cells=Array.from({length:3},(_,r)=>Array.from({length:3},(_,c)=>({text:r?'':`หัวข้อ ${c+1}`,span:1})));el.headerColor='#eaf3ed';}if(type==='image'){el.asset=b.dataset.asset||'';el.src=el.asset==='logo'?'assets/pitsamai-logo.png':'';}t.elements.push(el);selected=el.id;}
+      if(a==='add'){if(t.elements.length>=80)throw Error('เพิ่มได้สูงสุด 80 องค์ประกอบ');const type=b.dataset.type;const el=base(type,20,110,type==='image'?35:100,type==='table'?35:type==='image'?25:12,type==='text'?'ข้อความใหม่':'');if(type==='table'){el.cells=Array.from({length:3},(_,r)=>Array.from({length:3},(_,c)=>({text:r?'':`หัวข้อ ${c+1}`,span:1})));el.headerColor='#eaf3ed';}if(type==='image'){el.asset=b.dataset.asset||'';el.src='';}t.elements.push(el);selected=el.id;}
       if(a==='delete'&&e?.type!=='items'){t.elements=t.elements.filter(x=>x.id!==selected);selected=t.elements[0]?.id;}
       if(a==='duplicate'&&e?.type!=='items'){const copy=clone(e);copy.id=id();copy.x+=3;copy.y+=3;t.elements.push(copy);selected=copy.id;}
       if(a.startsWith('align-')&&e){const [w]=dimensions(t);e.x=a==='align-left'?t.margin:a==='align-right'?w-t.margin-e.w:(w-e.w)/2;}

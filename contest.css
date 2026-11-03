@@ -1,0 +1,7 @@
+/* Contest presentation: plain project name, no company logo. */
+.fresh-login-brand strong { font-size: 24px; }
+.fresh-login-brand small { font-size: 10px; letter-spacing: .06em; }
+.fresh-login-footer { color: #60746c; }
+.brand { gap: 10px; }
+body::before { content: 'APWS · โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ'; display: block; padding: 7px 16px; background: #e5f5ef; color: #185a47; font: 13px sans-serif; text-align: center; }
+@media print { body::before { display: none; } }
