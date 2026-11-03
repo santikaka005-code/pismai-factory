@@ -12193,6 +12193,7 @@ function setProductionMessage(message, type = "success") {
 
 function bindProductionManagementEvents(user) {
   window.ProductionPull?.bind({
+    cloudRequest: cloudApiRequest,
     canImport: () => canImportDesktopWeighing(getSession()?.user), refresh: render,
     isImportBusy: () => desktopImportBusy,
     loadMasters: async () => {

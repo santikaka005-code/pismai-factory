@@ -8892,6 +8892,22 @@ class ReportHandler(BaseHTTPRequestHandler):
     def _post_request(self) -> None:
         parsed = urlparse(self.path)
         payload = self.read_json()
+        if parsed.path.startswith('/api/apws-relay/'):
+            from apws_relay import relay, RelayError
+            action = parsed.path.removeprefix('/api/apws-relay/')
+            owner = ''
+            if action not in ('register', 'poll', 'reply', 'disconnect'):
+                actor = secret_room_actor(self)
+                if not actor or account_level_number(actor.get('level')) < 6:
+                    self.send_json({'error': 'ต้องเข้าสู่ระบบด้วยสิทธิ์ C6 ขึ้นไป'}, 403)
+                    return
+                owner = str(actor.get('username') or actor.get('id') or '')
+            try:
+                result = relay.call(action, payload, owner, self.client_address[0])
+                self.send_json(result)
+            except RelayError as error:
+                self.send_json({'error': str(error)}, error.status)
+            return
         if not authorize_legacy_request(self, "POST", parsed.path, payload):
             return
         if parsed.path in {'/reports/sync', '/api/accounts/sync', '/api/cleanup-test-data', '/api/production-records/delete-by-date'}:
