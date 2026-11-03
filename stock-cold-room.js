@@ -24,7 +24,7 @@
     if(!canWrite()){const e=new Error('กรุณาเข้าสู่ระบบด้วยบัญชี C4 ขึ้นไป');e.status=403;throw e;}
     const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),20000);
     try{
-      const base=location.protocol==='file:'?'https://pf-systempro-factory.onrender.com':location.origin;
+      const base=location.protocol==='file:'?'http://127.0.0.1:8787':location.origin;
       const response=await fetch(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json','X-Session-Token':session().token},body:body?JSON.stringify(body):undefined,signal:controller.signal});
       const result=await response.json();
       if(!response.ok){const e=new Error(result.error||'เชื่อมต่อสต็อกไม่สำเร็จ');e.status=response.status;throw e;}

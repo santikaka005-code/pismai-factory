@@ -52,7 +52,7 @@ PORT = int(os.environ.get("PORT", "8787"))
 BASE_DIR = Path(__file__).parent
 DATA_FILE = Path(__file__).with_name("contest_report_data.json")
 COMPANY_NAME = "โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ"
-SYSTEM_NAME = "APWS Web by โครงงานระบบชั่งน้ำหนักผลผลิตอัตโนมัติ"
+SYSTEM_NAME = "APWS · ระบบชั่งน้ำหนักผลผลิตอัตโนมัติ"
 BRAND_GREEN = "#0F7A3D"
 THAI_FONT = "Helvetica"
 THAI_FONT_BOLD = "Helvetica-Bold"
@@ -5401,7 +5401,7 @@ def build_summary_by_pile_pdf(data: dict, payload: dict) -> bytes:
     section_style.spaceAfter = 6
 
     logo_path = Path(__file__).with_name("assets") / "contest-no-company-logo.png"
-    logo = Image(str(logo_path), width=22 * mm, height=22 * mm) if logo_path.exists() else Paragraph("SP", title_style)
+    logo = Image(str(logo_path), width=22 * mm, height=22 * mm) if logo_path.exists() else Paragraph("APWS", title_style)
     title_block = [
         Paragraph(COMPANY_NAME, subtitle_style),
         Paragraph("รายงานสรุปน้ำหนักตามกอง", title_style),
@@ -6513,16 +6513,16 @@ def pdf_styles() -> tuple:
     styles = getSampleStyleSheet()
     for style_name in ["Title", "Heading1", "Heading2", "Normal", "BodyText"]:
         styles[style_name].fontName = THAI_FONT
-    title = styles["Title"].clone("PismaiReportTitle")
+    title = styles["Title"].clone("APWSReportTitle")
     title.fontName = THAI_FONT_BOLD
     title.fontSize = 17
     title.leading = 22
     title.textColor = colors.HexColor(BRAND_GREEN)
-    normal = styles["Normal"].clone("PismaiReportNormal")
+    normal = styles["Normal"].clone("APWSReportNormal")
     normal.fontName = THAI_FONT
     normal.fontSize = 9
     normal.leading = 12
-    section = styles["Heading2"].clone("PismaiReportSection")
+    section = styles["Heading2"].clone("APWSReportSection")
     section.fontName = THAI_FONT_BOLD
     section.fontSize = 12
     section.leading = 16

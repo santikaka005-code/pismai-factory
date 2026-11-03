@@ -11,7 +11,7 @@
   let stockController;
   async function request(path,body){
     const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),20000);
-    try{const r=await fetch((location.protocol==='file:'?'https://pf-systempro-factory.onrender.com':'')+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json','X-Session-Token':session()?.token||''},body:body?JSON.stringify(body):undefined,signal:abort.signal});const j=await r.json();if(!r.ok){const e=Error(j.error||'เชื่อมต่อไม่ได้');e.status=r.status;throw e;}return j.data;}finally{clearTimeout(timer);}
+    try{const r=await fetch((location.protocol==='file:'?'http://127.0.0.1:8787':'')+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json','X-Session-Token':session()?.token||''},body:body?JSON.stringify(body):undefined,signal:abort.signal});const j=await r.json();if(!r.ok){const e=Error(j.error||'เชื่อมต่อไม่ได้');e.status=r.status;throw e;}return j.data;}finally{clearTimeout(timer);}
   }
   function create({stock=false,onConfirmed=()=>{}}={}){
     const actor=String(session()?.user?.id||session()?.user?.username||'');

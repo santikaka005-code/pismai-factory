@@ -433,7 +433,7 @@ modules.splice(
   },
   {
     id: "accounting-control",
-    label: "PF Accounting",
+    label: "บัญชีและค่าแรง",
     roles: ["admin", "hr", "operator", "supervisor", "developer"],
     description: "พื้นที่คำนวณ วางแผน และติดตามงานบัญชีจากข้อมูลที่กรอกเอง",
     icon: "◉"
@@ -6791,7 +6791,7 @@ function renderStockHub() {
         {id: "office", label: "สำนักงาน", icon: "▤", description: "วัสดุ Office เช่น หมึก กระดาษ และอุปกรณ์สำนักงาน", details: ["รับเข้าพร้อมราคาและเอกสารอ้างอิง", "เบิกจ่ายระบุผู้รับหรือแผนก", "ยอดคงเหลือและประวัติการเคลื่อนไหว"]}
       ].map(category => `<button class="stock-choice is-${category.id}" data-route="stock-${category.id}" type="button"><span class="stock-choice-icon" aria-hidden="true">${category.icon}</span><span class="stock-choice-status">รับเข้า / เบิกออก / คงเหลือ</span><strong>Stock ${category.label}</strong><p>${category.description}</p><ul>${category.details.map(detail => `<li>${detail}</li>`).join("")}</ul><span class="stock-choice-cta">เปิด Stock ${category.label} →</span></button>`).join("")}
     </div>
-    <div class="stock-hub-note">C4 ขึ้นไปเข้าใช้งานและบันทึกรับเข้า/เบิกออกได้ · PF Accounting อยู่ในเมนูเดิมสำหรับเรื่องเงิน · Stock ผลไม้ยังเป็นข้อมูลรับซื้อ ส่วน Stock ห้องเย็นยังเป็นโหมดทดลอง</div>
+    <div class="stock-hub-note">C4 ขึ้นไปเข้าใช้งานและบันทึกรับเข้า/เบิกออกได้ · บัญชีและค่าแรง อยู่ในเมนูเดิมสำหรับเรื่องเงิน · Stock ผลไม้ยังเป็นข้อมูลรับซื้อ ส่วน Stock ห้องเย็นยังเป็นโหมดทดลอง</div>
   </section>`;
 }
 
@@ -9256,7 +9256,7 @@ function renderFullSettingsModule(user) {
     { route: "account-management", icon: "ID", tone: "purple", title: "บัญชีเข้าใช้งาน", description: "สร้างบัญชีและกำหนดสิทธิ์เข้าเว็บ" },
     { route: "audit-log", icon: "LG", tone: "slate", title: "Audit Log", description: "ตรวจสอบกิจกรรมและประวัติระบบ" },
     { route: "backup", icon: "BK", tone: "cyan", title: "สำรองข้อมูล", description: "ส่งออก นำเข้า และดูแลฐานข้อมูล" },
-    { route: "pf-desktop-app", icon: "PF", tone: "green", title: "APWS Desktop", description: "รับข้อมูลชั่งและส่งข้อมูลหลักให้เครื่องชั่ง" }
+    { route: "pf-desktop-app", icon: "APWS", tone: "green", title: "APWS Desktop", description: "รับข้อมูลชั่งและส่งข้อมูลหลักให้เครื่องชั่ง" }
   ].filter((item) => canOpen(user, item.route));
 
   return `
@@ -19660,7 +19660,7 @@ function renderInboundIssue(user) {
       <label class="field"><span>ผลไม้</span><select name="fruit_id" required ${locked ? "disabled" : ""}><option value="">เลือกผลไม้</option>${fruits.map(row => `<option value="${escapeHtml(String(row.fruit_id))}" ${String(row.fruit_id) === String(draft.fruit_id) ? "selected" : ""}>${escapeHtml(row.fruit_name)} · เหลือ ${inboundMoney(row.balance_weight)} กก.</option>`).join("")}</select></label>
       <label class="field"><span>น้ำหนักเบิก (กก.)</span><input name="weight_kg" type="number" min="0.01" max="100000000" step="0.01" value="${escapeHtml(String(draft.weight_kg || ""))}" required ${locked ? "disabled" : ""}></label>
       <label class="field inbound-note"><span>หมายเหตุ / วัตถุประสงค์</span><textarea name="note" maxlength="1000" rows="3" ${locked ? "disabled" : ""}>${escapeHtml(draft.note || "")}</textarea></label>
-      <p class="inbound-note">ตรวจยอดตามวันที่เบิกอีกครั้งก่อนบันทึก · ต้นทุนคำนวณจากล็อตรับเข้า ไม่เพิ่มค่าใช้จ่ายซ้ำใน PF Accounting</p>
+      <p class="inbound-note">ตรวจยอดตามวันที่เบิกอีกครั้งก่อนบันทึก · ต้นทุนคำนวณจากล็อตรับเข้า ไม่เพิ่มค่าใช้จ่ายซ้ำใน บัญชีและค่าแรง</p>
       <div class="inbound-entry-actions"><button class="btn btn-primary" type="submit" ${disabled ? "disabled" : ""}>${inboundIssueBusy ? "กำลังบันทึก…" : inboundIssuePending ? "ลองบันทึกเดิมอีกครั้ง" : "บันทึกเบิกผลไม้"}</button></div>
     </form></section>` : '<p class="stock-hub-note">การเบิกผลไม้ใช้สิทธิ์ C4 ขึ้นไป</p>'}${renderInboundIssueHistory()}`;
 }
@@ -19730,7 +19730,7 @@ function renderInboundEntry(user) {
   }
   const fruits = inboundActiveFruits();
   const suppliers = [...new Set(inboundData.receipts.map((row) => row.supplier_name).filter(Boolean))].sort((a, b) => a.localeCompare(b, "th"));
-  return `${renderInboundHeader("Stock ผลไม้", "รับเข้าผลไม้จากผู้ส่ง พร้อมน้ำหนัก ราคาจริง และต้นทุนที่เชื่อม PF Accounting", user)}${renderInboundStatus()}
+  return `${renderInboundHeader("Stock ผลไม้", "รับเข้าผลไม้จากผู้ส่ง พร้อมน้ำหนัก ราคาจริง และต้นทุนที่เชื่อม บัญชีและค่าแรง", user)}${renderInboundStatus()}
     <section class="panel inbound-entry-card">
       <form id="inboundEntryForm" class="inbound-entry-form">
         <label class="field"><span>วันที่รับเข้า</span><input name="received_at" type="datetime-local" value="${inboundLocalDateTime()}" required /></label>
@@ -19739,7 +19739,7 @@ function renderInboundEntry(user) {
         <div class="inbound-price-hint" id="inboundPriceHint">เลือกผู้ส่งและผลไม้เพื่อดูราคาล่าสุดหรือราคาแนะนำ</div>
         <label class="field"><span>น้ำหนัก (กก.)</span><input name="weight_kg" type="number" min="0.01" max="100000000" step="0.01" inputmode="decimal" placeholder="0.00" required /></label>
         <label class="field"><span>ราคาต่อกิโล <small>แก้ไขได้</small></span><div class="inbound-price-input"><input name="price_per_kg" type="number" min="0.01" max="1000000" step="0.01" inputmode="decimal" placeholder="0.00" required /><b>ราคาของรายการนี้</b></div></label>
-        <p class="inbound-note">กรอกราคาตามเอกสารรับเข้า ข้อมูลการเงินจะแสดงใน PF Accounting</p>
+        <p class="inbound-note">กรอกราคาตามเอกสารรับเข้า ข้อมูลการเงินจะแสดงใน บัญชีและค่าแรง</p>
         <label class="field inbound-note"><span>หมายเหตุ</span><textarea name="note" maxlength="1000" rows="3" placeholder="รายละเอียดที่ต้องการจดจำ (ไม่บังคับ)"></textarea></label>
         <div class="inbound-entry-actions"><button class="btn btn-outline" type="reset">ล้างข้อมูล</button><button class="btn btn-primary" type="submit" ${fruits.length ? "" : "disabled"}>ตรวจสอบก่อนบันทึก</button></div>
       </form>
@@ -19800,7 +19800,7 @@ function renderInboundHistory(user) {
     <section class="inbound-metrics"><div><span>น้ำหนักตามตัวกรอง</span><strong>${inboundMoney(totalWeight)}</strong><small>กก.</small></div><div><span>จำนวนรายการ</span><strong>${rows.length.toLocaleString("th-TH")}</strong><small>รายการ</small></div></section>
     <section class="panel inbound-history-panel"><form id="inboundFilterForm" class="inbound-filters"><label><span>จากวันที่</span><input name="from" type="date" value="${escapeHtml(inboundFilters.from)}" /></label><label><span>ถึงวันที่</span><input name="to" type="date" value="${escapeHtml(inboundFilters.to)}" /></label><label><span>ผู้ส่ง</span><select name="supplier"><option value="">ทั้งหมด</option>${suppliers.map((name) => `<option ${inboundFilters.supplier === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label><label><span>ผลไม้</span><select name="fruit"><option value="">ทั้งหมด</option>${inboundData.fruits.map((fruit) => `<option value="${fruit.id}" ${inboundFilters.fruit === String(fruit.id) ? "selected" : ""}>${escapeHtml(fruit.name)}</option>`).join("")}</select></label><label class="is-search"><span>ค้นหา</span><input name="search" type="search" value="${escapeHtml(inboundFilters.search)}" placeholder="ชื่อผู้ส่ง หรือหมายเหตุ" /></label><button class="btn btn-primary" type="submit">ค้นหา</button><button class="btn btn-outline" id="clearInboundFilters" type="button">ล้างตัวกรอง</button></form>
       <div class="inbound-selection-bar"><div><strong>เลือกแล้ว <span id="inboundSelectedCount">${selectedRows.length.toLocaleString("th-TH")}</span> รายการ</strong><small>รายการที่ติ๊กจะถูกรวมอยู่ในฟอร์มเดียวกัน</small></div><div><button class="btn btn-outline" id="printSelectedInbound" type="button" ${selectedRows.length ? "" : "disabled"}>พิมพ์</button><button class="btn btn-outline" id="exportSelectedInboundExcel" type="button" ${selectedRows.length ? "" : "disabled"}>Excel</button><button class="btn btn-primary" id="exportSelectedInboundPdf" type="button" ${selectedRows.length ? "" : "disabled"}>PDF</button></div></div>
-      <div class="inbound-info-strip">แสดงจำนวนรับเข้าและประวัติการทำงาน · รายละเอียดการเงินอยู่ใน PF Accounting</div>
+      <div class="inbound-info-strip">แสดงจำนวนรับเข้าและประวัติการทำงาน · รายละเอียดการเงินอยู่ใน บัญชีและค่าแรง</div>
       <div class="table-scroll"><table class="inbound-table"><thead><tr><th class="inbound-check-cell"><input id="selectAllInboundVisible" type="checkbox" ${allVisibleSelected ? "checked" : ""} aria-label="เลือกทุกรายการที่แสดง" /></th><th>วันเวลา</th><th>ผู้ส่ง</th><th>ผลไม้</th><th>น้ำหนัก</th><th>หมายเหตุ</th><th>ผู้บันทึก</th></tr></thead><tbody>${rows.map((row) => `<tr class="${inboundSelectedReceiptIds.has(Number(row.id)) ? "is-selected" : ""}"><td class="inbound-check-cell"><input class="inbound-row-check" type="checkbox" value="${Number(row.id)}" ${inboundSelectedReceiptIds.has(Number(row.id)) ? "checked" : ""} aria-label="เลือกรายการรับเข้า ${Number(row.id)}" /></td><td>${escapeHtml(new Date(row.received_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }))}</td><td><strong>${escapeHtml(row.supplier_name)}</strong></td><td>${escapeHtml(row.fruit_name)}</td><td class="number-cell">${inboundMoney(row.weight_kg)}</td><td>${escapeHtml(row.note || "-")}</td><td>${escapeHtml(row.created_by || "-")}</td></tr>`).join("") || `<tr><td colspan="7" class="empty-cell">ไม่พบรายการรับเข้า</td></tr>`}</tbody><tfoot><tr><th></th><th colspan="3">รวมทั้งหมด</th><th>${inboundMoney(totalWeight)} กก.</th><th colspan="2">${rows.length.toLocaleString("th-TH")} รายการ</th></tr></tfoot></table></div>
     </section>${renderInboundIssueHistory()}`;
 }
