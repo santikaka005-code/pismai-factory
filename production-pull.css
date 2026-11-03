@@ -43,7 +43,7 @@
 .pull-summary>div { padding:16px; background:#f0f7f4; border-radius:12px; }
 .pull-summary span { display:block; color:#536b60; font-size:13px; margin-bottom:8px; }
 .pull-summary strong { font-size:21px; color:#155940; }
-.pull-table-wrap { overflow:auto; max-height:560px; border:1px solid #dbe5df; border-radius:12px; }
+.pull-table-wrap { contain:inline-size; min-width:0; max-width:100%; overflow:auto; max-height:560px; border:1px solid #dbe5df; border-radius:12px; }
 .pull-table { width:100%; min-width:1000px; border-collapse:separate; border-spacing:0; font-size:14px; text-align:left; }
 .pull-table caption { text-align:left; padding:14px; font-weight:600; background:#f5f9f7; }
 .pull-table th { position:sticky; top:0; background:#e9f3ee; z-index:1; white-space:nowrap; }
