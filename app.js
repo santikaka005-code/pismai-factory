@@ -12195,11 +12195,16 @@ function bindProductionManagementEvents(user) {
   window.ProductionPull?.bind({
     canImport: () => canImportDesktopWeighing(getSession()?.user), refresh: render,
     isImportBusy: () => desktopImportBusy,
+    loadMasters: async () => {
+      const response = await cloudApiRequest('/api/employees');
+      if (!Array.isArray(response.data) || !response.data.length) throw Error('ไม่พบรายชื่อพนักงานในเว็บ');
+      return { employees: response.data.map(e => ({ id: String(e.id), emp_code: e.emp_code, fullname: e.fullname, status: e.status })), catalog: getDesktopCatalogPayload() };
+    },
     clearPreview: () => { desktopImportPreview = null; desktopImportMessage = ""; },
     preview: (payload) => {
       desktopImportPreview = prepareDesktopWeighingImport(payload);
       desktopImportPreview.fileName = payload.file_name;
-      desktopImportMessage = "ตรวจรายการจากเครื่องต้นทางแล้ว ยังไม่ได้ส่งเข้าคิว";
+      desktopImportMessage = payload.demo_records ? `ข้อมูลทดสอบจากเครื่องชั่งจำลอง ${payload.demo_records} รายการ · ใช้สำหรับโครงงานประกวดเท่านั้น · ยังไม่ได้ส่งเข้าคิว` : "ตรวจรายการจากเครื่องต้นทางแล้ว ยังไม่ได้ส่งเข้าคิว";
     },
     confirm: () => submitDesktopWeighingImport(getSession()?.user, Boolean(desktopImportPreview?.review))
   });
