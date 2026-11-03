@@ -39,6 +39,25 @@
 .production-pull-primary { display:flex; align-items:center; justify-content:center; gap:12px; border:0; border-radius:11px; background:#10876d; color:white; padding:15px 18px; }
 .production-pull-primary svg { width:22px; height:22px; }
 .production-pull button:disabled { opacity:.45; cursor:not-allowed; }
+.pull-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:20px 0; }
+.pull-summary>div { padding:16px; background:#f0f7f4; border-radius:12px; }
+.pull-summary span { display:block; color:#536b60; font-size:13px; margin-bottom:8px; }
+.pull-summary strong { font-size:21px; color:#155940; }
+.pull-table-wrap { overflow:auto; max-height:560px; border:1px solid #dbe5df; border-radius:12px; }
+.pull-table { width:100%; min-width:1000px; border-collapse:separate; border-spacing:0; font-size:14px; text-align:left; }
+.pull-table caption { text-align:left; padding:14px; font-weight:600; background:#f5f9f7; }
+.pull-table th { position:sticky; top:0; background:#e9f3ee; z-index:1; white-space:nowrap; }
+.pull-table th,.pull-table td { padding:14px 12px; border-bottom:1px solid #e2eae5; vertical-align:top; }
+.pull-table tbody tr:nth-child(even) { background:#f8fbf9; }
+.pull-table small { display:block; color:#62756b; font-size:12px; margin-top:5px; overflow-wrap:anywhere; max-width:210px; }
+.pull-table .pull-number { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.pull-badge { display:inline-block; border-radius:7px; padding:4px 8px; font-size:12px; white-space:nowrap; }
+.pull-ok { color:#096648; background:#e2f4e9; }
+.pull-error { color:#9a3420; background:#ffebe4; }
+.pull-demo { color:#7b5708; background:#fff3cf; margin-top:6px; }
+.pull-table .pull-row-error { background:#fff8f3; }
+.pull-pagination { justify-content:flex-end; margin:14px 0 22px; flex-wrap:wrap; }
+.pull-pagination>span { margin-right:auto; color:#62756b; font-size:13px; }
 .production-pull-note { text-align:center; color:#859188; font-size:12px; margin:20px 0 0; }
 .production-pull-sr { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
 .production-pull button:focus-visible,.production-pull-entry button:focus-visible { outline:3px solid #10876d; outline-offset:4px; }

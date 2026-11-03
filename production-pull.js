@@ -4,6 +4,26 @@ window.ProductionPull = (() => {
   function icon() {
     return '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="3" width="26" height="19" rx="2"/><path d="M16 22v6m-6 0h12"/></svg>';
   }
+  let tablePreview = null, tablePage = 0;
+  function previewTable(preview, e) {
+    if (tablePreview !== preview) { tablePreview = preview; tablePage = 0; }
+    const records = preview.payload?.records || [];
+    const accepted = new Set(preview.accepted.map(r => String(r.desktop_import?.record_id || '')));
+    const errors = new Map(preview.rejected.map(r => [r.row, r.reason]));
+    const pages = Math.max(1, Math.ceil(records.length / 100));
+    tablePage = Math.min(tablePage, pages - 1);
+    const number = (v, digits) => v !== null && v !== '' && Number.isFinite(Number(v)) ? Number(v).toLocaleString('th-TH', { minimumFractionDigits: digits, maximumFractionDigits: digits }) : '—';
+    const total = preview.accepted.reduce((sum, r) => sum + Number(r.desktop_import?.tenths || 0), 0) / 10;
+    return `<div class="pull-summary"><div><span>ดึงจากเครื่องแล้ว</span><strong>${records.length.toLocaleString('th-TH')} รายการ</strong></div><div><span>ผ่านตรวจเบื้องต้น</span><strong>${preview.accepted.length.toLocaleString('th-TH')} รายการ</strong></div><div><span>ต้องตรวจสอบ</span><strong>${preview.rejected.length.toLocaleString('th-TH')} รายการ</strong></div><div><span>น้ำหนักหลังตัด · เฉพาะที่ผ่าน</span><strong>${number(total, 1)} กก.</strong></div></div>
+      <p>รับข้อมูลจากเครื่องแล้ว · ยังไม่ได้ส่งเข้าคิวหรือยืนยันการบันทึกลงฐานข้อมูลเว็บ</p>
+      <div class="pull-table-wrap" role="region" aria-label="รายการชั่งที่ดึงจากเครื่อง" tabindex="0"><table class="pull-table"><caption>รายละเอียดรายการที่ดึงมาล่าสุด</caption><thead><tr>${['ลำดับ / รหัสรายการ', 'วันที่ / เวลาชั่ง', 'พนักงาน', 'ผลไม้ / ประเภท', 'กอง', 'ก่อนตัด (กก.)', 'หลังตัด (กก.)', 'ผลตรวจ'].map(h => `<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${records.slice(tablePage * 100, (tablePage + 1) * 100).map((r, index) => {
+        const row = tablePage * 100 + index + 1;
+        const ok = !errors.has(row) && accepted.has(String(r?.id || ''));
+        const validated = preview.accepted.find(a => a.desktop_import?.record_id === r?.id);
+        const demo = String(r?.device || '').includes('APWS-SIMULATOR') || String(r?.raw_frame || '').includes('APWS-SIMULATOR');
+        return `<tr class="${ok ? '' : 'pull-row-error'}"><td>${row}<small>${e(r?.id || '—')}</small>${demo ? '<span class="pull-badge pull-demo">ทดสอบชั่ง</span>' : ''}</td><td>${e(r?.record_date || '—')}<small>${e(validated?.record_time || String(r?.recorded_at || '').slice(11, 19) || '—')}</small></td><td>${e(r?.employee_code || '—')}<small>${e(r?.employee_name || r?.fullname || validated?.employee_name || '—')}</small></td><td>${e(r?.fruit_name || r?.fruit_id || '—')}<small>${e(r?.kind_name || r?.kind_id || '—')}</small></td><td>${e(r?.pile_no ?? r?.pile ?? '—')}</td><td class="pull-number">${number(r?.raw_kg, 3)}</td><td class="pull-number"><strong>${number(r?.weight_kg, 1)}</strong></td><td><span class="pull-badge ${ok ? 'pull-ok' : 'pull-error'}">${ok ? 'พร้อมเข้าคิว' : 'ไม่ผ่านตรวจ'}</span>${!ok ? `<small>${e(errors.get(row) || 'ไม่พบผลตรวจรายการ')}</small>` : ''}</td></tr>`;
+      }).join('')}</tbody></table></div><div class="production-pull-toolbar pull-pagination"><span>แสดง ${records.length ? tablePage * 100 + 1 : 0}–${Math.min((tablePage + 1) * 100, records.length)} จาก ${records.length} รายการ · หน้า ${tablePage + 1}/${pages}</span><button type="button" class="production-pull-file" data-pull-page="-1" ${tablePage === 0 ? 'disabled' : ''}>ก่อนหน้า</button><button type="button" class="production-pull-file" data-pull-page="1" ${tablePage + 1 >= pages ? 'disabled' : ''}>ถัดไป</button></div>`;
+  }
   async function api(path, body = {}) {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 45000);
     try {
@@ -38,6 +58,7 @@ window.ProductionPull = (() => {
       </fieldset><footer><span>ไม่เกิน 31 วัน · 5,000 รายการต่อครั้ง</span><button type="button" class="production-pull-primary" data-pull-preview ${busy || !canImport || !device?.online || !device?.paired ? 'disabled' : ''}>ตรวจรายการก่อนนำเข้า</button></footer></section>
       ${importMessage ? `<p role="status" class="production-pull-status">${e(importMessage)}</p>` : ''}
       ${preview && canImport ? `<section class="production-pull-options"><h3>ตรวจข้อมูลก่อนยืนยัน</h3><p>${e(preview.fileName)} · พร้อมนำเข้า ${preview.accepted.length} รายการ · ต้องตรวจสอบ ${preview.rejected.length} รายการ</p>
+        ${previewTable(preview, e)}
         ${preview.rejected.length ? `<details><summary>รายการที่ไม่นำเข้า</summary><ul>${preview.rejected.slice(0, 100).map(r => `<li>แถว ${r.row}: ${e(r.reason)}</li>`).join('')}</ul>${preview.rejected.length > 100 ? '<p>แสดง 100 รายการแรก กรุณาแบ่งช่วงเพื่อตรวจเพิ่มเติม</p>' : ''}</details>` : ''}
         ${preview.review ? `<p class="alert alert-error">พบข้อมูลทับกับไฟล์เดิม การยืนยันจะนำเข้าทั้งชุดและนับยอดเพิ่ม</p><ul>${(preview.review.matches || []).map(m => `<li>${e(m.file_name)}: ตรง ${m.matched}/${m.total} รายการ</li>`).join('')}</ul>` : ''}
         <div class="production-pull-toolbar"><button type="button" class="production-pull-primary" data-pull-confirm ${busy || !preview.accepted.length || preview.blocked ? 'disabled' : ''}>${preview.review ? 'ตรวจสอบแล้ว ยืนยันรับทั้งชุด' : 'ยืนยันส่งเข้าคิวบันทึก'}</button><button type="button" class="production-pull-file" data-pull-cancel ${busy ? 'disabled' : ''}>ยกเลิกชุดนี้</button></div></section>` : ''}
@@ -47,6 +68,9 @@ window.ProductionPull = (() => {
   function bind({ canImport, refresh, clearPreview, preview, confirm, isImportBusy, loadMasters }) {
     const root = document.querySelector('.production-pull');
     if (!root) return;
+    root.querySelectorAll('[data-pull-page]').forEach(button => button.addEventListener('click', () => {
+      tablePage = Math.max(0, tablePage + Number(button.dataset.pullPage)); refresh();
+    }));
     const run = async (action) => {
       if (!canImport() || state.busy || isImportBusy()) return;
       state.busy = true; state.message = ''; refresh();
