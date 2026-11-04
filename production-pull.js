@@ -44,11 +44,14 @@ window.ProductionPull = (() => {
     const device = state.devices.find(d => d.device_id === state.selected), busy = state.busy || importBusy;
     return `<section class="production-pull" aria-labelledby="productionPullTitle">
       <button type="button" class="production-pull-back" data-close-production-pull>← กลับไปบันทึกผลผลิต</button>
-      <header class="production-pull-heading"><span>APWS Desktop · ${useLocal ? 'LAN' : 'เชื่อมผ่านเว็บ'}</span><h2 id="productionPullTitle" tabindex="-1">ดึงข้อมูลจากเครื่องไลน์ผลิต</h2><p>${useLocal ? 'โหมด LAN ต้องเปิด APWS บนเครื่องที่ใช้เว็บด้วย' : 'เปิด APWS เฉพาะเครื่องชั่ง · เครื่องนี้ใช้แค่เบราว์เซอร์ได้'}</p></header>
-      ${!useLocal ? `<section class="production-pull-options"><h3>เชื่อมเครื่องชั่งผ่านเว็บ</h3><p>ที่ APWS เครื่องชั่ง กด “เชื่อม / หยุดเชื่อมผ่านเว็บ” แล้วกรอกรหัส 10 หลักด้านล่าง ทั้งสองเครื่องต้องมีอินเทอร์เน็ต หากปิดแอปหรือเซิร์ฟเวอร์เริ่มใหม่ ให้เชื่อมรหัสใหม่</p><label>รหัสจาก APWS เครื่องชั่ง<input data-pull-cloud-code inputmode="numeric" autocomplete="off" maxlength="16" placeholder="12345 67890" ${busy ? 'disabled' : ''}></label><button type="button" class="production-pull-file" data-pull-cloud-claim ${busy || !canImport ? 'disabled' : ''}>เชื่อมเครื่องชั่ง</button></section>` : ''}
-      <div class="production-pull-toolbar"><button type="button" class="production-pull-primary" data-pull-search ${busy || !canImport ? 'disabled' : ''}>${icon()}${state.busy ? 'กำลังทำงาน…' : 'ค้นหาเครื่อง'}</button><span>${useLocal ? 'เปิด APWS ทั้งสองเครื่อง · ใช้ LAN/Wi-Fi วงเดียวกัน' : 'ค้นหาเครื่องที่เชื่อมกับบัญชีเว็บนี้ · เปิด APWS ที่เครื่องชั่งค้างไว้'}</span></div>
+      <header class="production-pull-heading"><span>APWS Desktop</span><h2 id="productionPullTitle" tabindex="-1">ดึงข้อมูลจากเครื่องไลน์ผลิต</h2><p>เลือกค้นหาผ่าน LAN หรือเชื่อมผ่านอินเทอร์เน็ต แล้วเลือกเครื่องที่พบด้านล่าง</p></header>
+      <div class="pull-connection-grid">
+        <section class="production-pull-options pull-connection-card" aria-labelledby="pullLanTitle"><span class="pull-connection-label">เครือข่ายเดียวกัน</span><h3 id="pullLanTitle">ค้นหาในวง LAN</h3><p>เปิด APWS ทั้งเครื่องชั่งและเครื่องที่เปิดเว็บ ใช้ LAN/Wi-Fi วงเดียวกัน แล้วกดค้นหาเครื่อง</p><p class="pull-connection-hint">จับคู่ครั้งแรกที่เครื่องชั่ง แล้วจำเครื่องไว้สำหรับครั้งต่อไป</p><div class="production-pull-toolbar"><button type="button" class="production-pull-primary" data-pull-search ${busy || !canImport ? 'disabled' : ''}>${icon()}ค้นหาเครื่องใน LAN</button></div></section>
+        <section class="production-pull-options pull-connection-card" aria-labelledby="pullCloudTitle"><span class="pull-connection-label">เชื่อมผ่านอินเทอร์เน็ต</span><h3 id="pullCloudTitle">เชื่อมเครื่องชั่งผ่านเว็บ</h3><p>เปิด APWS เฉพาะเครื่องชั่ง · เครื่องนี้ใช้แค่เบราว์เซอร์ได้ ทั้งสองเครื่องต้องมีอินเทอร์เน็ต</p><p class="pull-connection-hint">ที่เครื่องชั่งกด “เชื่อม / หยุดเชื่อมผ่านเว็บ” หากปิดแอปหรือเซิร์ฟเวอร์เริ่มใหม่ ให้เชื่อมรหัสใหม่</p><label>รหัสจาก APWS เครื่องชั่ง<input data-pull-cloud-code inputmode="numeric" autocomplete="off" maxlength="16" placeholder="รหัส 10 หลัก เช่น 12345 67890" ${busy ? 'disabled' : ''}></label><div class="production-pull-toolbar"><button type="button" class="production-pull-primary" data-pull-cloud-claim ${busy || !canImport ? 'disabled' : ''}>เชื่อมเครื่องชั่ง</button><button type="button" class="production-pull-file" data-pull-cloud-search ${busy || !canImport ? 'disabled' : ''}>ค้นหาเครื่องที่เชื่อมไว้</button></div></section>
+      </div>
       ${!canImport ? '<p class="alert alert-error">การเชื่อมและนำเข้าข้อมูลใช้สิทธิ์ C6 ขึ้นไป</p>' : ''}
       <p role="status" aria-live="polite" class="production-pull-status">${e(state.message)}</p>
+      <div class="production-pull-options-head pull-results-heading"><h3>เครื่องที่พบ</h3><span>${state.scanned ? (useLocal ? 'ผลค้นหาจาก LAN' : 'ผลค้นหาผ่านเว็บ') : 'เลือกวิธีเชื่อมต่อด้านบน'}</span></div>
       <div class="production-pull-devices">${state.devices.map(d => `<button type="button" class="production-pull-device ${state.selected === d.device_id ? 'is-selected' : ''}" data-pull-device="${e(d.device_id)}" aria-pressed="${state.selected === d.device_id}" ${busy || !d.online || !canImport ? 'disabled' : ''}>${icon()}<strong>${e(d.name)}</strong><span>${e(d.host)} · ${d.online ? (d.paired ? 'พร้อมใช้งาน · จับคู่แล้ว' : 'เปิดแชร์ · จับคู่ครั้งแรก') : 'ติดต่อไม่ได้'}</span>${d.error ? `<small>${e(d.error)}</small>` : ''}</button>`).join('')}</div>
       ${!state.devices.length ? `<div class="production-pull-empty"><h3>${state.scanned ? 'ยังไม่พบเครื่องที่เชื่อมไว้' : 'เชื่อมเครื่องชั่งแล้วกดค้นหา'}</h3><p>${useLocal ? 'เปิด APWS ทั้งสองเครื่อง ตรวจ LAN / Firewall' : 'ติดตั้ง APWS รุ่นเชื่อมผ่านเว็บที่เครื่องชั่ง แล้วกรอกรหัสจากแอปด้านบน'}</p></div>` : ''}
       ${device && !device.paired ? `<section class="production-pull-options"><h3>เชื่อม ${e(device.name)} ครั้งแรก</h3><p>กดขอเชื่อม แล้วกดอนุญาตที่ APWS เครื่องต้นทางเพียงครั้งแรก ไม่ต้องกรอก IP หรือคัดลอกรหัส</p>${state.pairChallenge ? `<p role="status">รออนุญาตที่เครื่องต้นทาง · ตรวจว่ารหัสตรงกัน: <strong>${e(state.pairChallenge)}</strong></p>` : ''}<button type="button" class="production-pull-primary" data-pull-pair ${busy || !canImport ? 'disabled' : ''}>ขอเชื่อมและจำเครื่องนี้</button><details><summary>ใช้รหัสจับคู่แบบเดิม</summary><label>รหัสจับคู่<input type="password" data-pull-code autocomplete="off" placeholder="APWS1.…" ${busy ? 'disabled' : ''}></label></details></section>` : ''}
@@ -65,7 +68,7 @@ window.ProductionPull = (() => {
         ${preview.rejected.length ? `<details><summary>รายการที่ไม่นำเข้า</summary><ul>${preview.rejected.slice(0, 100).map(r => `<li>แถว ${r.row}: ${e(r.reason)}</li>`).join('')}</ul>${preview.rejected.length > 100 ? '<p>แสดง 100 รายการแรก กรุณาแบ่งช่วงเพื่อตรวจเพิ่มเติม</p>' : ''}</details>` : ''}
         ${preview.review ? `<p class="alert alert-error">พบข้อมูลทับกับไฟล์เดิม การยืนยันจะนำเข้าทั้งชุดและนับยอดเพิ่ม</p><ul>${(preview.review.matches || []).map(m => `<li>${e(m.file_name)}: ตรง ${m.matched}/${m.total} รายการ</li>`).join('')}</ul>` : ''}
         <div class="production-pull-toolbar"><button type="button" class="production-pull-primary" data-pull-confirm ${busy || !preview.accepted.length || preview.blocked ? 'disabled' : ''}>${preview.review ? 'ตรวจสอบแล้ว ยืนยันรับทั้งชุด' : 'ยืนยันส่งเข้าคิวบันทึก'}</button><button type="button" class="production-pull-file" data-pull-cancel ${busy ? 'disabled' : ''}>ยกเลิกชุดนี้</button></div></section>` : ''}
-      <details class="production-pull-options"><summary>LAN แบบเดิม / นำเข้าจากไฟล์</summary><p>โหมด LAN เดิมต้องเปิด APWS บนเครื่องเปิดเว็บด้วย</p><button type="button" class="production-pull-file" data-pull-switch>${useLocal ? 'ใช้การเชื่อมผ่านเว็บ' : 'ใช้ LAN แบบเดิม'}</button><button type="button" class="production-pull-file" data-route="pf-desktop-app">นำเข้าจากไฟล์ APWS</button></details>
+      <details class="production-pull-options"><summary>นำเข้าจากไฟล์ APWS</summary><p>เลือกไฟล์ข้อมูลที่ส่งออกจาก DesktopApp เพื่อตรวจรายการก่อนยืนยันนำเข้า</p><button type="button" class="production-pull-file" data-route="pf-desktop-app">นำเข้าจากไฟล์ APWS</button></details>
       <p class="production-pull-note">ส่งน้ำหนักเมื่อกดตรวจรายการเท่านั้น · ไม่มีการบันทึกเข้าฐานเว็บจนกว่าจะยืนยัน</p></section>`;
   }
   function bind({ canImport, refresh, clearPreview, preview, confirm, isImportBusy, loadMasters, cloudRequest }) {
@@ -86,16 +89,16 @@ window.ProductionPull = (() => {
       if (!state.devices.some(d => d.device_id === state.selected && d.online)) state.selected = '';
       state.message = `พบเครื่องที่ติดต่อได้ ${state.devices.filter(d => d.online).length} เครื่อง · เลือกเครื่องที่ต้องการดึงข้อมูล`;
     };
-    root.querySelector('[data-pull-switch]')?.addEventListener('click', () => {
-      if (state.busy || isImportBusy()) return;
-      useLocal=!useLocal;state.devices=[];state.selected='';state.message='';state.scanned=false;clearPreview();refresh();
-    });
+    const chooseMode = local => { useLocal=local;state.devices=[];state.selected='';state.scanned=false;clearPreview(); };
     root.querySelector('[data-pull-cloud-claim]')?.addEventListener('click', () => {
       const code=root.querySelector('[data-pull-cloud-code]').value;
-      run(async()=>{await api('claim',{code});clearPreview();await scan();state.message='เชื่อมเครื่องแล้ว เลือกเครื่องด้านล่างเพื่อดึงข้อมูล';});
+      run(async()=>{chooseMode(false);await api('claim',{code});await scan();state.message='เชื่อมเครื่องแล้ว เลือกเครื่องด้านล่างเพื่อดึงข้อมูล';});
     });
     root.querySelector('[data-pull-search]')?.addEventListener('click', () => run(async () => {
-      clearPreview(); state.devices = []; state.selected = ''; await scan();
+      chooseMode(true); await scan();
+    }));
+    root.querySelector('[data-pull-cloud-search]')?.addEventListener('click', () => run(async () => {
+      chooseMode(false); await scan();
     }));
     root.querySelectorAll('[data-pull-device]').forEach(button => button.addEventListener('click', () => {
       if (!canImport() || state.busy || isImportBusy()) return;
